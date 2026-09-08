@@ -31,6 +31,35 @@ function parseTerms(q: string): string[] {
   return out
 }
 
+interface PagerProps {
+  offset: number
+  limit: number
+  /** 当前页已经是最后一页 */
+  atEnd: boolean
+  /** 还有下一页，但撞上了后端的翻页上限 */
+  hitCap: boolean
+  maxOffset: number
+  onPage: (offset: number) => void
+}
+
+function Pager({ offset, limit, atEnd, hitCap, maxOffset, onPage }: PagerProps) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Button size="sm" disabled={offset === 0} onClick={() => onPage(Math.max(0, offset - limit))}>
+        上一页
+      </Button>
+      <Button
+        size="sm"
+        disabled={atEnd || hitCap}
+        title={hitCap ? `最多翻到第 ${formatNumber(maxOffset)} 条，请缩小范围` : atEnd ? '已经是最后一页' : undefined}
+        onClick={() => onPage(offset + limit)}
+      >
+        下一页
+      </Button>
+    </span>
+  )
+}
+
 export function LogsPage() {
   const meta = useMeta()
   const { params, set } = useUrlState()
@@ -150,6 +179,16 @@ export function LogsPage() {
   const rows = follow ? live : (search.data?.rows ?? [])
   const total = search.data?.total
   const exportParams = { ...baseParams, order }
+  const maxOffset = meta.data?.limits.max_offset ?? Infinity
+  const pager: PagerProps = {
+    offset,
+    limit,
+    // 拿回来的不满一页就是最后一页；有 total 的话再用 total 兜一下
+    atEnd: rows.length < limit || (total !== undefined && offset + rows.length >= total),
+    hitCap: rows.length >= limit && offset + limit > maxOffset,
+    maxOffset,
+    onPage: (next) => set({ offset: next || null }),
+  }
 
   const onPivot = (field: string, value: string) => {
     if (dims.includes(field)) setFilter({ ...filter, dims: { ...filter.dims, [field]: [value] } })
@@ -231,21 +270,7 @@ export function LogsPage() {
               ))}
             </Select>
           )}
-          {!follow && !byId && (
-            <>
-              <Button size="sm" disabled={offset === 0} onClick={() => set({ offset: Math.max(0, offset - limit) || null })}>
-                上一页
-              </Button>
-              <Button
-                size="sm"
-                disabled={rows.length < limit || (meta.data ? offset + limit > meta.data.limits.max_offset : false)}
-                title={meta.data && offset + limit > meta.data.limits.max_offset ? `最多翻到第 ${meta.data.limits.max_offset} 条，请缩小范围` : undefined}
-                onClick={() => set({ offset: offset + limit })}
-              >
-                下一页
-              </Button>
-            </>
-          )}
+          {!follow && !byId && <Pager {...pager} />}
           <a href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })} className="inline-flex" download title={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`}>
             <Button size="sm">
               <DownloadIcon className="size-3.5" />
@@ -282,6 +307,28 @@ export function LogsPage() {
               />
             }
           />
+        )}
+        {rows.length > 0 && (
+          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2 text-2xs text-muted-fg">
+            {follow ? (
+              <span>
+                跟随中，每 {FOLLOW_INTERVAL_MS / 1000} 秒拉一次新日志；最多保留 {formatNumber(FOLLOW_MAX_ROWS)} 行，更早的会被丢掉
+              </span>
+            ) : byId ? (
+              <span>{rows.length >= limit ? `只显示了前 ${formatNumber(limit)} 条，可以把「每页」调大` : `共 ${formatNumber(rows.length)} 条，已经到底了`}</span>
+            ) : (
+              <>
+                <span>
+                  {pager.atEnd ? '已经到底了 · ' : ''}
+                  {total !== undefined
+                    ? `第 ${formatNumber(offset + 1)} ~ ${formatNumber(offset + rows.length)} 条，共 ${formatNumber(total)} 条`
+                    : `第 ${formatNumber(offset + 1)} ~ ${formatNumber(offset + rows.length)} 条`}
+                  {pager.hitCap && '；已到翻页上限，再往后请缩小时间范围或加筛选'}
+                </span>
+                <Pager {...pager} />
+              </>
+            )}
+          </footer>
         )}
       </div>
       {contextRow && <ContextDrawer row={contextRow} dims={dims} onClose={() => setContextRow(null)} />}
