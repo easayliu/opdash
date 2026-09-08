@@ -1,0 +1,4 @@
+# 和 luban 同一套排版：100 列、小结构不强拆多行、排版规则钉在 2024 版。
+max_width = 100
+use_small_heuristics = "Max"
+style_edition = "2024"

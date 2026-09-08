@@ -19,3 +19,12 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# 前端构建产物由 rust-embed 编进二进制；留一个 .gitkeep 让没装 node 的机器也能 cargo check
+ui/dist/*
+!ui/dist/.gitkeep
+ui/node_modules
+.DS_Store
+
+# tsc 增量构建缓存
+ui/tsconfig.tsbuildinfo

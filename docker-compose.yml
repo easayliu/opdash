@@ -1,0 +1,22 @@
+# 本机跑一个 opdash 指向线上 ClickHouse：
+#   OPDASH_CLICKHOUSE_URL=http://ck:8123 OPDASH_CLICKHOUSE_USER=x OPDASH_CLICKHOUSE_PASSWORD=y docker compose up
+services:
+  opdash:
+    # 国内镜像可用：ghcr.nju.edu.cn/${IMAGE_OWNER:-easayliu}/opdash:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-easayliu}/opdash:${IMAGE_TAG:-latest}
+    container_name: opdash
+    init: true
+    ports:
+      - "${PORT:-4880}:4880"
+    environment:
+      - OPDASH_CLICKHOUSE_URL=${OPDASH_CLICKHOUSE_URL:-http://host.docker.internal:8123}
+      - OPDASH_CLICKHOUSE_USER=${OPDASH_CLICKHOUSE_USER:-default}
+      - OPDASH_CLICKHOUSE_PASSWORD=${OPDASH_CLICKHOUSE_PASSWORD:-}
+      - OPDASH_DATABASE=${OPDASH_DATABASE:-logs}
+      - OPDASH_TIMEZONE=${OPDASH_TIMEZONE:-Asia/Shanghai}
+      # 内网可不配；配了就是一组共享账号密码
+      - OPDASH_BASIC_AUTH=${OPDASH_BASIC_AUTH:-}
+      - RUST_LOG=${RUST_LOG:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
