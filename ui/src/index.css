@@ -1,0 +1,219 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+/* 深色跟 <html class="dark"> 走（见 lib/theme.ts），不直接跟系统，方便用户单独切。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --font-sans: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
+  /* Cloudflare 控制台的圆角基本只有 4px 一档：按钮、输入框、卡片都贴着直角走，
+     平面优先，靠 1px 实线描边分层，不投影。 */
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+
+  --shadow-md: 0 2px 6px -1px rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 10px 28px -8px rgb(0 0 0 / 0.18), 0 2px 6px -2px rgb(0 0 0 / 0.08);
+  --shadow-xl: 0 18px 44px -12px rgb(0 0 0 / 0.22), 0 4px 10px -4px rgb(0 0 0 / 0.1);
+
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-muted-fg: var(--muted-fg);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-card: var(--card);
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-fg: var(--brand-fg);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-face: var(--face);
+  --color-face-hover: var(--face-hover);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-debug: var(--debug);
+  --color-debug-soft: var(--debug-soft);
+  --color-selection: var(--selection);
+}
+
+:root {
+  color-scheme: light;
+  /* 色值沿用 Cloudflare 控制台设计系统（cf-ui）：品牌橙 #f6821f、charcoal 文字、moonshine 页面底、
+     smoke 描边、hail 输入框描边、marine 作为链接 / 选中态的 UI 蓝。和 luban 的 admin-ui 同一套。 */
+  --bg: #f7f7f7;
+  --fg: #333333;
+  --muted: rgb(0 0 0 / 0.05);
+  --muted-fg: #6f7173;
+  --border: #e0e0e0;
+  --input: #bcbec0;
+  --card: #ffffff;
+  --brand: #f6821f;
+  --brand-strong: #e66b00;
+  --brand-fg: #ffffff;
+  --accent: #2f7bbf;
+  --accent-fg: #ffffff;
+  --accent-soft: #e6f0f9;
+  --face: rgb(0 0 0 / 0.04);
+  --face-hover: rgb(0 0 0 / 0.1);
+  --danger: #a61e20;
+  --danger-soft: #fbe9e9;
+  --warn: #8a5a00;
+  --warn-soft: #fff1d6;
+  --ok: #047857;
+  --ok-soft: #e1f5e7;
+  --info: #0074a3;
+  --info-soft: #e3f4fb;
+  --debug: #6f7173;
+  --debug-soft: rgb(0 0 0 / 0.05);
+  --selection: #fff3c4;
+}
+
+.dark {
+  color-scheme: dark;
+  --bg: #161616;
+  --fg: #ededed;
+  --muted: rgb(255 255 255 / 0.07);
+  --muted-fg: #9a9a9a;
+  --border: #383838;
+  --input: #4a4a4a;
+  --card: #242424;
+  --brand: #ff8f33;
+  --brand-strong: #ffa557;
+  --brand-fg: #1c1c1c;
+  --accent: #4a93d1;
+  --accent-fg: #1c1c1c;
+  --accent-soft: #1e3247;
+  --face: rgb(255 255 255 / 0.12);
+  --face-hover: rgb(255 255 255 / 0.18);
+  --danger: #f08d8e;
+  --danger-soft: #3d1f1f;
+  --warn: #fcbe5c;
+  --warn-soft: #3b2e14;
+  --ok: #4ade80;
+  --ok-soft: #173123;
+  --info: #66cef4;
+  --info-soft: #17313d;
+  --debug: #9a9a9a;
+  --debug-soft: rgb(255 255 255 / 0.07);
+  --selection: #4a3f14;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100%;
+}
+
+/* 日志正文、id、SQL 这类等宽内容 */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+}
+
+/* 表格行 hover / 选中 */
+.row-hover:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.row-selected {
+  background: color-mix(in srgb, var(--accent) 12%, transparent) !important;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted-fg) 35%, transparent) transparent;
+}
+
+mark {
+  background: var(--selection);
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+
+input[type="datetime-local"],
+select {
+  color-scheme: inherit;
+}
+
+/* Cloudflare 的页签：选中项底部一道橙线 */
+.cf-tab {
+  position: relative;
+}
+.cf-tab[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--brand);
+}
+
+/* ---- 图表色（dataviz 参考配色，浅色 / 深色各自校验过）---- */
+:root {
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-7: #4a3aa7;
+  --chart-8: #e34948;
+  --chart-other: #898781;
+  --level-error: #e34948;
+  --level-warn: #eda100;
+  --level-info: #2a78d6;
+  --level-debug: #898781;
+  --level-trace: #c3c2b7;
+  --grid: #e5e5ea;
+  --axis: #c3c2b7;
+}
+.dark {
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
+  --chart-7: #9085e9;
+  --chart-8: #e66767;
+  --chart-other: #898781;
+  --level-error: #e66767;
+  /* 深色下的 WARN：能和 ERROR 拉开（ΔE 18.6，CVD 9.6）的琥珀色里最暗的一档，比推荐亮度带略亮 */
+  --level-warn: #c9a300;
+  --level-info: #3987e5;
+  --level-debug: #898781;
+  --level-trace: #5c5f6b;
+  --grid: #2a2d38;
+  --axis: #383b48;
+}
+
+/* 图表在重新加载时按住旧画面变淡 */
+.chart-stale {
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}

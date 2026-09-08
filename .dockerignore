@@ -1,0 +1,12 @@
+# 构建上下文只需要 Cargo.toml / Cargo.lock / src / ui（源码）。把 target 和
+# node_modules 带进去会让上下文膨胀到几个 G。
+target
+ui/node_modules
+ui/dist
+.git
+.github
+deploy
+tests
+README.md
+LICENSE
+docker-compose.yml
