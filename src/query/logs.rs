@@ -29,6 +29,18 @@ pub enum Expr {
     Or(Vec<Expr>),
 }
 
+/// 切到整词模式的最短词长。`app_log_local` 上有 `idx_message_tokens tokenbf_v1 ON lower(message)`，
+/// 只有整词能命中；短词按子串搜更符合直觉（搜 `health` 要能匹配 `healthcheck`），所以只有够长的
+/// 标识符才切过去——span id 16 位、trace id / msgId 32 位都覆盖得到。
+const TOKEN_MIN_LEN: usize = 16;
+
+/// 这个词能不能走 token 索引：纯 ASCII 字母数字、且够长。判断必须严格——`hasToken` 遇到带分隔符的
+/// needle 会直接抛异常，不是返回空。返回小写形式，因为索引建在 `lower(message)` 上。
+fn token_needle(term: &str) -> Option<String> {
+    let ok = term.len() >= TOKEN_MIN_LEN && term.chars().all(|c| c.is_ascii_alphanumeric());
+    ok.then(|| term.to_ascii_lowercase())
+}
+
 impl Expr {
     fn and(mut parts: Vec<Expr>) -> Option<Expr> {
         let mut flat = Vec::with_capacity(parts.len());
@@ -83,9 +95,16 @@ impl Expr {
     /// 在 `message` 上的谓词。返回的 SQL 可以直接 AND 到别的条件上（OR 一定带括号）。
     fn message_sql(&self, b: &mut Bindings) -> String {
         match self {
-            Expr::Term(t) => {
-                format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", t))
-            }
+            // 够长的整词走 tokenbf_v1，能整块跳过不含它的 granule（线上实测同一个 msgId
+            // 读取量 0.73 GB → 0.08 GB）；其余仍是子串匹配
+            Expr::Term(t) => match token_needle(t) {
+                Some(tok) => format!("hasToken(lower(message), {})", b.bind("String", &tok)),
+                None => {
+                    format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", t))
+                }
+            },
+            // 排除词一律保持子串语义：整词比子串窄，取反之后就变宽了，会漏掉本该排除的行；
+            // 而且否定条件本来就用不上 bloom filter（它只能证明「可能有」）
             Expr::Not(inner) => match &**inner {
                 Expr::Term(t) => {
                     format!("positionCaseInsensitiveUTF8(message, {}) = 0", b.bind("String", t))
@@ -372,6 +391,30 @@ impl LogFilter {
             return Err(Error::bad_request("正则太长"));
         }
         Ok(())
+    }
+
+    /// 哪些词被当成整词（而不是子串）匹配了——走了 token 索引的那些。语义比子串窄，页面要提示。
+    /// 分支必须和 [`Expr::message_sql`] 一致：只有正向的单词进索引，NOT 和 OR 组都不进。
+    pub fn token_terms(&self) -> Vec<String> {
+        fn walk(e: &Expr, out: &mut Vec<String>) {
+            match e {
+                Expr::Term(t) => {
+                    if token_needle(t).is_some() {
+                        out.push(t.clone());
+                    }
+                }
+                Expr::And(parts) => parts.iter().for_each(|p| walk(p, out)),
+                Expr::Not(_) | Expr::Or(_) => {}
+            }
+        }
+        if self.regex {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if let Some(expr) = parse_query(&self.q) {
+            walk(&expr, &mut out);
+        }
+        out
     }
 
     /// WHERE 后面的部分。
@@ -813,6 +856,63 @@ mod tests {
         // 只有操作符：没有 message 条件
         let sql = sql_of("OR AND");
         assert!(!sql.contains("(message"), "{sql}");
+    }
+
+    #[test]
+    fn long_alphanumeric_terms_use_the_token_index() {
+        let table = table();
+        let q = LogQueries { database: "logs", table: &table };
+        let sql_of = |query: &str| {
+            let filter = LogFilter { range: Some(range()), q: query.into(), ..Default::default() };
+            q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned()
+        };
+
+        // 32 位 msgId：整词，走索引，needle 转小写
+        let sql = sql_of("AC1062C800014A070CF02CD72B78E8ED");
+        assert!(sql.contains("AND hasToken(lower(message), {p2:String})"), "{sql}");
+        let filter = LogFilter {
+            range: Some(range()),
+            q: "AC1062C800014A070CF02CD72B78E8ED".into(),
+            ..Default::default()
+        };
+        let query = q.search(&filter, Order::Desc, 10, 0).unwrap();
+        assert_eq!(query.params()[2].1, "ac1062c800014a070cf02cd72b78e8ed");
+        assert_eq!(filter.token_terms(), vec!["AC1062C800014A070CF02CD72B78E8ED"]);
+
+        // 短词、带分隔符的词、中文：都退回子串（hasToken 遇到分隔符会抛异常）
+        for q_str in
+            ["health", "WX_RECOGNIZE_SHADOW", "msgId:", "直播间主动触达", "CHANGE|私信手机号为空"]
+        {
+            let sql = sql_of(q_str);
+            assert!(!sql.contains("hasToken"), "{q_str} 不该走索引: {sql}");
+            assert!(sql.contains("positionCaseInsensitiveUTF8"), "{q_str}: {sql}");
+        }
+
+        // 排除词保持子串语义：整词取反会变宽，会漏掉本该排除的行
+        let sql = sql_of("-AC1062C800014A070CF02CD72B78E8ED");
+        assert!(!sql.contains("hasToken"), "{sql}");
+        assert!(sql.contains("positionCaseInsensitiveUTF8(message, {p2:String}) = 0"), "{sql}");
+
+        // 顶层 AND 里的每个词各自判断
+        let filter = LogFilter {
+            range: Some(range()),
+            q: "AC1062C800014A070CF02CD72B78E8ED 超时".into(),
+            ..Default::default()
+        };
+        let sql = q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned();
+        assert!(sql.contains("hasToken(lower(message)"), "{sql}");
+        assert!(sql.contains("positionCaseInsensitiveUTF8"), "{sql}");
+        assert_eq!(filter.token_terms(), vec!["AC1062C800014A070CF02CD72B78E8ED"]);
+
+        // 正则模式不动，也不报整词
+        let filter = LogFilter {
+            range: Some(range()),
+            q: "AC1062C800014A070CF02CD72B78E8ED".into(),
+            regex: true,
+            ..Default::default()
+        };
+        assert!(filter.token_terms().is_empty());
+        assert!(q.search(&filter, Order::Desc, 10, 0).unwrap().sql().contains("match(message"));
     }
 
     #[test]

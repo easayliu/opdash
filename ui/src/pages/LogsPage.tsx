@@ -241,6 +241,15 @@ export function LogsPage() {
                   : ''}
         </span>
         {search.isFetching && <Spinner className="size-4" />}
+        {/* 整词模式是后端按词长自动切的，不提示的话「搜 id 的前半截搜不到」会很费解 */}
+        {!stale && !!search.data?.token_terms?.length && (
+          <span
+            className="text-2xs text-muted-fg"
+            title={`${search.data.token_terms.join('、')}：够长的标识符按整词匹配，走 message 上的 token 索引，快很多。要搜片段请用正则模式（.*）。`}
+          >
+            按整词匹配 · 已走索引
+          </span>
+        )}
         <StatsLine stats={search.data?.stats} className={cn('hidden text-2xs text-muted-fg sm:inline', stale && 'opacity-50')} />
         <div className="ml-auto flex items-center gap-2">
           {!byId && (

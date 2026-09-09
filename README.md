@@ -153,6 +153,28 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   直接忽略；词内配对的括号（`getUser(id)`）照字面搜。每个词是 `positionCaseInsensitiveUTF8(message, ...)`，
   全是词的 OR 合成一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])` 一趟扫完。message 没有索引，
   扫的是时间范围内的全部行。
+* 关键字搜索择机走 **token 索引**。`app_log_local` 上有
+  `INDEX idx_message_tokens lower(message) TYPE tokenbf_v1(131072, 3, 0) GRANULARITY 1`，
+  词是**纯 ASCII 字母数字且 ≥16 位**时（span id 16 位、trace id / msgId 32 位）发
+  `hasToken(lower(message), 小写词)`，能整块跳过不含它的 granule；其余仍是子串匹配。线上实测
+  一小时窗口查一个 msgId：**7.83 GB / 1063 ms → 0.030 GB / 140 ms，命中数一致**。
+
+  规则的边角，改之前先看清楚：
+
+  * 判断必须严格（`^[A-Za-z0-9]+$`）——`hasToken` 遇到带分隔符的 needle 会**抛异常**而不是返回空。
+  * 排除词（`-词` / `NOT 词`）一律保持子串语义：整词比子串窄，取反之后变宽，会漏掉本该排除的行；
+    否定条件本来也用不上 bloom filter。
+  * OR 组仍走 `multiSearchAnyCaseInsensitiveUTF8`，不进索引。
+  * 语义确实收紧了：搜 id 的前半截不再命中。响应里的 `token_terms` 列出哪些词按整词匹配了，
+    页面上标成「按整词匹配 · 已走索引」，要搜片段用正则模式。
+  * 短词故意不走索引——搜 `health` 得能匹配 `healthcheck`。阈值在 `TOKEN_MIN_LEN`。
+* **`ngrambf_v1` 试过，无效，别再走这条路**：8192 行日志里就有 13 万个不同 trigram，几乎覆盖整个
+  现实 trigram 空间。取 20 个 granule 对 6 个真实关键字（含 32 位十六进制 msgId）验证，一个都跳不掉。
+  token 不一样是因为它的取值空间无穷大——一个 msgId 只落在真正含它的那一两个 granule 上。
+* 用不上索引的关键字（带标点 / 中文的子串）仍要扫完时间范围内的 message：线上一小时约 8.9 GB
+  （三分片各 3 GB）。这类查询的长尾成因没查出来——不是 Keeper（复制队列全 0）、不是后台合并
+  （p90 与合并字节数相关系数 −0.12）、也不是读带宽限流。`OPDASH_QUERY_TIMEOUT` 因此设成 90s
+  而不是默认 30s（见 `deploy/`）。
 * 「共 N 条」不单独跑 `count()`：直方图各桶之和就是总数（时间条件左闭右开、桶按同一原点切，每行都
   落在某个桶里），日志页给 `/logs/search` 传 `count=0` 关掉它，省下一条扫同样数据的查询。按 trace id
   查（没有直方图）时才回到 `count()`；关键字搜索那条路走 `exact_rows_before_limit=1`，一次扫描顺带出总数。
