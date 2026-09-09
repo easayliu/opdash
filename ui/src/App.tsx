@@ -47,8 +47,10 @@ function QuickJump() {
 
 export default function App() {
   return (
-    <div className="flex min-h-dvh flex-col">
-      <header className="sticky top-0 z-20 border-b border-border bg-card">
+    // 外壳钉在视口高度，页面各自在内部滚（表头 sticky、瀑布图 / 日志分栏滚动、右侧 span 面板都靠这个），
+    // 顶栏和页脚固定；没自带滚动区的页面退回到 main 滚
+    <div className="flex h-dvh flex-col">
+      <header className="z-20 border-b border-border bg-card">
         <div className="flex h-14 items-stretch gap-4 px-4">
           <NavLink to="/logs" className="flex items-center gap-2 pr-4">
             <span className="flex size-7 items-center justify-center rounded-md bg-brand text-white">
@@ -85,7 +87,7 @@ export default function App() {
           </div>
         </div>
       </header>
-      <main className="flex min-h-0 flex-1 flex-col">
+      <main className="flex min-h-0 flex-1 flex-col overflow-auto">
         <Routes>
           <Route path="/" element={<Navigate to="/logs" replace />} />
           <Route path="/logs" element={<LogsPage />} />

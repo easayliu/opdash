@@ -5,12 +5,15 @@ import type {
   AuthMe,
   ContextResponse,
   FacetsResponse,
+  HeatmapResponse,
   HistogramResponse,
   KeysResponse,
+  LogRow,
   LogSearchResponse,
   Meta,
   OperationsResponse,
   OverviewResponse,
+  Stats,
   TimeseriesResponse,
   TraceDetailResponse,
   TraceSearchResponse,
@@ -36,6 +39,52 @@ export function useLogSearch(params: Params, enabled = true) {
     queryFn: ({ signal }) => apiGet<LogSearchResponse>('/logs/search', params, signal),
     placeholderData: keepPreviousData,
     enabled,
+  })
+}
+
+export interface TraceLogs {
+  rows: LogRow[]
+  /** 库里带这个 trace id 的总条数（count 查询超时时没有） */
+  total?: number
+  /** 翻到服务端允许的最深一页仍没拉完 */
+  truncated: boolean
+  stats: Stats
+}
+
+/**
+ * 一条 trace 的全部日志：按服务端每页上限一页页拉到没有为止，翻页深度到 max_offset 就停。
+ * 一条 trace 的日志通常几十到几百条，一页就完；异常多的也能拉到上万条。
+ */
+export function useTraceLogs(
+  filter: { trace_id: string; span_id?: string; from?: number; to?: number },
+  limits: { max_rows: number; max_offset: number } | undefined,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ['traces', 'logs', filter, limits],
+    queryFn: async ({ signal }): Promise<TraceLogs> => {
+      const limit = limits?.max_rows ?? 1000
+      const maxOffset = limits?.max_offset ?? 0
+      const rows: LogRow[] = []
+      const stats: Stats = { read_rows: 0, read_bytes: 0, result_rows: 0, elapsed_ms: 0 }
+      let total: number | undefined
+      let offset = 0
+      for (;;) {
+        const page = await apiGet<LogSearchResponse>('/logs/search', { ...filter, order: 'asc', limit, offset }, signal)
+        rows.push(...page.rows)
+        stats.read_rows += page.stats.read_rows
+        stats.read_bytes += page.stats.read_bytes
+        stats.result_rows += page.stats.result_rows
+        stats.elapsed_ms += page.stats.elapsed_ms
+        if (offset === 0) total = page.total
+        if (page.rows.length < limit) return { rows, total, truncated: false, stats }
+        offset += limit
+        if (offset > maxOffset) return { rows, total, truncated: true, stats }
+      }
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    enabled: enabled && !!limits,
   })
 }
 
@@ -76,10 +125,20 @@ export function useTraceSearch(params: Params, enabled = true) {
   })
 }
 
-export function useTraceDetail(traceId: string | undefined) {
+export function useTraceHeatmap(params: Params, enabled = true) {
   return useQuery({
-    queryKey: ['traces', 'detail', traceId],
-    queryFn: ({ signal }) => apiGet<TraceDetailResponse>(`/traces/${encodeURIComponent(traceId ?? '')}`, {}, signal),
+    queryKey: ['traces', 'heatmap', params],
+    queryFn: ({ signal }) => apiGet<HeatmapResponse>('/traces/heatmap', params, signal),
+    placeholderData: keepPreviousData,
+    enabled,
+  })
+}
+
+/** `at`：trace 开始时间（unix 毫秒），给了服务端只查前后一两天的分区，快很多 */
+export function useTraceDetail(traceId: string | undefined, at?: string | null) {
+  return useQuery({
+    queryKey: ['traces', 'detail', traceId, at ?? null],
+    queryFn: ({ signal }) => apiGet<TraceDetailResponse>(`/traces/${encodeURIComponent(traceId ?? '')}`, { at: at ?? undefined }, signal),
     enabled: !!traceId,
     staleTime: 60_000,
   })

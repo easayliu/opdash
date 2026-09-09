@@ -124,6 +124,28 @@ export interface TraceSearchResponse {
   stats: Stats
 }
 
+export interface HeatmapCell {
+  t_ms: number
+  /** 对数耗时档：耗时 ms 落在 [10^(lvl/bins), 10^((lvl+1)/bins))；最底一档（1µs）含更短的 */
+  lvl: number
+  count: number
+  errors: number
+}
+
+export interface HeatmapResponse {
+  from_ms: number
+  to_ms: number
+  width_ms: number
+  bins_per_decade: number
+  /** 实际参与统计的 span kind；没选时是入口 span */
+  kinds: string[]
+  /** 只有非空格子 */
+  cells: HeatmapCell[]
+  total: number
+  max_count: number
+  stats: Stats
+}
+
 export type AttrValue = string | number | boolean | null | AttrValue[] | { [k: string]: AttrValue }
 
 export interface SpanEvent {
@@ -163,6 +185,8 @@ export interface TraceDetailResponse {
   trace_id: string
   spans: Span[]
   truncated: boolean
+  /** 只查了开始时间附近的时间窗口（带 at 参数） */
+  windowed: boolean
   stats: Stats
 }
 

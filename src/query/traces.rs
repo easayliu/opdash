@@ -475,10 +475,23 @@ impl TraceQueries<'_> {
     }
 
     /// 链路详情：全部 span，重复的（写入重试）只留一份。多取一行用来判断有没有截断。
-    pub fn detail(&self, trace_id: &str, max_spans: u32) -> Result<Query> {
+    ///
+    /// `window` 给了就加时间谓词裁剪分区：bloom filter 是按 granule 块算的，不限时间要把
+    /// 30 天的索引块都过一遍，每个块还有 2.5% 的误报要真读；从列表页进来时知道 trace 的开始
+    /// 时间，圈到前后一两天就只剩一两个分区。
+    pub fn detail(
+        &self,
+        trace_id: &str,
+        max_spans: u32,
+        window: Option<&TimeRange>,
+    ) -> Result<Query> {
         let mut b = Bindings::new();
         let id = b.bind("String", trace_id);
         let limit = b.bind("UInt32", max_spans.saturating_add(1));
+        let time_sql = match window {
+            Some(w) => format!("\n  AND {}", b.time_predicate("timestamp", w)),
+            None => String::new(),
+        };
         let mut cols: Vec<String> = vec![
             "span_id".into(),
             "parent_span_id".into(),
@@ -508,7 +521,7 @@ impl TraceQueries<'_> {
             }
         }
         let sql = format!(
-            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
+            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}{time_sql}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
             cols = cols.join(", "),
             from = self.table_ref(),
         );
@@ -672,6 +685,34 @@ impl TraceQueries<'_> {
         );
         Ok(Self::finish(b, sql))
     }
+
+    /// 耗时 × 时间的热力图：按时间桶和对数耗时档（每个数量级 `bins_per_decade` 档）分组计数。
+    /// 格子数有上限（桶数 × 档数），不管底下多少 span，任意时间范围都能一次画出全貌，
+    /// 不像检索那样只取前 N 条。
+    pub fn heatmap(
+        &self,
+        filter: &TraceFilter,
+        bucket: &Bucket,
+        bins_per_decade: u32,
+    ) -> Result<Query> {
+        filter.validate()?;
+        let mut b = Bindings::new();
+        let where_sql = filter.where_sql(&mut b)?;
+        let origin = b.bind("Int64", bucket.origin_ms);
+        let width = b.bind("Int64", bucket.width_ms);
+        let bins = b.bind("UInt32", bins_per_decade);
+        // 1µs 以下的 span（空跑的 Consumer、duration 为 0 的）全归到最底一档，
+        // 不然纵轴要为它们多画三四个数量级；greatest(…, 1) 也顺便挡掉 log10(0)
+        let floor = b.bind("Int32", -3 * bins_per_decade as i32);
+        let sql = format!(
+            "SELECT intDiv(toUnixTimestamp64Milli(timestamp) - {origin}, {width}) AS bucket,\n  \
+             greatest(toInt32(floor(log10(greatest(toFloat64(duration_ns), 1) / 1e6) * {bins})), {floor}) AS lvl,\n  \
+             count() AS n, countIf(status_code = 'Error') AS errors\n\
+             FROM {from}\nWHERE {where_sql}\nGROUP BY bucket, lvl\nORDER BY bucket, lvl",
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
 }
 
 fn attr_column(raw: &str) -> Result<&'static str> {
@@ -719,6 +760,19 @@ pub struct TimeseriesRow {
     pub errors: u64,
     #[serde(deserialize_with = "num::de_vec")]
     pub q: Vec<f64>,
+}
+
+/// 热力图的一格：时间桶 × 对数耗时档。
+#[derive(Debug, Deserialize)]
+pub struct HeatmapRow {
+    #[serde(deserialize_with = "num::de")]
+    pub bucket: i64,
+    #[serde(deserialize_with = "num::de")]
+    pub lvl: i32,
+    #[serde(deserialize_with = "num::de")]
+    pub n: u64,
+    #[serde(deserialize_with = "num::de")]
+    pub errors: u64,
 }
 
 #[cfg(test)]
@@ -772,6 +826,35 @@ mod tests {
         assert_eq!(AttrFilter::parse("a=b=c").unwrap().value.as_deref(), Some("b=c"));
         assert_eq!(AttrFilter::parse("exception.type").unwrap().value, None);
         assert!(AttrFilter::parse("=x").is_err());
+    }
+
+    #[test]
+    fn heatmap_sql() {
+        let table = table();
+        let q = TraceQueries { database: "logs", table: &table };
+        let filter = TraceFilter {
+            range: Some(range()),
+            kinds: vec!["Server".into(), "Consumer".into()],
+            error_only: true,
+            ..Default::default()
+        };
+        let hm = q.heatmap(&filter, &Bucket { width_ms: 30_000, origin_ms: 0 }, 4).unwrap();
+        let sql = hm.sql();
+        assert!(sql.contains("span_kind IN {p2:Array(String)}"), "{sql}");
+        assert!(sql.contains("status_code = 'Error'"), "{sql}");
+        assert!(
+            sql.contains("log10(greatest(toFloat64(duration_ns), 1) / 1e6) * {p5:UInt32}"),
+            "{sql}"
+        );
+        assert!(sql.contains("GROUP BY bucket, lvl"), "{sql}");
+        assert_eq!(hm.params()[3].1, "0");
+        assert_eq!(hm.params()[4].1, "30000");
+        assert_eq!(hm.params()[5].1, "4");
+        assert!(sql.contains("{p6:Int32}) AS lvl"), "{sql}");
+        assert_eq!(hm.params()[6].1, "-12");
+        assert!(
+            q.heatmap(&TraceFilter::default(), &Bucket { width_ms: 1, origin_ms: 0 }, 4).is_err()
+        );
     }
 
     #[test]
@@ -853,14 +936,23 @@ mod tests {
     fn detail_sql_dedupes_and_over_fetches() {
         let table = table();
         let q = TraceQueries { database: "logs", table: &table };
-        let d = q.detail("abc", 5000).unwrap();
-        assert!(d.sql().contains("WHERE trace_id = {p0:String}"), "{}", d.sql());
+        let d = q.detail("abc", 5000, None).unwrap();
+        assert!(d.sql().contains("WHERE trace_id = {p0:String}\nORDER BY"), "{}", d.sql());
         assert!(
             d.sql().ends_with("ORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {p1:UInt32}")
         );
         assert_eq!(d.params()[1].1, "5001");
         assert!(d.sql().contains("`events.attributes` AS event_attrs"));
         assert!(d.sql().contains(", `cluster`\n"), "{}", d.sql());
+        let w = q.detail("abc", 5000, Some(&range())).unwrap();
+        assert!(
+            w.sql().contains(
+                "WHERE trace_id = {p0:String}\n  AND timestamp >= fromUnixTimestamp64Milli({p2:Int64}) AND timestamp < fromUnixTimestamp64Milli({p3:Int64})\nORDER BY"
+            ),
+            "{}",
+            w.sql()
+        );
+        assert_eq!(w.params()[2].1, "1000000");
     }
 
     #[test]

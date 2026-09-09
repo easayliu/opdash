@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { CopyIcon } from 'lucide-react'
-import { useLogSearch, useMeta, useTraceDetail } from '@/api/queries'
-import { LogTable } from '@/components/LogTable'
+import { useMeta, useTraceDetail, useTraceLogs } from '@/api/queries'
+import { LogTable, sortLogRows, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { SpanPanel, Waterfall, buildTree } from '@/components/Waterfall'
@@ -15,7 +15,7 @@ export function TraceDetailPage() {
   const { traceId = '' } = useParams<{ traceId: string }>()
   const meta = useMeta()
   const { params, set } = useUrlState()
-  const detail = useTraceDetail(traceId)
+  const detail = useTraceDetail(traceId, params.get('at'))
   const selected = params.get('span')
   const logsOnlySpan = params.get('span_logs') === '1'
   const [showLogs, setShowLogs] = useState(params.get('tab') !== 'none')
@@ -30,7 +30,15 @@ export function TraceDetailPage() {
   }, [spans])
   const selectedSpan = spans.find((s) => s.span_id === selected) ?? null
   const root = tree.roots[0]?.span
-  const errors = spans.filter((s) => s.status === 'Error').length
+  const errorSpans = useMemo(() => spans.filter((s) => s.status === 'Error').sort((a, b) => a.start_us - b.start_us), [spans])
+  const errors = errorSpans.length
+  // 点顶部的错误数：选中下一个出错的 span（从当前选中的往后数，到头再绕回第一个），瀑布图会滚过去
+  const jumpToError = () => {
+    if (!errors) return
+    const idx = errorSpans.findIndex((s) => s.span_id === selected)
+    const next = errorSpans[(idx + 1) % errors]
+    set({ span: next.span_id, span_logs: null }, { replace: true })
+  }
 
   useEffect(() => {
     document.title = root ? `${root.service} ${root.name} · opdash` : 'opdash'
@@ -39,10 +47,35 @@ export function TraceDetailPage() {
     }
   }, [root])
 
-  const logs = useLogSearch(
-    { trace_id: traceId, span_id: logsOnlySpan && selected ? selected : undefined, order: 'asc', limit: 500 },
-    showLogs && meta.isSuccess && !!traceId,
+  // 一条 trace 的日志全拉下来，排序在浏览器里做（点表头）。
+  // 知道开始时间就圈到前 1 小时、后 24 小时：日志表按 trace id 找同样靠 bloom filter，不限时间要扫全部分区
+  const at = Number(params.get('at')) || undefined
+  const logs = useTraceLogs(
+    {
+      trace_id: traceId,
+      span_id: logsOnlySpan && selected ? selected : undefined,
+      from: at && at - 3_600_000,
+      to: at && at + 24 * 3_600_000,
+    },
+    meta.data?.limits,
+    showLogs && !!traceId,
   )
+  const [sort, setSort] = useState<LogSort>({ key: 'ts_ms', dir: 'asc' })
+  const onSort = (key: string) => setSort((s) => ({ key, dir: s.key === key && s.dir === 'asc' ? 'desc' : 'asc' }))
+  const sortedLogs = useMemo(() => (logs.data ? sortLogRows(logs.data.rows, sort) : []), [logs.data, sort])
+  const selectedLogCount = useMemo(() => (selected ? sortedLogs.filter((r) => r.span_id === selected).length : 0), [sortedLogs, selected])
+  // 点了 span 就把它的日志高亮，并把第一条滚到日志区顶部（留出 sticky 表头的高度）。
+  // 不用 scrollIntoView：它会连外层容器一起滚，而且会把行塞到表头底下。
+  const logsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const box = logsRef.current
+    if (!box || !selected || logsOnlySpan) return
+    const row = box.querySelector<HTMLTableRowElement>('tr[data-selected]')
+    if (!row) return
+    const head = box.querySelector('thead')?.getBoundingClientRect().height ?? 0
+    const top = row.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - head - 4
+    box.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+  }, [selected, logsOnlySpan, sortedLogs])
   const dims = meta.data?.logs.dimensions ?? []
 
   return (
@@ -97,7 +130,15 @@ export function TraceDetailPage() {
             </div>
             <div>
               <dt className="text-2xs text-muted-fg">错误</dt>
-              <dd className="tabular-nums">{errors > 0 ? <Badge tone="danger">{errors}</Badge> : 0}</dd>
+              <dd className="tabular-nums">
+                {errors > 0 ? (
+                  <button type="button" onClick={jumpToError} title={errors > 1 ? '点击跳到下一个出错的 span' : '点击跳到出错的 span'} className="cursor-pointer">
+                    <Badge tone="danger">{errors}</Badge>
+                  </button>
+                ) : (
+                  0
+                )}
+              </dd>
             </div>
           </dl>
         )}
@@ -109,6 +150,16 @@ export function TraceDetailPage() {
             </span>
           ))}
           <StatsLine stats={detail.data?.stats} />
+          {detail.data?.windowed && (
+            <button
+              type="button"
+              className="text-accent hover:underline"
+              title="只查了开始时间前 1 小时到后 24 小时的 span；怀疑漏了就查全部时间（慢）"
+              onClick={() => set({ at: null }, { replace: true })}
+            >
+              查全部时间
+            </button>
+          )}
         </div>
       </header>
       <div className="flex min-h-0 flex-1">
@@ -136,8 +187,16 @@ export function TraceDetailPage() {
             <div className="flex h-10 shrink-0 items-center gap-2 px-4 text-xs">
               <Button variant="ghost" size="xs" onClick={() => setShowLogs((v) => !v)}>
                 {showLogs ? '▾' : '▸'} 关联日志
-                {logs.data && ` (${logs.data.rows.length}${logs.data.rows.length >= 500 ? '+' : ''})`}
+                {logs.data && ` (${logs.data.rows.length})`}
               </Button>
+              {showLogs && selected && !logsOnlySpan && logs.data && (
+                <span className="text-2xs text-muted-fg">选中 span 的 {selectedLogCount} 条已高亮</span>
+              )}
+              {logs.data?.truncated && (
+                <Badge tone="warn" title={`翻页深度到了上限 ${meta.data?.limits.max_offset ?? ''}，库里共 ${logs.data.total ?? '?'} 条，只拉了前面这些`}>
+                  未拉全
+                </Badge>
+              )}
               {showLogs && selected && (
                 <Button size="xs" active={logsOnlySpan} onClick={() => set({ span_logs: logsOnlySpan ? null : '1' }, { replace: true })}>
                   只看选中 span 的日志
@@ -152,13 +211,16 @@ export function TraceDetailPage() {
               </span>
             </div>
             {showLogs && (
-              <div className="min-h-0 flex-1 overflow-auto border-t border-border/60">
+              <div ref={logsRef} className="min-h-0 flex-1 overflow-auto border-t border-border/60">
                 {logs.isError && <ErrorBox error={logs.error} />}
                 {logs.data && (
                   <LogTable
-                    rows={logs.data.rows}
+                    rows={sortedLogs}
                     dims={dims}
                     compact
+                    selectedSpanId={logsOnlySpan ? null : selected}
+                    sort={sort}
+                    onSort={onSort}
                     emptyText={
                       <span>
                         没有带这个 trace id 的日志。{selected && logsOnlySpan ? '试试取消「只看选中 span」。' : '日志里要打 [TID:…] 才能关联；Go / nginx 这类不打 TID 的服务这里看不到。'}
