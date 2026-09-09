@@ -6,13 +6,35 @@ use anyhow::Context;
 use clap::Parser;
 
 use opdash::api::{self, AppState};
+use opdash::auth::Auth;
 use opdash::clickhouse::{Client, ClientOptions};
 use opdash::config::Config;
 use opdash::query::parse_tz;
 use opdash::schema::SchemaCache;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // 要在起任何线程之前改环境变量（remove_var 的 unsafe 就是怕别的线程同时在读），
+    // 所以不用 #[tokio::main]，先清理再手动建 runtime
+    strip_empty_env();
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run())
+}
+
+/// 值为空的 `OPDASH_*` 环境变量等于没配。k8s 的 Secret / compose 的 `${VAR:-}` 留空时传进来的是
+/// 空串，clap 会原样交给解析器，`--basic-auth ""` 这种就会报格式错误、起不来。
+fn strip_empty_env() {
+    let empty: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, v)| {
+            let k = k.into_string().ok()?;
+            (k.starts_with("OPDASH_") && v.is_empty()).then_some(k)
+        })
+        .collect();
+    for k in empty {
+        // SAFETY: 在 main 最开头、还没起任何线程时调用，没有并发的 getenv
+        unsafe { std::env::remove_var(k) };
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     init_logging();
     let config = Config::parse();
     config.validate().map_err(anyhow::Error::msg)?;
@@ -51,16 +73,31 @@ async fn main() -> anyhow::Result<()> {
     Arc::clone(&schema).spawn_refresher(config.schema_refresh);
 
     let bind = config.bind;
-    let auth = config.basic_auth.clone();
+    let auth = Auth::from_config(&config);
+    if let Some(oidc) = auth.oidc() {
+        // 和表结构一样：Keycloak 没起来也照样启动，登录时再试
+        match oidc.discover().await {
+            Ok(d) => tracing::info!(issuer = %d.issuer, client_id = %oidc.client_id, "OIDC 已就绪"),
+            Err(e) => tracing::warn!(error = %e, "启动时连不上 OIDC 提供方，登录时再试"),
+        }
+        if config.session_secret.is_none() {
+            tracing::info!("没配 --session-secret，会话密钥随机生成：重启后需要重新登录");
+        }
+    }
     let state = AppState { config: Arc::new(config), client, schema };
-    let app = api::app(state, auth.as_ref());
+    let app = api::app(state, auth.clone());
 
     let listener =
         tokio::net::TcpListener::bind(bind).await.with_context(|| format!("监听 {bind}"))?;
     tracing::info!(
         "opdash v{} 已启动: http://{bind}{}",
         env!("CARGO_PKG_VERSION"),
-        if auth.is_some() { "（已开启 Basic 认证）" } else { "" }
+        match auth.mode() {
+            "oidc" if auth.basic().is_some() => "（OIDC 登录 + Basic 认证）",
+            "oidc" => "（OIDC 登录）",
+            "basic" => "（已开启 Basic 认证）",
+            _ => "",
+        }
     );
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
     tracing::info!("已退出");

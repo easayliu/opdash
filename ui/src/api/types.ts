@@ -20,6 +20,14 @@ export interface TableMeta {
   dimensions: string[]
 }
 
+/** GET /api/auth/me：登录方式和当前用户。`mode === 'oidc'` 且 `user` 为空 = 该去登录了。 */
+export interface AuthMe {
+  mode: 'none' | 'basic' | 'oidc'
+  user: { name: string; email: string | null } | null
+  login_url: string | null
+  logout_url: string | null
+}
+
 export interface Meta {
   version: string
   database: string

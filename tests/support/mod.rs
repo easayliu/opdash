@@ -302,19 +302,37 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
         &config.log_table,
         &config.trace_table,
     ));
-    let auth = config.basic_auth.clone();
+    let auth = opdash::auth::Auth::from_config(&config);
     let state = AppState { config: Arc::new(config), client, schema };
-    api::app(state, auth.as_ref())
+    api::app(state, auth)
 }
 
 /// 发一个 GET，拿回 (状态码, 响应体 JSON)。
 pub async fn get_json(app: &axum::Router, uri: &str) -> (u16, serde_json::Value) {
-    let (status, body) = get_raw(app, uri, &[]).await;
+    get_json_with(app, uri, &[]).await
+}
+
+pub async fn get_json_with(
+    app: &axum::Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (u16, serde_json::Value) {
+    let (status, body) = get_raw(app, uri, headers).await;
     let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
 pub async fn get_raw(app: &axum::Router, uri: &str, headers: &[(&str, &str)]) -> (u16, Vec<u8>) {
+    let (status, _, body) = get_full(app, uri, headers).await;
+    (status, body)
+}
+
+/// 同上，连响应头一起要（认证测试要看 Location / Set-Cookie）。头名小写，同名的各占一项。
+pub async fn get_full(
+    app: &axum::Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -325,6 +343,15 @@ pub async fn get_raw(app: &axum::Router, uri: &str, headers: &[(&str, &str)]) ->
     }
     let response = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
     let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+        .collect();
     let body = response.into_body().collect().await.unwrap().to_bytes().to_vec();
-    (status, body)
+    (status, headers, body)
+}
+
+pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }

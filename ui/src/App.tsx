@@ -3,6 +3,7 @@ import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router'
 import { ActivityIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
+import { UserMenu } from '@/components/UserMenu'
 import { Input } from '@/components/ui'
 import { cn, isHexId } from '@/lib/utils'
 import { LogsPage } from '@/pages/LogsPage'
@@ -31,13 +32,13 @@ function QuickJump() {
     setValue('')
   }
   return (
-    <form onSubmit={submit} className="relative hidden w-72 md:block">
-      <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
+    <form onSubmit={submit} className="relative hidden w-80 md:block">
+      <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-fg" />
       <Input
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder="trace id 直达，或输入关键字搜日志"
-        className="pl-8"
+        className="pl-9"
         aria-label="快速跳转"
       />
     </form>
@@ -48,12 +49,12 @@ export default function App() {
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="sticky top-0 z-20 border-b border-border bg-card">
-        <div className="flex h-12 items-stretch gap-3 px-3">
-          <NavLink to="/logs" className="flex items-center gap-2 pr-3">
-            <span className="flex size-6 items-center justify-center rounded-md bg-brand text-white">
-              <ActivityIcon className="size-3.5" />
+        <div className="flex h-14 items-stretch gap-4 px-4">
+          <NavLink to="/logs" className="flex items-center gap-2 pr-4">
+            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-white">
+              <ActivityIcon className="size-4" />
             </span>
-            <span className="text-sm font-semibold tracking-tight">opdash</span>
+            <span className="text-base font-semibold tracking-tight">opdash</span>
           </NavLink>
           <nav className="flex items-stretch gap-1">
             {NAV.map(({ to, label, icon: Icon }) => (
@@ -62,24 +63,25 @@ export default function App() {
                 to={to}
                 className={({ isActive }) =>
                   cn(
-                    'cf-tab flex items-center gap-1.5 px-2.5 text-[13px] font-medium text-muted-fg hover:text-fg',
+                    'cf-tab flex items-center gap-1.5 px-3 text-sm font-medium text-muted-fg hover:text-fg',
                     isActive && 'text-fg',
                   )
                 }
               >
                 {({ isActive }) => (
                   <span className="cf-tab flex h-full items-center gap-1.5" data-active={isActive ? 'true' : undefined}>
-                    <Icon className="size-3.5" />
+                    <Icon className="size-4" />
                     {label}
                   </span>
                 )}
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-2 py-2">
+          <div className="ml-auto flex items-center gap-2 py-2.5">
             <QuickJump />
             <TimeRangePicker />
             <ThemeSwitcher />
+            <UserMenu />
           </div>
         </div>
       </header>
@@ -94,7 +96,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/logs" replace />} />
         </Routes>
       </main>
-      <footer className="flex h-7 items-center justify-end gap-3 border-t border-border px-3 text-2xs text-muted-fg">
+      <footer className="flex h-8 items-center justify-end gap-3 border-t border-border px-4 text-2xs text-muted-fg">
         <span>opdash v{__APP_VERSION__}</span>
       </footer>
     </div>

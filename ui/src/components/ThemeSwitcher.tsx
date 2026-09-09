@@ -16,7 +16,7 @@ export function ThemeSwitcher() {
     setMode(m)
   }
   return (
-    <Button variant="ghost" className="px-2" onClick={next} title={`主题：${LABELS[mode]}（点击切换）`}>
+    <Button variant="ghost" className="px-2.5" onClick={next} title={`主题：${LABELS[mode]}（点击切换）`}>
       <Icon className="size-4" />
     </Button>
   )

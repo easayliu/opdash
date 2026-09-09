@@ -2,6 +2,7 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { apiGet, type Params } from './client'
 import type {
+  AuthMe,
   ContextResponse,
   FacetsResponse,
   HistogramResponse,
@@ -15,6 +16,15 @@ import type {
   TraceSearchResponse,
   ValuesResponse,
 } from './types'
+
+export function useAuthMe() {
+  return useQuery({
+    queryKey: ['auth', 'me'],
+    queryFn: () => apiGet<AuthMe>('/auth/me'),
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
+}
 
 export function useMeta() {
   return useQuery({ queryKey: ['meta'], queryFn: () => apiGet<Meta>('/meta'), staleTime: 5 * 60_000 })

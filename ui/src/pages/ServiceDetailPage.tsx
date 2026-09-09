@@ -66,20 +66,20 @@ export function ServiceDetailPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-3 border-b border-border bg-card px-3 py-2">
-        <Link to="/services" className="text-xs text-muted-fg hover:text-fg">
+      <header className="flex flex-wrap items-center gap-3 border-b border-border bg-card px-4 py-3">
+        <Link to="/services" className="text-sm text-muted-fg hover:text-fg">
           ← 服务
         </Link>
-        <h1 className="text-sm font-semibold">{service}</h1>
+        <h1 className="text-base font-semibold">{service}</h1>
         {op && (
-          <span className="inline-flex items-center gap-1 rounded-md bg-accent-soft px-2 py-0.5 text-2xs text-accent">
+          <span className="inline-flex items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
             {op}
             <button type="button" onClick={() => set({ op: null })} title="看整个服务">
               ✕
             </button>
           </span>
         )}
-        <span className="ml-auto flex items-center gap-1.5">
+        <span className="ml-auto flex items-center gap-2">
           <Link to={`/traces?service=${encodeURIComponent(service)}${op ? `&span_name=${encodeURIComponent(op)}` : ''}&kind=Server,Consumer&sort=duration`}>
             <Button size="sm">最慢的链路</Button>
           </Link>
@@ -91,43 +91,43 @@ export function ServiceDetailPage() {
           </Link>
         </span>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-3">
-        <div className="grid gap-3 lg:grid-cols-2">
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <div className="grid gap-4 lg:grid-cols-2">
           <Card title={`请求量与错误${op ? `：${op}` : ''}`} extra={<StatsLine stats={ts.data?.stats} />}>
-            <div className="px-2 pt-2">
+            <div className="px-3 pt-3 pb-1">
               {ts.isError ? (
                 <ErrorBox error={ts.error} />
               ) : (
                 <>
                   <Legend series={TRAFFIC_SERIES} className="px-1" />
-                  <StackedBars fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} buckets={traffic} series={TRAFFIC_SERIES} height={160} stale={ts.isFetching} />
+                  <StackedBars fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} buckets={traffic} series={TRAFFIC_SERIES} height={190} stale={ts.isFetching} />
                 </>
               )}
             </div>
           </Card>
           <Card title="延迟分位（毫秒）">
-            <div className="px-2 pt-2">
+            <div className="px-3 pt-3 pb-1">
               {ts.isError ? (
                 <ErrorBox error={ts.error} />
               ) : (
                 <>
                   <Legend series={LATENCY_SERIES} className="px-1" />
-                  <LineChart fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} points={points} series={LATENCY_SERIES} height={160} stale={ts.isFetching} format={(v) => formatDurationMs(v)} />
+                  <LineChart fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} points={points} series={LATENCY_SERIES} height={190} stale={ts.isFetching} format={(v) => formatDurationMs(v)} />
                 </>
               )}
             </div>
           </Card>
         </div>
         <Card
-          className="mt-3"
+          className="mt-4 overflow-hidden"
           title={
             <span className="flex items-center gap-1">
               {(['entry', 'client'] as const).map((k) => (
-                <button key={k} type="button" onClick={() => set({ kind: k === 'entry' ? null : k, op: null })} className={cn('rounded-sm px-2 py-0.5', kind === k ? 'bg-accent-soft text-accent' : 'text-muted-fg hover:text-fg')}>
+                <button key={k} type="button" onClick={() => set({ kind: k === 'entry' ? null : k, op: null })} className={cn('rounded-sm px-2.5 py-1', kind === k ? 'bg-accent-soft text-accent' : 'text-muted-fg hover:text-fg')}>
                   {k === 'entry' ? '入口接口' : '下游调用'}
                 </button>
               ))}
-              {ops.isFetching && <Spinner className="size-3" />}
+              {ops.isFetching && <Spinner className="size-3.5" />}
             </span>
           }
           extra={<StatsLine stats={ops.data?.stats} />}
@@ -140,13 +140,13 @@ export function ServiceDetailPage() {
           )}
           {ops.data && !rows.length && <EmptyState title={kind === 'entry' ? '没有入口 span' : '没有对外调用的 span'} />}
           {rows.length > 0 && (
-            <table className="w-full border-collapse text-xs">
+            <table className="w-full table-fixed border-collapse text-xs">
               <thead className="text-2xs text-muted-fg">
-                <tr className="border-b border-border">
+                <tr className="border-b border-border bg-muted/40">
                   {cols.map((c) => (
                     <th
                       key={c.key}
-                      className={cn('cursor-pointer px-3 py-1.5 font-medium select-none hover:text-fg', c.right ? 'text-right' : 'text-left', sort.key === c.key && 'text-accent')}
+                      className={cn('cursor-pointer px-4 py-2.5 font-medium select-none hover:text-fg', c.right ? 'w-28 text-right' : 'text-left', sort.key === c.key && 'text-accent')}
                       onClick={() => setSort((s) => ({ key: c.key, desc: s.key === c.key ? !s.desc : c.key !== 'span_name' }))}
                     >
                       {c.label}
@@ -159,22 +159,22 @@ export function ServiceDetailPage() {
                 {rows.map((o) => (
                   <tr
                     key={`${o.kind}:${o.span_name}`}
-                    className={cn('row-hover cursor-pointer border-b border-border/60', op === o.span_name && 'row-selected')}
+                    className={cn('row-hover cursor-pointer border-b border-border/60 last:border-b-0', op === o.span_name && 'row-selected')}
                     onClick={() => set({ op: op === o.span_name ? null : o.span_name })}
                     title="点击只看这个操作的趋势"
                   >
-                    <td className="max-w-[40rem] truncate px-3 py-1.5 font-medium" title={o.span_name}>
+                    <td className="truncate px-4 py-2.5 font-medium" title={o.span_name}>
                       {o.span_name} <span className="text-2xs font-normal text-muted-fg">{o.kind}</span>
                     </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{formatNumber(o.requests)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{o.errors ? formatNumber(o.errors) : <span className="text-muted-fg">0</span>}</td>
-                    <td className="px-3 py-1.5 text-right">
+                    <td className="px-4 py-2.5 text-right tabular-nums">{formatNumber(o.requests)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{o.errors ? formatNumber(o.errors) : <span className="text-muted-fg">0</span>}</td>
+                    <td className="px-4 py-2.5 text-right">
                       <ErrorRate rate={o.error_rate} />
                     </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{formatDurationMs(o.p50_ms)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{formatDurationMs(o.p95_ms)}</td>
-                    <td className="px-3 py-1.5 text-right font-medium tabular-nums">{formatDurationMs(o.p99_ms)}</td>
-                    <td className="px-3 py-1.5 text-right text-muted-fg tabular-nums">{formatDurationMs(o.max_ms)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{formatDurationMs(o.p50_ms)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{formatDurationMs(o.p95_ms)}</td>
+                    <td className="px-4 py-2.5 text-right font-medium tabular-nums">{formatDurationMs(o.p99_ms)}</td>
+                    <td className="px-4 py-2.5 text-right text-muted-fg tabular-nums">{formatDurationMs(o.max_ms)}</td>
                   </tr>
                 ))}
               </tbody>

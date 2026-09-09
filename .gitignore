@@ -28,3 +28,6 @@ ui/node_modules
 
 # tsc 增量构建缓存
 ui/tsconfig.tsbuildinfo
+
+# k8s 部署文件：带内部域名和密钥，只留本地
+deploy/

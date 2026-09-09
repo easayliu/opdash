@@ -29,7 +29,7 @@ interface Props {
   className?: string
 }
 
-const M = { left: 44, right: 8, top: 8, bottom: 20 }
+const M = { left: 48, right: 8, top: 8, bottom: 22 }
 
 /** 按时间分桶的堆叠柱状图：日志直方图、请求量 / 错误数都用它。 */
 export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, className }: Props) {
@@ -94,14 +94,14 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
           {yTicks.map((v) => (
             <g key={v}>
               <line x1={M.left} x2={M.left + W} y1={yOf(v)} y2={yOf(v)} stroke="var(--grid)" strokeWidth={1} />
-              <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill="var(--muted-fg)" className="tabular-nums">
+              <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={11} fill="var(--muted-fg)" className="tabular-nums">
                 {formatCompact(v)}
               </text>
             </g>
           ))}
           <line x1={M.left} x2={M.left + W} y1={M.top + H} y2={M.top + H} stroke="var(--axis)" strokeWidth={1} />
           {ticks.map((t) => (
-            <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={10} fill="var(--muted-fg)">
+            <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
               {formatTick(t, widthMs)}
             </text>
           ))}

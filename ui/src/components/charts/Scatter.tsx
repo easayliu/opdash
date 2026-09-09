@@ -25,7 +25,7 @@ interface Props {
   className?: string
 }
 
-const M = { left: 48, right: 8, top: 8, bottom: 20 }
+const M = { left: 52, right: 8, top: 8, bottom: 22 }
 
 /** 耗时 × 时间的散点图（对数纵轴），一眼看出离群点。点的命中区比点本身大得多。 */
 export function Scatter({ fromMs, toMs, points, height = 160, stale, onClick, selected, className }: Props) {
@@ -42,8 +42,11 @@ export function Scatter({ fromMs, toMs, points, height = 160, stale, onClick, se
     return { lo: Math.pow(10, Math.floor(Math.log10(lo))), hi: Math.pow(10, Math.ceil(Math.log10(hi))) }
   }, [points])
   const yOf = (v: number) => M.top + H - ((Math.log10(Math.max(v, lo)) - Math.log10(lo)) / Math.max(1e-9, Math.log10(hi) - Math.log10(lo))) * H
-  const yTicks: number[] = []
-  for (let v = lo; v <= hi; v *= 10) yTicks.push(v)
+  // 对数刻度每 10 倍一档；高度不够时隔档抽稀，别让标签叠在一起
+  const allTicks: number[] = []
+  for (let v = lo; v <= hi; v *= 10) allTicks.push(v)
+  const every = Math.max(1, Math.ceil(allTicks.length / Math.max(1, Math.floor(H / 18))))
+  const yTicks = allTicks.filter((_, i) => i % every === 0)
   const ticks = useMemo(() => timeTicks(fromMs, toMs), [fromMs, toMs])
 
   const onMove = (e: PointerEvent<SVGSVGElement>) => {
@@ -78,14 +81,14 @@ export function Scatter({ fromMs, toMs, points, height = 160, stale, onClick, se
           {yTicks.map((v) => (
             <g key={v}>
               <line x1={M.left} x2={M.left + W} y1={yOf(v)} y2={yOf(v)} stroke="var(--grid)" strokeWidth={1} />
-              <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill="var(--muted-fg)">
+              <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={11} fill="var(--muted-fg)">
                 {formatDurationMs(v)}
               </text>
             </g>
           ))}
           <line x1={M.left} x2={M.left + W} y1={M.top + H} y2={M.top + H} stroke="var(--axis)" strokeWidth={1} />
           {ticks.map((t) => (
-            <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={10} fill="var(--muted-fg)">
+            <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
               {formatTick(t, span / 8)}
             </text>
           ))}

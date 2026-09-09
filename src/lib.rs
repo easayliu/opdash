@@ -8,8 +8,10 @@
 //! ```
 //!
 //! 只读：没有任何写库路径，每个请求都带 `readonly=2`。
+//! 认证可选：Basic 一组密码，或 OIDC 跳 Keycloak 登录（`auth` 模块）。
 
 pub mod api;
+pub mod auth;
 pub mod clickhouse;
 pub mod config;
 pub mod error;

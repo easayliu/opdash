@@ -127,8 +127,8 @@ interface Props {
   onSelect: (spanId: string | null) => void
 }
 
-const ROW_H = 26
-const LEFT_W = 360
+const ROW_H = 30
+const LEFT_W = 400
 /** 条至少画这么宽，不然 1ms 的 span 在 30s 的轴上根本看不见 */
 const MIN_BAR_PCT = 0.15
 
@@ -200,8 +200,8 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
 
   return (
     <div className="relative min-w-0 overflow-auto">
-      <div className="sticky top-0 z-[1] flex h-7 border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: LEFT_W + 400 }}>
-        <div className="flex shrink-0 items-center gap-1 px-2" style={{ width: LEFT_W }}>
+      <div className="sticky top-0 z-[1] flex h-8 border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: LEFT_W + 400 }}>
+        <div className="flex shrink-0 items-center gap-1 px-3" style={{ width: LEFT_W }}>
           <span className="mr-auto">服务 / 操作</span>
           {rootIsPartial && (
             <Button size="xs" variant="ghost" active={isRoot} onClick={() => setZoom(root)} title="只看根请求的时间窗口（不含返回之后才跑的异步 span）">
@@ -226,7 +226,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
           {ticks.map((t) => (
             <span
               key={t}
-              className={cn('absolute top-0 leading-7 tabular-nums', t === 0 ? 'pl-1' : t === 1 ? 'pr-1' : '-translate-x-1/2')}
+              className={cn('absolute top-0 leading-8 tabular-nums', t === 0 ? 'pl-1.5' : t === 1 ? 'pr-1.5' : '-translate-x-1/2')}
               // 两端的刻度给「窗口外 N 个」的角标让位
               style={t === 1 ? { right: outside.after > 0 ? '3.5rem' : 0 } : { left: t === 0 && outside.before > 0 ? '3.5rem' : `${t * 100}%` }}
             >
@@ -234,12 +234,12 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
             </span>
           ))}
           {outside.before > 0 && (
-            <span className="absolute top-0 left-0 rounded-br bg-warn-soft px-1 leading-4 text-warn" title={`${outside.before} 个 span 在窗口之前`}>
+            <span className="absolute top-0 left-0 rounded-br bg-warn-soft px-1.5 leading-[1.125rem] text-warn" title={`${outside.before} 个 span 在窗口之前`}>
               ◂ {outside.before}
             </span>
           )}
           {outside.after > 0 && (
-            <span className="absolute top-0 right-0 rounded-bl bg-warn-soft px-1 leading-4 text-warn" title={`${outside.after} 个 span 在窗口之后（异步）`}>
+            <span className="absolute top-0 right-0 rounded-bl bg-warn-soft px-1.5 leading-[1.125rem] text-warn" title={`${outside.after} 个 span 在窗口之后（异步）`}>
               {outside.after} ▸
             </span>
           )}
@@ -277,7 +277,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
             style={{ height: ROW_H, minWidth: LEFT_W + 400 }}
             onClick={() => onSelect(isSel ? null : s.span_id)}
           >
-            <div className="flex shrink-0 items-center gap-1 overflow-hidden pr-2" style={{ width: LEFT_W, paddingLeft: 6 + n.depth * 14 }}>
+            <div className="flex shrink-0 items-center gap-1.5 overflow-hidden pr-3" style={{ width: LEFT_W, paddingLeft: 8 + n.depth * 16 }}>
               <button
                 type="button"
                 className={cn('shrink-0 text-muted-fg', !hasKids && 'invisible')}
@@ -292,13 +292,13 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
                 }}
                 title={collapsed.has(s.span_id) ? '展开' : '折叠'}
               >
-                {collapsed.has(s.span_id) ? <ChevronRightIcon className="size-3.5" /> : <ChevronDownIcon className="size-3.5" />}
+                {collapsed.has(s.span_id) ? <ChevronRightIcon className="size-4" /> : <ChevronDownIcon className="size-4" />}
               </button>
-              <span className="inline-block h-3.5 w-1 shrink-0 rounded-sm" style={{ background: color }} />
+              <span className="inline-block h-4 w-1 shrink-0 rounded-sm" style={{ background: color }} />
               <span className="truncate text-xs">
                 <span className="text-muted-fg">{s.service}</span> <span className="font-medium">{s.name}</span>
               </span>
-              {isErr && <AlertTriangleIcon className="size-3.5 shrink-0 text-danger" aria-label="错误" />}
+              {isErr && <AlertTriangleIcon className="size-4 shrink-0 text-danger" aria-label="错误" />}
               {n.orphan && (
                 <Badge tone="warn" title={`父 span ${s.parent_span_id} 不在结果里（采样或未入库）`}>
                   父缺失
@@ -311,7 +311,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
               ))}
               {before || after ? (
                 <span
-                  className={cn('absolute top-0 text-2xs leading-[26px] whitespace-nowrap text-muted-fg tabular-nums', before ? 'left-1' : 'right-1')}
+                  className={cn('absolute top-0 text-2xs leading-[30px] whitespace-nowrap text-muted-fg tabular-nums', before ? 'left-1.5' : 'right-1.5')}
                   title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}，在当前窗口之${before ? '前' : '后'}`}
                 >
                   {before ? `◂ ${offsetLabel(startUs)} · ${dur}` : `${offsetLabel(startUs)} · ${dur} ▸`}
@@ -319,13 +319,13 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
               ) : (
                 <>
                   <div
-                    className={cn('absolute top-1.5 h-3.5 rounded-sm', isErr && 'ring-1 ring-danger', x0 < 0 && 'rounded-l-none', x1 > 100 && 'rounded-r-none')}
+                    className={cn('absolute top-[7px] h-4 rounded-sm', isErr && 'ring-1 ring-danger', x0 < 0 && 'rounded-l-none', x1 > 100 && 'rounded-r-none')}
                     style={{ left: `${left}%`, width: `${width}%`, background: color, opacity: isErr ? 0.9 : 0.75 }}
                     title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}`}
                   />
                   <span
                     className={cn(
-                      'absolute top-0 text-2xs leading-[26px] whitespace-nowrap tabular-nums',
+                      'absolute top-0 text-2xs leading-[30px] whitespace-nowrap tabular-nums',
                       labelAfter || labelBefore ? 'text-muted-fg' : 'text-fg',
                     )}
                     style={labelAfter ? { left: `${right}%`, marginLeft: 4 } : labelBefore ? { right: `${100 - left}%`, marginRight: 4 } : { left: `${left}%`, marginLeft: 4 }}
@@ -349,9 +349,9 @@ function fmtValue(v: AttrValue): string {
 }
 
 function KV({ entries }: { entries: [string, AttrValue][] }) {
-  if (!entries.length) return <div className="px-3 py-3 text-2xs text-muted-fg">（无）</div>
+  if (!entries.length) return <div className="px-4 py-4 text-xs text-muted-fg">（无）</div>
   return (
-    <div className="grid grid-cols-[minmax(8rem,auto)_1fr] gap-x-3 gap-y-0.5 px-3 py-2 text-2xs">
+    <div className="grid grid-cols-[minmax(8rem,auto)_1fr] gap-x-4 gap-y-1 px-4 py-3 text-xs">
       {entries.map(([k, v]) => (
         <Fragment key={k}>
           <span className="mono truncate text-muted-fg" title={k}>
@@ -371,14 +371,14 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
   const resource = Object.entries(span.resource)
   const subtitle = spanSubtitle(span)
   return (
-    <aside className="flex min-h-0 w-[26rem] shrink-0 flex-col border-l border-border bg-card">
-      <header className="border-b border-border px-3 py-2">
+    <aside className="flex min-h-0 w-[30rem] shrink-0 flex-col border-l border-border bg-card">
+      <header className="border-b border-border px-4 py-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold" title={span.name}>
+            <div className="truncate text-base font-semibold" title={span.name}>
               {span.name}
             </div>
-            <div className="truncate text-2xs text-muted-fg" title={subtitle}>
+            <div className="truncate text-xs text-muted-fg" title={subtitle}>
               {span.service}
               {subtitle && ` · ${subtitle}`}
             </div>
@@ -387,7 +387,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
             ✕
           </Button>
         </div>
-        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-2xs">
+        <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
           <Badge tone={kindTone(span.kind)}>{span.kind}</Badge>
           {span.status === 'Error' ? <Badge tone="danger">Error{span.status_message ? `: ${span.status_message}` : ''}</Badge> : span.status === 'Ok' ? <Badge tone="ok">Ok</Badge> : null}
           <span className="text-muted-fg">耗时</span>
@@ -396,7 +396,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
           <span className="tabular-nums">{formatTsMicro(span.start_us)}</span>
           <span className="text-muted-fg">（+{formatDuration((span.start_us - traceStartUs) * 1000)}）</span>
         </div>
-        <div className="mono mt-1 flex items-center gap-1 text-2xs text-muted-fg">
+        <div className="mono mt-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
           span {span.span_id}
           <button type="button" onClick={() => copyText(span.span_id)} title="复制 span id" className="hover:text-fg">
             <CopyIcon className="size-3" />
@@ -406,7 +406,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
           </Button>
         </div>
       </header>
-      <div className="flex border-b border-border text-2xs">
+      <div className="flex border-b border-border text-xs">
         {(
           [
             ['attrs', `属性 ${attrs.length}`],
@@ -419,7 +419,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
             key={k}
             type="button"
             onClick={() => setTab(k)}
-            className={cn('px-3 py-1.5 font-medium text-muted-fg hover:text-fg', tab === k && 'border-b-2 border-accent text-accent')}
+            className={cn('px-4 py-2 font-medium text-muted-fg hover:text-fg', tab === k && 'border-b-2 border-accent text-accent')}
           >
             {label}
           </button>
@@ -435,24 +435,24 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
               const rest = Object.entries(e.attributes).filter(([k]) => k !== 'exception.stacktrace')
               return (
                 <div key={i} className="border-b border-border/60">
-                  <div className="flex items-center gap-2 px-3 pt-2 text-xs">
+                  <div className="flex items-center gap-2 px-4 pt-3 text-sm">
                     <span className="font-medium">{e.name}</span>
                     <span className="text-2xs text-muted-fg tabular-nums">+{formatDuration((e.ts_us - span.start_us) * 1000)}</span>
                   </div>
                   <KV entries={rest} />
                   {stack !== undefined && (
-                    <pre className="mono mx-3 mb-2 max-h-80 overflow-auto rounded-md border border-border bg-muted/40 p-2 text-2xs leading-4 whitespace-pre-wrap">{fmtValue(stack)}</pre>
+                    <pre className="mono mx-4 mb-3 max-h-80 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-2xs leading-[1.125rem] whitespace-pre-wrap">{fmtValue(stack)}</pre>
                   )}
                 </div>
               )
             })
           ) : (
-            <div className="px-3 py-3 text-2xs text-muted-fg">（无事件）</div>
+            <div className="px-4 py-4 text-xs text-muted-fg">（无事件）</div>
           ))}
         {tab === 'links' &&
           (span.links.length ? (
             span.links.map((l, i) => (
-              <div key={i} className="border-b border-border/60 px-3 py-2 text-2xs">
+              <div key={i} className="border-b border-border/60 px-4 py-3 text-xs">
                 <Link to={`/traces/${l.trace_id}?span=${l.span_id}`} className="mono text-accent hover:underline">
                   {l.trace_id} / {l.span_id}
                 </Link>
@@ -460,7 +460,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
               </div>
             ))
           ) : (
-            <div className="px-3 py-3 text-2xs text-muted-fg">（无链接）</div>
+            <div className="px-4 py-4 text-xs text-muted-fg">（无链接）</div>
           ))}
       </div>
     </aside>

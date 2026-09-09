@@ -61,9 +61,61 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--max-read-bytes` / `--max-read-rows` | `OPDASH_MAX_READ_BYTES` / `OPDASH_MAX_READ_ROWS` | `0`（不限） | 单条查询的读量护栏（`max_bytes_to_read` / `max_rows_to_read`），超过立刻报错让用户缩小范围，比等超时体验好；集群上按分片各自计 |
 | `--max-concurrent-queries` | `OPDASH_MAX_CONCURRENT_QUERIES` | `16` | 同时最多几条查询在库上跑，排队 10 秒没名额回 503 |
 | `--schema-refresh` | `OPDASH_SCHEMA_REFRESH` | `5m` | 多久重读一次 `system.columns` |
-| `--basic-auth` | `OPDASH_BASIC_AUTH` | 不认证 | `user:password`，配了就要求浏览器登录；`/api/health` 不认证 |
+| `--basic-auth` | `OPDASH_BASIC_AUTH` | 不认证 | `user:password`，配了就要求浏览器登录；`/api/health` 不认证。可和 OIDC 同时开，给脚本 / curl 用 |
+| `--oidc-issuer` / `--oidc-client-id` | `OPDASH_OIDC_ISSUER` / `OPDASH_OIDC_CLIENT_ID` | 不认证 | Keycloak realm 地址（`https://sso.example.com/realms/ops`）和 client ID，两个一起配就走浏览器跳 Keycloak 登录，见下面「登录」 |
+| `--oidc-client-secret` | `OPDASH_OIDC_CLIENT_SECRET` | 无 | client 密钥；public client 不用配（有 PKCE） |
+| `--oidc-required-role` | `OPDASH_OIDC_REQUIRED_ROLE` | 无 | 要求用户带这个角色（realm 角色或本 client 的角色）才放行；不配 = 登录了就行 |
+| `--oidc-scopes` | `OPDASH_OIDC_SCOPES` | `openid profile email` | 授权请求的 scope |
+| `--public-url` | `OPDASH_PUBLIC_URL` | 按请求头推 | 浏览器访问 opdash 的地址，拼 OIDC 回调用；在 Ingress 后面按 `X-Forwarded-Proto` / `Host` 推一般是对的，本地 vite 开发配 `http://localhost:5173` |
+| `--session-ttl` | `OPDASH_SESSION_TTL` | `12h` | 登录会话多久失效，到期重新跳一次 Keycloak |
+| `--session-secret` | `OPDASH_SESSION_SECRET` | 随机 | 会话 cookie 的签名密钥。不配则每次启动随机生成（重启后要重新登录）；多副本必须配同一个 |
 
 `RUST_LOG=opdash=debug` 能看到每条 SQL 和绑定的参数。
+
+### 登录：对接 Keycloak
+
+这个页面能翻全部线上日志，对外暴露一定要认证。两种方式：`--basic-auth` 一组共享密码（内网、临时够用），
+或者 OIDC 跳 Keycloak 登录（推荐，谁登录过日志里有名字，离职回收账号即可）。两个可以同时开，Basic 留给
+脚本 / curl。
+
+Keycloak 里建 client（realm 随意，下面以 `ops` 为例）：
+
+1. Clients → Create client：类型 OpenID Connect，Client ID 填 `opdash`。
+2. Capability config：Client authentication **On**（拿到 client secret；不开也行，opdash 带 PKCE），
+   Standard flow 勾上，其它 flow 都不用。
+3. Login settings：Valid redirect URIs 填 `https://opdash.example.com/api/auth/callback`；
+   Valid post logout redirect URIs 填 `https://opdash.example.com/*`（退出后跳回来用）。
+4. 可选：要限制只有某些人能看，建一个 realm 角色（比如 `opdash-viewer`）分给相应的人 / 组，
+   opdash 配 `--oidc-required-role opdash-viewer`。client 角色也认（在 client 的 Roles 里建，
+   token 里是 `resource_access.opdash.roles`）。角色 opdash 会同时从 id_token 和 access_token 里找，
+   不用改 Keycloak 默认的映射器。
+
+然后给 opdash 配：
+
+```bash
+OPDASH_OIDC_ISSUER=https://sso.example.com/realms/ops   # 和 Keycloak 签在 token 里的 iss 一字不差
+OPDASH_OIDC_CLIENT_ID=opdash
+OPDASH_OIDC_CLIENT_SECRET=xxxx                           # Credentials 页签里的 Client secret
+OPDASH_OIDC_REQUIRED_ROLE=opdash-viewer                  # 可选
+OPDASH_SESSION_SECRET=$(openssl rand -hex 32)            # 可选；多副本必须配
+```
+
+流程是标准的授权码 + PKCE，全部在后端完成：浏览器打开任何页面 → 没会话就 302 到 Keycloak → 登录后回
+`/api/auth/callback` → opdash 用 code 换 token，校验 id_token 的 `iss` / `aud` / `exp` / `nonce`，把
+用户名和邮箱签进一个 HttpOnly cookie（HMAC，服务端不存会话）→ 跳回原来要看的页面。id_token 不验签：
+它是 opdash 自己走 TLS 直连 token 端点拿的，链路已经证明了签发方（OIDC Core 3.1.3.7 允许这么做），
+所以 **issuer 必须是 https**。顶栏右侧显示用户名，退出会顺带结束 Keycloak 那边的 SSO 会话。
+
+```text
+GET /api/auth/me        登录方式和当前用户；没登录也 200（前端据此跳登录）
+GET /api/auth/login     ?next=/logs   生成登录票，跳 Keycloak
+GET /api/auth/callback  Keycloak 跳回来的地址
+GET /api/auth/logout    清会话，跳 Keycloak 登出再回首页
+```
+
+没登录的请求：浏览器导航（Accept 带 `text/html`）302 去登录；API 和静态资源回
+`401 {"error":"需要登录","kind":"unauthenticated","login_url":"/api/auth/login"}`，前端拿到就整页跳登录。
+`/api/health` 和 `/api/auth/*` 不认证。
 
 ## 表结构：程序知道什么、不知道什么
 
@@ -109,14 +161,14 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
 OPDASH_CLICKHOUSE_URL=http://ck:8123 OPDASH_CLICKHOUSE_USER=opdash OPDASH_CLICKHOUSE_PASSWORD=xxx \
   docker compose up -d
 
-# k8s：Secret 里填账号密码，可选 Basic 认证；Deployment + Service + Ingress
-kubectl apply -f deploy/opdash-deployment.yaml
+# k8s：Deployment + Service + Ingress 自己按集群写（deploy/ 目录不入库，里面有内部域名和密钥），
+# 环境变量照上面的配置表；Secret 里放 ClickHouse 密码、Keycloak client 密钥、session secret
 kubectl -n logging port-forward svc/opdash 4880:4880     # 没配 Ingress 先本地看
 ```
 
-`deploy/opdash-deployment.yaml` 里 `OPDASH_MAX_READ_BYTES` 默认 20 GiB，按集群规模调。readiness 探针打
-`/api/health`（会真的 ping ClickHouse），库挂了会摘流量。对外暴露务必配 `OPDASH_BASIC_AUTH` 或放在
-SSO 网关后面：这个页面能翻全部线上日志。
+k8s 上 `OPDASH_MAX_READ_BYTES` 建议给个 20 GiB 左右的护栏，按集群规模调。readiness 探针打
+`/api/health`（不认证，会真的 ping ClickHouse），库挂了会摘流量；liveness 用 tcpSocket 就行，库挂了重启进程没用。对外暴露务必配 Keycloak 登录（`OPDASH_OIDC_*`，
+见上面「登录」）或至少 `OPDASH_BASIC_AUTH`：这个页面能翻全部线上日志。
 
 ### 发布
 
@@ -149,7 +201,8 @@ OPDASH_E2E_CLICKHOUSE_URL=http://host:8123 OPDASH_E2E_CLICKHOUSE_USER=x OPDASH_E
 
 ```text
 GET /api/meta                 表结构、维度列、上限
-GET /api/health               ping ClickHouse + 表结构状态，不走 Basic 认证
+GET /api/health               ping ClickHouse + 表结构状态，不认证
+GET /api/auth/*               登录相关，见上面「登录」，不认证
 GET /api/logs/search          ?from&to&q&regex&level&logger&thread&host&trace_id&span_id&<维度列>&order&limit&offset
 GET /api/logs/histogram       同 search 的筛选参数
 GET /api/logs/facets          ?field=level|logger|host|<维度列>&limit

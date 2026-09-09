@@ -34,6 +34,7 @@ function dropWoff1(): PluginOption {
 }
 
 // 开发时 /api 代理到本地 opdash 后端（cargo run 默认监听 4880）。
+// 后端开了 OIDC 时给它配 OPDASH_PUBLIC_URL=http://localhost:5173，回调才会跳回 vite 这边。
 export default defineConfig({
   plugins: [react(), tailwindcss(), dropWoff1()],
   base: '/',

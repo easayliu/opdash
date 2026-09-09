@@ -28,7 +28,7 @@ interface Props {
   className?: string
 }
 
-const M = { left: 48, right: 8, top: 8, bottom: 20 }
+const M = { left: 52, right: 8, top: 8, bottom: 22 }
 
 /** 多条折线 + 十字线读数（2px 线、所有系列一起读）。 */
 export function LineChart({ fromMs, toMs, widthMs, points, series, height = 160, stale, format = (v) => String(v), className }: Props) {
@@ -65,14 +65,14 @@ export function LineChart({ fromMs, toMs, widthMs, points, series, height = 160,
           {niceTicks(yMax).map((v) => (
             <g key={v}>
               <line x1={M.left} x2={M.left + W} y1={yOf(v)} y2={yOf(v)} stroke="var(--grid)" strokeWidth={1} />
-              <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill="var(--muted-fg)" className="tabular-nums">
+              <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={11} fill="var(--muted-fg)" className="tabular-nums">
                 {format(v)}
               </text>
             </g>
           ))}
           <line x1={M.left} x2={M.left + W} y1={M.top + H} y2={M.top + H} stroke="var(--axis)" strokeWidth={1} />
           {ticks.map((t) => (
-            <text key={t} x={M.left + ((t - fromMs) / span) * W} y={height - 6} textAnchor="middle" fontSize={10} fill="var(--muted-fg)">
+            <text key={t} x={M.left + ((t - fromMs) / span) * W} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
               {formatTick(t, widthMs)}
             </text>
           ))}

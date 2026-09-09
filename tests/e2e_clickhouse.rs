@@ -65,7 +65,7 @@ async fn app(url: &str) -> (axum::Router, Client) {
     ));
     schema.refresh().await.expect("读表结构");
     let state = AppState { config: Arc::new(config), client: client.clone(), schema };
-    (api::app(state, None), client)
+    (api::app(state, opdash::auth::Auth::disabled()), client)
 }
 
 fn now_ms() -> i64 {
