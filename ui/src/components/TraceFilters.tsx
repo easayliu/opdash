@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { PlusIcon, XIcon } from 'lucide-react'
+import { FilterIcon, PlusIcon, XIcon } from 'lucide-react'
 import type { Params } from '@/api/client'
 import { useAttrKeys, useAttrValues, useTraceValues } from '@/api/queries'
 import { Button, Input, Select } from '@/components/ui'
@@ -30,6 +30,9 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
   const ops = useTraceValues({ ...rangeParams, field: 'span_name', service: state.service, kind: 'all', limit: 500 }, !!state.service)
   const [minMs, setMinMs] = useState(state.min_ms)
   const [maxMs, setMaxMs] = useState(state.max_ms)
+  // 手机上只常驻服务下拉和查询按钮，其余条件收起
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const conditionCount = (state.span_name ? 1 : 0) + (state.kinds.length ? 1 : 0) + (state.error_only ? 1 : 0) + (state.min_ms || state.max_ms ? 1 : 0) + state.attrs.length
   useEffect(() => setMinMs(state.min_ms), [state.min_ms])
   useEffect(() => setMaxMs(state.max_ms), [state.max_ms])
   const submit = (e?: FormEvent) => {
@@ -40,12 +43,12 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
   const opOptions = state.span_name && !ops.data?.values.some((v) => v.value === state.span_name) ? [{ value: state.span_name, count: 0 }, ...(ops.data?.values ?? [])] : (ops.data?.values ?? [])
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-2.5 border-b border-border bg-card px-4 py-3">
+    <form onSubmit={submit} className="flex flex-col gap-2.5 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
       <div className="flex flex-wrap items-center gap-2">
         <Select
           value={state.service}
           onChange={(e) => onChange({ ...state, service: e.target.value, span_name: '' })}
-          className={cn('max-w-72', state.service && 'border-accent text-accent')}
+          className={cn('min-w-0 flex-1 md:max-w-72 md:flex-none', state.service && 'border-accent text-accent')}
           title="服务（service.name）"
         >
           <option value="">全部服务{services.isPending ? '…' : ''}</option>
@@ -56,10 +59,24 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
             </option>
           ))}
         </Select>
+        <Button
+          size="md"
+          active={mobileOpen || conditionCount > 0}
+          className="px-2.5 md:hidden"
+          onClick={() => setMobileOpen((v) => !v)}
+          title="操作 / 类型 / 耗时 / 属性筛选"
+          aria-expanded={mobileOpen}
+        >
+          <FilterIcon className="size-4" />
+          {conditionCount > 0 && conditionCount}
+        </Button>
+        <Button type="submit" variant="primary" className="px-3.5 md:hidden">
+          查询
+        </Button>
         <Select
           value={state.span_name}
           onChange={(e) => onChange({ ...state, span_name: e.target.value })}
-          className={cn('max-w-96', state.span_name && 'border-accent text-accent')}
+          className={cn('w-full md:w-auto md:max-w-96', !mobileOpen && 'hidden md:block', state.span_name && 'border-accent text-accent')}
           disabled={!state.service}
           title={state.service ? '接口 / 操作（span_name）' : '先选服务'}
         >
@@ -71,42 +88,42 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
             </option>
           ))}
         </Select>
-        <div className="flex h-9 items-center gap-0.5 rounded-md border border-input p-0.5" title="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
+        <div className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')} title="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
           {KINDS.map((k) => (
             <button
               key={k}
               type="button"
               onClick={() => onChange({ ...state, kinds: state.kinds.includes(k) ? state.kinds.filter((x) => x !== k) : [...state.kinds, k] })}
-              className={cn('h-full rounded-sm px-2.5 text-xs font-semibold text-muted-fg hover:bg-muted', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
+              className={cn('h-full flex-1 rounded-sm px-1.5 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
             >
               {k}
             </button>
           ))}
         </div>
-        <Button size="md" active={state.error_only} onClick={() => onChange({ ...state, error_only: !state.error_only })} title="只看 status = Error 的 span 所在的链路">
+        <Button size="md" active={state.error_only} className={cn(!mobileOpen && 'hidden md:inline-flex')} onClick={() => onChange({ ...state, error_only: !state.error_only })} title="只看 status = Error 的 span 所在的链路">
           只看错误
         </Button>
-        <span className="flex items-center gap-1.5 text-sm text-muted-fg">
+        <span className={cn('flex min-w-0 items-center gap-1.5 text-sm text-muted-fg', !mobileOpen && 'hidden md:flex')}>
           耗时
-          <Input value={minMs} onChange={(e) => setMinMs(e.target.value)} placeholder="≥ ms" className="w-24" inputMode="decimal" aria-label="最小耗时" />
+          <Input value={minMs} onChange={(e) => setMinMs(e.target.value)} placeholder="≥ ms" className="w-20 md:w-24" inputMode="decimal" aria-label="最小耗时" />
           ~
-          <Input value={maxMs} onChange={(e) => setMaxMs(e.target.value)} placeholder="≤ ms" className="w-24" inputMode="decimal" aria-label="最大耗时" />
+          <Input value={maxMs} onChange={(e) => setMaxMs(e.target.value)} placeholder="≤ ms" className="w-20 md:w-24" inputMode="decimal" aria-label="最大耗时" />
         </span>
-        <Select value={state.sort} onChange={(e) => onChange({ ...state, sort: e.target.value === 'duration' ? 'duration' : 'time' })} title="排序">
+        <Select value={state.sort} onChange={(e) => onChange({ ...state, sort: e.target.value === 'duration' ? 'duration' : 'time' })} title="排序" className={cn(!mobileOpen && 'hidden md:block')}>
           <option value="time">最新在前</option>
           <option value="duration">最慢在前</option>
         </Select>
-        <Button type="submit" variant="primary" className="px-5">
+        <Button type="submit" variant="primary" className="hidden px-5 md:inline-flex">
           查询
         </Button>
       </div>
-      <AttrFilters attrs={state.attrs} service={state.service} rangeParams={rangeParams} onChange={(attrs) => onChange({ ...state, attrs })} />
+      <AttrFilters attrs={state.attrs} service={state.service} rangeParams={rangeParams} onChange={(attrs) => onChange({ ...state, attrs })} className={cn(!mobileOpen && 'hidden md:flex')} />
     </form>
   )
 }
 
 /** 属性过滤：key=value 的小标签，加一个带 key / value 提示的输入行。 */
-function AttrFilters({ attrs, service, rangeParams, onChange }: { attrs: string[]; service: string; rangeParams: Params; onChange: (a: string[]) => void }) {
+function AttrFilters({ attrs, service, rangeParams, onChange, className }: { attrs: string[]; service: string; rangeParams: Params; onChange: (a: string[]) => void; className?: string }) {
   const [key, setKey] = useState('')
   const [value, setValue] = useState('')
   const keys = useAttrKeys({ ...rangeParams, service: service || undefined, limit: 300 })
@@ -120,7 +137,7 @@ function AttrFilters({ attrs, service, rangeParams, onChange }: { attrs: string[
     setValue('')
   }
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className={cn('flex flex-wrap items-center gap-2', className)}>
       <span className="text-sm text-muted-fg">属性</span>
       {attrs.map((a) => (
         <span key={a} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
@@ -130,19 +147,19 @@ function AttrFilters({ attrs, service, rangeParams, onChange }: { attrs: string[
           </button>
         </span>
       ))}
-      <Input value={key} onChange={(e) => setKey(e.target.value)} list="attr-keys" placeholder="属性名，如 http.route" className="mono h-8 w-64 text-xs" aria-label="属性名" />
+      <Input value={key} onChange={(e) => setKey(e.target.value)} list="attr-keys" placeholder="属性名，如 http.route" className="mono h-8 w-full text-xs md:w-64" aria-label="属性名" />
       <datalist id="attr-keys">
         {(keys.data?.keys ?? []).map((k) => (
           <option key={k.key} value={k.key} />
         ))}
       </datalist>
-      <span className="text-muted-fg">=</span>
+      <span className="hidden text-muted-fg md:inline">=</span>
       <Input
         value={value}
         onChange={(e) => setValue(e.target.value)}
         list="attr-values"
         placeholder="值（留空 = 只要有这个属性）"
-        className="mono h-8 w-72 text-xs"
+        className="mono h-8 min-w-0 flex-1 text-xs md:w-72 md:flex-none"
         aria-label="属性值"
         onKeyDown={(e) => {
           if (e.key === 'Enter') {

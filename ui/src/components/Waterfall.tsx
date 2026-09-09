@@ -6,6 +6,7 @@ import { Badge, Button } from '@/components/ui'
 import type { ColorAssigner } from '@/lib/colors'
 import { formatDuration, formatTsMicro } from '@/lib/time'
 import { fillSqlParams, formatSql } from '@/lib/sql'
+import { useIsMobile } from '@/lib/media'
 import { cn, copyText } from '@/lib/utils'
 
 export interface SpanNode {
@@ -144,10 +145,17 @@ interface Props {
 
 const ROW_H = 30
 const LEFT_W = 400
+/** 手机上左栏只留服务 / 操作名，时间轴至少给 260px，超出横滚 */
+const LEFT_W_MOBILE = 170
+const AXIS_MIN_W = 400
+const AXIS_MIN_W_MOBILE = 260
 /** 条至少画这么宽，不然 1ms 的 span 在 30s 的轴上根本看不见 */
 const MIN_BAR_PCT = 0.15
 
 export function Waterfall({ tree, colors, selected, onSelect }: Props) {
+  const isMobile = useIsMobile()
+  const leftW = isMobile ? LEFT_W_MOBILE : LEFT_W
+  const minW = leftW + (isMobile ? AXIS_MIN_W_MOBILE : AXIS_MIN_W)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [zoom, setZoom] = useState<TimeWindow | null>(null)
   const [drag, setDrag] = useState<{ x0: number; x1: number } | null>(null)
@@ -211,7 +219,8 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
   const rootIsPartial = !!root && root.endUs - root.startUs < fullLen * 0.999
   const x = (us: number) => ((us - view.startUs) / viewLen) * 100
   const offsetLabel = (us: number) => `+${formatDuration((us - tree.startUs) * 1000)}`
-  const ticks = [0, 0.25, 0.5, 0.75, 1]
+  // 手机上时间轴只有 260px，5 个刻度会挤在一起
+  const ticks = isMobile ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1]
 
   const outside = useMemo(() => {
     let before = 0
@@ -253,22 +262,22 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
 
   return (
     <div ref={listRef} className="relative min-w-0 overflow-auto">
-      <div className="sticky top-0 z-[1] flex h-8 border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: LEFT_W + 400 }}>
-        <div className="flex shrink-0 items-center gap-1 px-3" style={{ width: LEFT_W }}>
-          <span className="mr-auto">服务 / 操作</span>
+      <div className="sticky top-0 z-[1] flex h-8 border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: minW }}>
+        <div className="flex shrink-0 items-center gap-1 overflow-hidden px-2 md:px-3" style={{ width: leftW }}>
+          <span className="mr-auto hidden whitespace-nowrap md:inline">服务 / 操作</span>
           {rootIsPartial && (
-            <Button size="xs" variant="ghost" active={isRoot} onClick={() => setZoom(root)} title="只看根请求的时间窗口（不含返回之后才跑的异步 span）">
-              根请求 {formatDuration((root!.endUs - root!.startUs) * 1000)}
+            <Button size="xs" variant="ghost" className="px-1.5 md:px-2.5" active={isRoot} onClick={() => setZoom(root)} title="只看根请求的时间窗口（不含返回之后才跑的异步 span）">
+              根请求<span className="hidden md:inline"> {formatDuration((root!.endUs - root!.startUs) * 1000)}</span>
             </Button>
           )}
           {(rootIsPartial || !isFull) && (
-            <Button size="xs" variant="ghost" active={isFull} onClick={() => setZoom(full)} title="最早 span 开始到最晚 span 结束">
-              全部 {formatDuration(fullLen * 1000)}
+            <Button size="xs" variant="ghost" className="px-1.5 md:px-2.5" active={isFull} onClick={() => setZoom(full)} title="最早 span 开始到最晚 span 结束">
+              全部<span className="hidden md:inline"> {formatDuration(fullLen * 1000)}</span>
             </Button>
           )}
         </div>
         <div
-          className="relative flex-1 cursor-col-resize select-none"
+          className="relative flex-1 cursor-col-resize touch-pan-y select-none"
           title="拖动选择范围放大；双击还原"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -301,7 +310,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
       {drag && Math.abs(drag.x1 - drag.x0) >= 4 && (
         <div
           className="pointer-events-none absolute inset-y-0 z-[2] border-x border-accent bg-accent/15"
-          style={{ left: LEFT_W + Math.min(drag.x0, drag.x1), width: Math.abs(drag.x1 - drag.x0) }}
+          style={{ left: leftW + Math.min(drag.x0, drag.x1), width: Math.abs(drag.x1 - drag.x0) }}
         />
       )}
       {rows.map((n) => {
@@ -328,10 +337,10 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
             key={s.span_id}
             data-span-id={s.span_id}
             className={cn('row-hover flex cursor-pointer border-b border-border/50', isSel && 'row-selected')}
-            style={{ height: ROW_H, minWidth: LEFT_W + 400 }}
+            style={{ height: ROW_H, minWidth: minW }}
             onClick={() => onSelect(isSel ? null : s.span_id)}
           >
-            <div className="flex shrink-0 items-center gap-1.5 overflow-hidden pr-3" style={{ width: LEFT_W, paddingLeft: 8 + n.depth * 16 }}>
+            <div className="flex shrink-0 items-center gap-1.5 overflow-hidden pr-3" style={{ width: leftW, paddingLeft: 8 + n.depth * (isMobile ? 10 : 16) }}>
               <button
                 type="button"
                 className={cn('shrink-0 text-muted-fg', !hasKids && 'invisible')}
@@ -429,7 +438,7 @@ function FilledSql({ sql, dbSystem }: { sql: string; dbSystem?: AttrValue }) {
 function KV({ entries }: { entries: [string, AttrValue][] }) {
   if (!entries.length) return <div className="px-4 py-4 text-xs text-muted-fg">（无）</div>
   return (
-    <div className="grid grid-cols-[minmax(8rem,auto)_1fr] gap-x-4 gap-y-1 px-4 py-3 text-xs">
+    <div className="grid grid-cols-[minmax(6rem,auto)_1fr] gap-x-3 gap-y-1 px-4 py-3 text-xs md:grid-cols-[minmax(8rem,auto)_1fr] md:gap-x-4">
       {entries.map(([k, v]) => (
         <Fragment key={k}>
           <span className="mono truncate text-muted-fg" title={k}>
@@ -450,7 +459,8 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
   const subtitle = spanSubtitle(span)
   const filledSql = useMemo(() => fillSqlParams(span.attributes), [span.attributes])
   return (
-    <aside className="flex min-h-0 w-[30rem] shrink-0 flex-col border-l border-border bg-card">
+    // 手机上盖满整个视口（顶栏也盖掉），桌面是右侧固定宽度的侧栏
+    <aside className="fixed inset-0 z-30 flex min-h-0 flex-col bg-card md:static md:z-auto md:w-[30rem] md:shrink-0 md:border-l md:border-border">
       <header className="border-b border-border px-4 py-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -462,7 +472,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
               {subtitle && ` · ${subtitle}`}
             </div>
           </div>
-          <Button variant="ghost" size="xs" onClick={onClose} title="关闭">
+          <Button variant="ghost" size="xs" className="shrink-0" onClick={onClose} title="关闭">
             ✕
           </Button>
         </div>

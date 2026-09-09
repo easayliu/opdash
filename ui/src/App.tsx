@@ -50,22 +50,23 @@ export default function App() {
     // 外壳钉在视口高度，页面各自在内部滚（表头 sticky、瀑布图 / 日志分栏滚动、右侧 span 面板都靠这个），
     // 顶栏和页脚固定；没自带滚动区的页面退回到 main 滚
     <div className="flex h-dvh flex-col">
-      <header className="z-20 border-b border-border bg-card">
-        <div className="flex h-14 items-stretch gap-4 px-4">
-          <NavLink to="/logs" className="flex items-center gap-2 pr-4">
+      {/* 手机上导航页签换到第二行，第一行只留 logo 和时间 / 主题 / 用户 */}
+      <header className="z-20 shrink-0 border-b border-border bg-card">
+        <div className="flex flex-wrap items-stretch gap-x-4 px-3 md:h-14 md:flex-nowrap md:px-4">
+          <NavLink to="/logs" className="flex h-12 items-center gap-2 pr-2 md:h-auto md:pr-4">
             <span className="flex size-7 items-center justify-center rounded-md bg-brand text-white">
               <ActivityIcon className="size-4" />
             </span>
             <span className="text-base font-semibold tracking-tight">opdash</span>
           </NavLink>
-          <nav className="flex items-stretch gap-1">
+          <nav className="order-last -mx-3 flex h-10 w-[calc(100%+1.5rem)] items-stretch border-t border-border md:order-none md:mx-0 md:h-auto md:w-auto md:gap-1 md:border-t-0">
             {NAV.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
                 to={to}
                 className={({ isActive }) =>
                   cn(
-                    'cf-tab flex items-center gap-1.5 px-3 text-sm font-medium text-muted-fg hover:text-fg',
+                    'cf-tab flex flex-1 items-center justify-center gap-1.5 px-3 text-sm font-medium text-muted-fg hover:text-fg md:flex-none',
                     isActive && 'text-fg',
                   )
                 }
@@ -79,7 +80,7 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-2 py-2.5">
+          <div className="ml-auto flex min-w-0 items-center gap-1 py-2 md:gap-2 md:py-2.5">
             <QuickJump />
             <TimeRangePicker />
             <ThemeSwitcher />
@@ -98,7 +99,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/logs" replace />} />
         </Routes>
       </main>
-      <footer className="flex h-8 items-center justify-end gap-3 border-t border-border px-4 text-2xs text-muted-fg">
+      <footer className="hidden h-8 shrink-0 items-center justify-end gap-3 border-t border-border px-4 text-2xs text-muted-fg md:flex">
         <span>opdash v{__APP_VERSION__}</span>
       </footer>
     </div>

@@ -156,7 +156,7 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
         <svg
           width={width}
           height={height}
-          className={cn('block', hover && onCellClick && 'cursor-pointer', brush && 'cursor-col-resize')}
+          className={cn('block touch-pan-y', hover && onCellClick && 'cursor-pointer', brush && 'cursor-col-resize')}
           onPointerMove={onMove}
           onPointerDown={onDown}
           onPointerUp={onUp}

@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
 import { Badge, Button, levelTone } from '@/components/ui'
+import { useIsMobile } from '@/lib/media'
 import { formatTs } from '@/lib/time'
 import { cn, copyText, splitFirstLine } from '@/lib/utils'
 
@@ -105,6 +106,7 @@ export function visibleDims(dims: string[]): string[] {
 
 export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, emptyText, sort, onSort }: LogTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const isMobile = useIsMobile()
   const cols = visibleDims(dims)
   const toggle = (k: string) =>
     setExpanded((s) => {
@@ -116,6 +118,22 @@ export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onC
 
   if (!rows.length) {
     return <div className="px-4 py-12 text-center text-sm text-muted-fg">{emptyText ?? '没有日志'}</div>
+  }
+  if (isMobile) {
+    return (
+      <LogCards
+        rows={rows}
+        dims={dims}
+        cols={cols}
+        highlight={highlight}
+        anchorKey={anchorKey}
+        selectedSpanId={selectedSpanId}
+        onContext={onContext}
+        onPivot={onPivot}
+        expanded={expanded}
+        toggle={toggle}
+      />
+    )
   }
   return (
     <table className="w-full table-fixed border-collapse text-xs">
@@ -237,6 +255,84 @@ export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onC
         })}
       </tbody>
     </table>
+  )
+}
+
+/** 手机上的日志列表：一条一张卡，点开看全文和字段。列太多的表格在窄屏上只能横滚，不如卡片。 */
+function LogCards({
+  rows,
+  dims,
+  cols,
+  highlight,
+  anchorKey,
+  selectedSpanId,
+  onContext,
+  onPivot,
+  expanded,
+  toggle,
+}: Pick<LogTableProps, 'rows' | 'dims' | 'highlight' | 'anchorKey' | 'selectedSpanId' | 'onContext' | 'onPivot'> & {
+  cols: string[]
+  expanded: Set<string>
+  toggle: (k: string) => void
+}) {
+  // 卡片上只放第一个维度（一般是 service_name），其余的点开再看
+  const primary = cols[0]
+  return (
+    <ul className="text-xs">
+      {rows.map((r) => {
+        const key = rowKey(r)
+        const open = expanded.has(key)
+        const [first, rest] = splitFirstLine(r.message)
+        const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
+        return (
+          <li
+            key={key}
+            data-selected={isAnchor ? '1' : undefined}
+            className={cn('border-b border-border/60 px-3 py-2', isAnchor && 'row-selected', open && 'bg-muted/40')}
+            onClick={() => toggle(key)}
+          >
+            <div className="flex items-center gap-2 text-2xs text-muted-fg">
+              <span className="mono tabular-nums">{formatTs(r.ts_ms, { date: false })}</span>
+              <Badge tone={levelTone(r.level)}>{r.level || '-'}</Badge>
+              {primary && <span className="min-w-0 flex-1 truncate">{dimValue(r, primary) || '-'}</span>}
+              {r.trace_id && (
+                <Link
+                  to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
+                  className="mono shrink-0 text-accent"
+                  title={`查看链路 ${r.trace_id}`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {r.trace_id.slice(0, 8)}…
+                </Link>
+              )}
+              {onContext && (
+                <button
+                  type="button"
+                  className="-my-1 -mr-1 shrink-0 p-1 text-muted-fg"
+                  title="查看这一行前后的日志"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onContext(r)
+                  }}
+                >
+                  <ListTreeIcon className="size-4" />
+                </button>
+              )}
+            </div>
+            {open ? (
+              <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
+              </div>
+            ) : (
+              <div className="mono mt-1 line-clamp-3 break-all leading-5">
+                <Highlight text={first} terms={highlight} />
+                {rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
+              </div>
+            )}
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 

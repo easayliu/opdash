@@ -4,9 +4,10 @@ import { AlertTriangleIcon } from 'lucide-react'
 import { useServices } from '@/api/queries'
 import type { ServiceStat } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
-import { Card, EmptyState, ErrorBox, Spinner } from '@/components/ui'
+import { Card, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
 import { formatDurationMs, formatNumber } from '@/lib/time'
 import { useTimeRange } from '@/lib/url-state'
+import { useIsMobile } from '@/lib/media'
 import { cn } from '@/lib/utils'
 
 type SortKey = keyof Pick<ServiceStat, 'service' | 'requests' | 'rps' | 'errors' | 'error_rate' | 'p50_ms' | 'p95_ms' | 'p99_ms' | 'max_ms'>
@@ -37,6 +38,7 @@ export function ErrorRate({ rate }: { rate: number }) {
 export function ServicesPage() {
   const { range } = useTimeRange()
   const navigate = useNavigate()
+  const isMobile = useIsMobile()
   const q = useServices({ from: range.fromMs, to: range.toMs })
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'requests', desc: true })
   const rows = useMemo(() => {
@@ -52,14 +54,32 @@ export function ServicesPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-card px-4 py-3">
+      <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
         <h1 className="text-base font-semibold">服务</h1>
-        <span className="text-xs text-muted-fg">只统计入口 span（Server / Consumer）；点一行看接口和趋势。</span>
+        <span className="hidden text-xs text-muted-fg sm:inline">只统计入口 span（Server / Consumer）；点一行看接口和趋势。</span>
         {q.isFetching && <Spinner className="size-4" />}
-        <StatsLine stats={q.data?.stats} className="ml-auto text-2xs text-muted-fg" />
+        {isMobile ? (
+          <Select
+            value={`${sort.key}:${sort.desc ? 'desc' : 'asc'}`}
+            onChange={(e) => {
+              const [key, dir] = e.target.value.split(':') as [SortKey, string]
+              setSort({ key, desc: dir === 'desc' })
+            }}
+            className="ml-auto h-8 text-xs"
+            aria-label="排序"
+          >
+            {COLUMNS.map((c) => (
+              <option key={c.key} value={`${c.key}:${c.key === 'service' ? 'asc' : 'desc'}`}>
+                按{c.label}排
+              </option>
+            ))}
+          </Select>
+        ) : (
+          <StatsLine stats={q.data?.stats} className="ml-auto text-2xs text-muted-fg" />
+        )}
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        <Card className="overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-auto p-0 md:p-4">
+        <Card className="overflow-hidden rounded-none border-x-0 border-t-0 md:rounded-lg md:border">
           {q.isError && <ErrorBox error={q.error} onRetry={() => q.refetch()} />}
           {q.isPending && (
             <div className="flex justify-center py-16">
@@ -67,7 +87,33 @@ export function ServicesPage() {
             </div>
           )}
           {q.data && !rows.length && <EmptyState title="这个时间范围内没有入口 span" hint="tracepipe 是不是还没接上？或者试试放宽时间范围。" />}
-          {rows.length > 0 && (
+          {rows.length > 0 && isMobile && (
+            <ul className={cn('text-xs', q.isFetching && 'opacity-70')}>
+              {rows.map((s) => (
+                <li key={s.service} className="row-hover cursor-pointer border-b border-border/60 px-3 py-2.5 last:border-b-0" onClick={() => navigate(`/services/${encodeURIComponent(s.service)}`)}>
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate font-medium" title={s.service}>
+                      {s.service || '(空)'}
+                    </span>
+                    <ErrorRate rate={s.error_rate} />
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 text-2xs text-muted-fg tabular-nums">
+                    <span>
+                      请求 <span className="text-fg">{formatNumber(s.requests)}</span>
+                    </span>
+                    <span>QPS {s.rps < 10 ? s.rps.toFixed(2) : Math.round(s.rps)}</span>
+                    <span>错误 {s.errors ? formatNumber(s.errors) : 0}</span>
+                    <span>P50 {formatDurationMs(s.p50_ms)}</span>
+                    <span>P95 {formatDurationMs(s.p95_ms)}</span>
+                    <span>
+                      P99 <span className="font-medium text-fg">{formatDurationMs(s.p99_ms)}</span>
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          {rows.length > 0 && !isMobile && (
             <table className={cn('w-full table-fixed border-collapse text-xs', q.isFetching && 'opacity-70')}>
               <thead className="text-2xs text-muted-fg">
                 <tr className="border-b border-border bg-muted/40">
