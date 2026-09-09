@@ -84,7 +84,7 @@ async fn run() -> anyhow::Result<()> {
             tracing::info!("没配 --session-secret，会话密钥随机生成：重启后需要重新登录");
         }
     }
-    let state = AppState { config: Arc::new(config), client, schema };
+    let state = AppState::new(config, client, schema);
     let app = api::app(state, auth.clone());
 
     let listener =

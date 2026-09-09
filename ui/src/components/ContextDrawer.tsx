@@ -3,8 +3,9 @@ import { XIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
 import { useLogContext } from '@/api/queries'
 import { Button, ErrorBox, Spinner } from '@/components/ui'
-import { LogTable, rowKey } from '@/components/LogTable'
+import { LogTable } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
+import { rowKey } from '@/lib/log-row'
 import { formatTs } from '@/lib/time'
 
 /** 某一行日志前后的上下文：同一个 host + file（也就是同一个容器的日志流）。 */

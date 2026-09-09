@@ -15,7 +15,7 @@ P95。单二进制，只读，不需要别的服务。
 
 | 路径 | 干什么 |
 | --- | --- |
-| `/logs` | 日志检索：关键字 / 正则、级别、服务 / namespace / pod 等维度、logger、thread；直方图拖选缩小范围；展开看全文；上下文；跟随；导出 CSV / JSONL |
+| `/logs` | 日志检索：关键字 / 正则、级别、服务 / namespace / pod 等维度、logger、thread；直方图拖选缩小范围；展开看全文；上下文；跟随（SSE 推送，秒级；可切终端模式正序打印、自动滚到底）；导出 CSV / JSONL |
 | `/traces` | 链路检索：服务、接口、span 类型、只看错误、耗时区间、属性 `key=value`；耗时 × 时间散点图 |
 | `/traces/:trace_id` | 链路详情：瀑布图、span 属性 / 资源 / 事件（异常堆栈）/ 链接、这条 trace 的日志 |
 | `/services` | 服务概览：请求数、QPS、错误率、P50 / P95 / P99（只算 Server / Consumer 这类入口 span） |
@@ -61,6 +61,8 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--max-read-bytes` / `--max-read-rows` | `OPDASH_MAX_READ_BYTES` / `OPDASH_MAX_READ_ROWS` | `0`（不限） | 单条查询的读量护栏（`max_bytes_to_read` / `max_rows_to_read`），超过立刻报错让用户缩小范围，比等超时体验好；集群上按分片各自计 |
 | `--max-concurrent-queries` | `OPDASH_MAX_CONCURRENT_QUERIES` | `16` | 同时最多几条查询在库上跑，排队 10 秒没名额回 503 |
 | `--schema-refresh` | `OPDASH_SCHEMA_REFRESH` | `5m` | 多久重读一次 `system.columns` |
+| `--tail-interval` | `OPDASH_TAIL_INTERVAL` | `1s` | 日志跟随时服务端多久查一次增量；每条跟随连接就是这个频率的一条轻量查询 |
+| `--max-tail-streams` | `OPDASH_MAX_TAIL_STREAMS` | `8` | 同时最多几条跟随连接，满了回 503 |
 | `--basic-auth` | `OPDASH_BASIC_AUTH` | 不认证 | `user:password`，配了就要求浏览器登录；`/api/health` 不认证。可和 OIDC 同时开，给脚本 / curl 用 |
 | `--oidc-issuer` / `--oidc-client-id` | `OPDASH_OIDC_ISSUER` / `OPDASH_OIDC_CLIENT_ID` | 不认证 | Keycloak realm 地址（`https://sso.example.com/realms/ops`）和 client ID，两个一起配就走浏览器跳 Keycloak 登录，见下面「登录」 |
 | `--oidc-client-secret` | `OPDASH_OIDC_CLIENT_SECRET` | 无 | client 密钥；public client 不用配（有 PKCE） |
@@ -215,6 +217,9 @@ OPDASH_CLICKHOUSE_URL=http://ck:8123 OPDASH_CLICKHOUSE_USER=opdash OPDASH_CLICKH
 # 环境变量照上面的配置表；Secret 里放 ClickHouse 密码、Keycloak client 密钥、session secret
 kubectl -n logging port-forward svc/opdash 4880:4880     # 没配 Ingress 先本地看
 ```
+
+日志跟随走 SSE 长连接（`/api/logs/tail`）：响应带 `X-Accel-Buffering: no` 且不压缩，nginx / ingress 一般不用改；
+每 15 秒有一次保活注释，闲着也不会被空闲超时掐掉。要是中间还有别的代理，确认它没开响应缓冲、读超时大于 15 秒。
 
 k8s 上 `OPDASH_MAX_READ_BYTES` 建议给个 20 GiB 左右的护栏，按集群规模调。readiness 探针打
 `/api/health`（不认证，会真的 ping ClickHouse），库挂了会摘流量；liveness 用 tcpSocket 就行，库挂了重启进程没用。对外暴露务必配 Keycloak 登录（`OPDASH_OIDC_*`，

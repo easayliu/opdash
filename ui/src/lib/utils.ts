@@ -24,3 +24,11 @@ export function splitFirstLine(s: string): [string, string] {
   const idx = s.indexOf('\n')
   return idx < 0 ? [s, ''] : [s.slice(0, idx), s.slice(idx + 1)]
 }
+
+/** 最近的纵向滚动祖先：日志列表自己不滚，滚的是外面那层 overflow-auto。 */
+export function scrollParent(el: HTMLElement | null): HTMLElement | null {
+  for (let box = el?.parentElement ?? null; box; box = box.parentElement) {
+    if (/(auto|scroll)/.test(getComputedStyle(box).overflowY)) return box
+  }
+  return null
+}

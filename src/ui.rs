@@ -18,11 +18,15 @@ struct Asset;
 
 /// 响应压缩：前端 bundle 和 JSON 结果都压。日志导出是 CSV 文本，压完体积只剩几分之一。
 /// 字体（woff2 自带 brotli）不压。
+///
+/// 跟随的 SSE 流（`text/event-stream`）也不能压：压缩器要攒够一块才吐字节，几十字节的事件会
+/// 卡在缓冲区里，跟随就成了「几十秒蹦一批」。
 pub fn compression() -> CompressionLayer<impl Predicate> {
-    CompressionLayer::new()
-        .gzip(true)
-        .br(true)
-        .compress_when(DefaultPredicate::new().and(NotForContentType::new("font/")))
+    CompressionLayer::new().gzip(true).br(true).compress_when(
+        DefaultPredicate::new()
+            .and(NotForContentType::new("font/"))
+            .and(NotForContentType::new("text/event-stream")),
+    )
 }
 
 /// 误发到首页的 POST 文档导航转成 GET，免得浏览器刷新时要求重新提交表单。

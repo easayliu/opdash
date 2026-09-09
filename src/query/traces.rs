@@ -640,16 +640,16 @@ impl TraceQueries<'_> {
         limit: u32,
     ) -> Result<Query> {
         let column = attr_column(column)?;
+        let service = require_service(service)?;
         let mut b = Bindings::new();
         let time = b.time_predicate("timestamp", range);
-        let service_sql = match service {
-            Some(s) => format!("\n  AND service_name = {}", b.bind("String", s)),
-            None => String::new(),
-        };
+        let service_sql = b.bind("String", service);
         let sample = b.bind("UInt32", ATTR_SAMPLE_ROWS);
         let limit = b.bind("UInt32", limit);
+        // LIMIT 必须限在源行上：套在 arrayJoin 外面的话限的是展开之后的行数，读的源行反而更多
+        // （实测 10.2 s → 2.6 s）
         let sql = format!(
-            "SELECT key, count() AS count\nFROM (\n  SELECT arrayJoin(JSONAllPaths({column})) AS key\n  FROM {from}\n  WHERE {time}{service_sql}\n  LIMIT {sample}\n)\nGROUP BY key\nORDER BY count DESC, key\nLIMIT {limit}",
+            "SELECT key, count() AS count\nFROM (\n  SELECT arrayJoin(JSONAllPaths({column})) AS key\n  FROM (\n    SELECT {column}\n    FROM {from}\n    WHERE {time}\n      AND service_name = {service_sql}\n    LIMIT {sample}\n  )\n)\nGROUP BY key\nORDER BY count DESC, key\nLIMIT {limit}",
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
@@ -665,16 +665,14 @@ impl TraceQueries<'_> {
         limit: u32,
     ) -> Result<Query> {
         let path = attr_path(attr_column(column)?, key)?;
+        let service = require_service(service)?;
         let mut b = Bindings::new();
         let time = b.time_predicate("timestamp", range);
-        let service_sql = match service {
-            Some(s) => format!("\n  AND service_name = {}", b.bind("String", s)),
-            None => String::new(),
-        };
+        let service_sql = b.bind("String", service);
         let sample = b.bind("UInt32", ATTR_SAMPLE_ROWS);
         let limit = b.bind("UInt32", limit);
         let sql = format!(
-            "SELECT value, count() AS count\nFROM (\n  SELECT toString({path}) AS value\n  FROM {from}\n  WHERE {time}{service_sql}\n  LIMIT {sample}\n)\nWHERE value != ''\nGROUP BY value\nORDER BY count DESC, value\nLIMIT {limit}",
+            "SELECT value, count() AS count\nFROM (\n  SELECT toString({path}) AS value\n  FROM {from}\n  WHERE {time}\n    AND service_name = {service_sql}\n  LIMIT {sample}\n)\nWHERE value != ''\nGROUP BY value\nORDER BY count DESC, value\nLIMIT {limit}",
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
@@ -779,6 +777,30 @@ impl TraceQueries<'_> {
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
+    }
+}
+
+/// 属性名 / 属性值为什么必须锁定一个服务：
+///
+/// 表按 `(service_name, span_name, toDateTime(timestamp))` 排，不带 `service_name` 的 `LIMIT n`
+/// 抓到的永远是排序最靠前那个服务的行——线上实测同一条 SQL 连跑四次拿到 33 / 20 / 10 / 10 个 key，
+/// 两万行采样全部来自 `ad-onedata` 一个服务。下拉里显示的是别的服务的属性，既不完整也不稳定。
+///
+/// 想「铺开采样」的几种写法实测都更贵，因为读 `span_attributes` 是按 granule 算的（约 77 MB 一个），
+/// 覆盖 K 个 span_name 就得读 K 个 granule：
+///
+/// * `LIMIT n BY service_name`：59 GB / 24 s（LIMIT BY 不让读取提前停）
+/// * 每个服务一个子查询 UNION ALL：6.1 GB / 13 s
+/// * 服务内按 span_name UNION ALL 取前 25 个：2.9 GB / 17 s，41 个 key
+/// * 服务内 `LIMIT 20 BY span_name`：7.5 GB / 17 s，53 个 key（完整值）
+///
+/// 所以这里只做力所能及的：锁定服务走主键前缀，采样规模照旧。拿到的是**样本而不是全集**
+/// （上面那个服务一小时内有 476 个 span_name，采样能看到 15 个 key，全量是 53 个）——
+/// 属性名输入框本来就允许自由输入，下拉只是提示。
+fn require_service(service: Option<&str>) -> Result<&str> {
+    match service.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Ok(s),
+        None => Err(Error::bad_request("查属性名 / 属性值要先选一个服务")),
     }
 }
 
@@ -893,6 +915,34 @@ mod tests {
         assert_eq!(AttrFilter::parse("a=b=c").unwrap().value.as_deref(), Some("b=c"));
         assert_eq!(AttrFilter::parse("exception.type").unwrap().value, None);
         assert!(AttrFilter::parse("=x").is_err());
+    }
+
+    #[test]
+    fn attr_sampling_is_scoped_to_one_service() {
+        let table = table();
+        let q = TraceQueries { database: "logs", table: &table };
+
+        // 不给服务：直接 400，不再返回「排序最靠前那个服务」的片面结果
+        assert!(q.attr_keys(&range(), None, "span", 200).is_err());
+        assert!(q.attr_keys(&range(), Some("  "), "span", 200).is_err());
+        assert!(q.attr_values(&range(), None, "span", "http.route", 50).is_err());
+
+        let keys = q.attr_keys(&range(), Some("checkout"), "span", 200).unwrap();
+        let sql = keys.sql();
+        // LIMIT 限在源行上（在 arrayJoin 里层），不是套在展开之后
+        assert!(
+            sql.contains("SELECT arrayJoin(JSONAllPaths(span_attributes)) AS key\n  FROM (\n    SELECT span_attributes"),
+            "{sql}"
+        );
+        assert!(sql.contains("AND service_name = {p2:String}\n    LIMIT {p3:UInt32}"), "{sql}");
+        assert_eq!(keys.params()[2].1, "checkout");
+        assert_eq!(keys.params()[3].1, ATTR_SAMPLE_ROWS.to_string());
+
+        let values = q.attr_values(&range(), Some("checkout"), "span", "http.route", 50).unwrap();
+        let sql = values.sql();
+        assert!(sql.contains("toString(span_attributes.`http.route`)"), "{sql}");
+        assert!(sql.contains("AND service_name = {p2:String}"), "{sql}");
+        assert!(sql.contains("LIMIT {p3:UInt32}"), "{sql}");
     }
 
     #[test]
@@ -1189,13 +1239,14 @@ mod tests {
             "{}",
             keys.sql()
         );
-        assert!(q.attr_keys(&range(), None, "bogus", 100).is_err());
-        let vals = q.attr_values(&range(), None, "resource", "service.version", 50).unwrap();
+        assert!(q.attr_keys(&range(), Some("checkout"), "bogus", 100).is_err());
+        let vals =
+            q.attr_values(&range(), Some("checkout"), "resource", "service.version", 50).unwrap();
         assert!(
             vals.sql().contains("toString(resource_attributes.`service.version`) AS value"),
             "{}",
             vals.sql()
         );
-        assert!(q.attr_values(&range(), None, "resource", "x`y", 50).is_err());
+        assert!(q.attr_values(&range(), Some("checkout"), "resource", "x`y", 50).is_err());
     }
 }
