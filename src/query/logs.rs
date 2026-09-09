@@ -70,7 +70,9 @@ impl Expr {
                     }
                 }
                 Expr::Not(inner) => walk(inner, !negated, out),
-                Expr::And(parts) | Expr::Or(parts) => parts.iter().for_each(|p| walk(p, negated, out)),
+                Expr::And(parts) | Expr::Or(parts) => {
+                    parts.iter().for_each(|p| walk(p, negated, out))
+                }
             }
         }
         let mut out = Vec::new();
@@ -81,15 +83,13 @@ impl Expr {
     /// 在 `message` 上的谓词。返回的 SQL 可以直接 AND 到别的条件上（OR 一定带括号）。
     fn message_sql(&self, b: &mut Bindings) -> String {
         match self {
-            Expr::Term(t) => format!(
-                "positionCaseInsensitiveUTF8(message, {}) > 0",
-                b.bind("String", t)
-            ),
+            Expr::Term(t) => {
+                format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", t))
+            }
             Expr::Not(inner) => match &**inner {
-                Expr::Term(t) => format!(
-                    "positionCaseInsensitiveUTF8(message, {}) = 0",
-                    b.bind("String", t)
-                ),
+                Expr::Term(t) => {
+                    format!("positionCaseInsensitiveUTF8(message, {}) = 0", b.bind("String", t))
+                }
                 Expr::And(_) => format!("NOT ({})", inner.message_sql(b)),
                 other => format!("NOT {}", other.message_sql(b)),
             },
@@ -707,9 +707,10 @@ mod tests {
         assert_eq!(parse_query("\"unterminated"), Some(term("unterminated")));
         assert_eq!(parse_query("a\tb\nc"), Some(Expr::And(vec![term("a"), term("b"), term("c")])));
         // 引号里 \" 是转义；引号外的反斜杠照字面（搜 Windows 路径 / 正则片段时不用双写）
-        assert_eq!(parse_query(r#"say \"hi\" "a \"b\" c""#), Some(Expr::And(vec![
-            term("say"), term(r#"\"hi\""#), term("a \"b\" c"),
-        ])));
+        assert_eq!(
+            parse_query(r#"say \"hi\" "a \"b\" c""#),
+            Some(Expr::And(vec![term("say"), term(r#"\"hi\""#), term("a \"b\" c"),]))
+        );
     }
 
     #[test]
@@ -737,16 +738,28 @@ mod tests {
         assert_eq!(parse_query("x -(a OR b)"), parse_query("x NOT (a OR b)"));
         // 小写 or 是普通词；引号里的 OR 也是普通词
         assert_eq!(parse_query("a or b"), Some(Expr::And(vec![term("a"), term("or"), term("b")])));
-        assert_eq!(parse_query(r#"a "OR" b"#), Some(Expr::And(vec![term("a"), term("OR"), term("b")])));
+        assert_eq!(
+            parse_query(r#"a "OR" b"#),
+            Some(Expr::And(vec![term("a"), term("OR"), term("b")]))
+        );
         // 双重否定抵消
         assert_eq!(parse_query("NOT -a"), Some(term("a")));
     }
 
     #[test]
     fn parens_inside_words_are_literal() {
-        assert_eq!(parse_query("getUser(id) timeout"), Some(Expr::And(vec![term("getUser(id)"), term("timeout")])));
-        assert_eq!(parse_query("(getUser(id) OR foo)"), Some(Expr::Or(vec![term("getUser(id)"), term("foo")])));
-        assert_eq!(parse_query("Exception( -x"), Some(Expr::And(vec![term("Exception("), not(term("x"))])));
+        assert_eq!(
+            parse_query("getUser(id) timeout"),
+            Some(Expr::And(vec![term("getUser(id)"), term("timeout")]))
+        );
+        assert_eq!(
+            parse_query("(getUser(id) OR foo)"),
+            Some(Expr::Or(vec![term("getUser(id)"), term("foo")]))
+        );
+        assert_eq!(
+            parse_query("Exception( -x"),
+            Some(Expr::And(vec![term("Exception("), not(term("x"))]))
+        );
         assert_eq!(parse_query("(a OR b))"), parse_query("a OR b"));
     }
 
@@ -777,7 +790,10 @@ mod tests {
         };
         // 全是词的 OR 走 multiSearchAny
         let sql = sql_of("a OR b OR c");
-        assert!(sql.contains("AND multiSearchAnyCaseInsensitiveUTF8(message, {p2:Array(String)})"), "{sql}");
+        assert!(
+            sql.contains("AND multiSearchAnyCaseInsensitiveUTF8(message, {p2:Array(String)})"),
+            "{sql}"
+        );
         // 混合的 OR 带括号，里面的 AND 也带括号
         let sql = sql_of("x (a b OR -c)");
         assert!(
@@ -788,7 +804,10 @@ mod tests {
         );
         // NOT 整组
         let sql = sql_of("NOT (a OR b)");
-        assert!(sql.contains("AND NOT multiSearchAnyCaseInsensitiveUTF8(message, {p2:Array(String)})"), "{sql}");
+        assert!(
+            sql.contains("AND NOT multiSearchAnyCaseInsensitiveUTF8(message, {p2:Array(String)})"),
+            "{sql}"
+        );
         let sql = sql_of("NOT (a b)");
         assert!(sql.contains("AND NOT (positionCaseInsensitiveUTF8(message, {p2:String}) > 0 AND positionCaseInsensitiveUTF8(message, {p3:String}) > 0)"), "{sql}");
         // 只有操作符：没有 message 条件
