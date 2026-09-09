@@ -1,12 +1,13 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
 import { Badge, Button, levelTone } from '@/components/ui'
+import { rowKey, useRowKeys } from '@/lib/log-row'
 import { useIsMobile } from '@/lib/media'
 import { formatTs } from '@/lib/time'
-import { cn, copyText, splitFirstLine } from '@/lib/utils'
+import { cn, copyText, scrollParent, splitFirstLine } from '@/lib/utils'
 
 export interface LogTableProps {
   rows: LogRow[]
@@ -46,14 +47,6 @@ export function sortLogRows(rows: LogRow[], sort: LogSort): LogRow[] {
     return dimValue(a, sort.key).localeCompare(dimValue(b, sort.key))
   }
   return [...rows].sort((a, b) => dir * cmp(a, b) || a.ts_ms - b.ts_ms)
-}
-
-/** 最近的纵向滚动祖先：表格自己不滚，滚的是页面 / 抽屉里那层 overflow-auto */
-function scrollParent(el: HTMLElement | null): HTMLElement | null {
-  for (let box = el?.parentElement ?? null; box; box = box.parentElement) {
-    if (/(auto|scroll)/.test(getComputedStyle(box).overflowY)) return box
-  }
-  return null
 }
 
 /** 表格 / 卡片列表底部估算的一行高度（px）；真实高度渲染后再量 */
@@ -122,29 +115,6 @@ function SortHeader({ label, col, sort, onSort }: { label: string; col: string; 
       {active ? <span aria-hidden>{sort?.dir === 'asc' ? '▲' : '▼'}</span> : <ChevronsUpDownIcon className="size-3 opacity-50" />}
     </button>
   )
-}
-
-/** 一行日志的身份：内容拼出来的，跟随模式按它去重，上下文视图按它认锚点行。 */
-export function rowKey(r: LogRow): string {
-  return `${r.ts_ms}|${r.host}|${r.file}|${r.thread}|${r.logger}|${r.message}`
-}
-
-/**
- * 渲染用的 key。同一毫秒、同一线程打出一模一样内容的行是真会有的，[`rowKey`] 会撞。
- * 撞了的话 React 的 key 和虚拟列表按 key 存的
- * 高度都会串——同一行渲染好几遍、行序错乱。所以重复的加个序号，唯一的行还是保持内容 key，
- * 翻页 / 跟随时不会无谓重挂。
- */
-function useRowKeys(rows: LogRow[]): string[] {
-  return useMemo(() => {
-    const seen = new Map<string, number>()
-    return rows.map((r) => {
-      const base = rowKey(r)
-      const n = seen.get(base) ?? 0
-      seen.set(base, n + 1)
-      return n === 0 ? base : `${base}#${n}`
-    })
-  }, [rows])
 }
 
 /** 把命中的关键字用 <mark> 包起来（不分大小写，纯文本，不走 innerHTML）。 */
@@ -471,7 +441,7 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
   )
 }
 
-function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; dims: string[]; highlight?: string[]; onPivot?: (f: string, v: string) => void }) {
+export function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; dims: string[]; highlight?: string[]; onPivot?: (f: string, v: string) => void }) {
   const fields: [string, string][] = [
     ['level', row.level],
     ['logger', row.logger],

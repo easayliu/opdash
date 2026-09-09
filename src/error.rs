@@ -28,6 +28,9 @@ pub enum Error {
     /// 同时在跑的查询太多，排队也没等到名额。
     #[error("查询太多，请稍后再试")]
     Busy,
+    /// 同时跟随的连接太多（每条都在按 `--tail-interval` 轮库）。
+    #[error("同时跟随的人太多（上限 {0}），请稍后再试或先停掉别的跟随")]
+    TooManyTails(usize),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -73,7 +76,7 @@ impl Error {
             Error::BadRequest(_) => StatusCode::BAD_REQUEST,
             Error::Unavailable(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Error::Busy => StatusCode::SERVICE_UNAVAILABLE,
+            Error::Busy | Error::TooManyTails(_) => StatusCode::SERVICE_UNAVAILABLE,
             Error::ClickHouse { code, .. } => match *code {
                 TIMEOUT_EXCEEDED | TOO_SLOW | SOCKET_TIMEOUT => StatusCode::GATEWAY_TIMEOUT,
                 TOO_MANY_ROWS | TOO_MANY_BYTES | TOO_MANY_ROWS_OR_BYTES | MEMORY_LIMIT_EXCEEDED => {
@@ -89,6 +92,19 @@ impl Error {
                 }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
+        }
+    }
+
+    /// 机器可读的分类，和错误响应 JSON 里的 `kind` 是同一个值。跟随的 SSE 流里没有状态码可用，
+    /// 只能把它写进事件体，前端两条路径认同一套。
+    pub fn kind(&self) -> &'static str {
+        match (self, self.status()) {
+            (Error::BadRequest(_), _) => "bad_request",
+            (_, StatusCode::BAD_REQUEST) => "bad_request",
+            (_, StatusCode::GATEWAY_TIMEOUT) => "timeout",
+            (_, StatusCode::PAYLOAD_TOO_LARGE) => "too_heavy",
+            (_, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE) => "unavailable",
+            _ => "internal",
         }
     }
 
@@ -167,14 +183,7 @@ struct ErrorBody<'a> {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = self.status();
-        let kind = match (&self, status) {
-            (Error::BadRequest(_), _) => "bad_request",
-            (_, StatusCode::BAD_REQUEST) => "bad_request",
-            (_, StatusCode::GATEWAY_TIMEOUT) => "timeout",
-            (_, StatusCode::PAYLOAD_TOO_LARGE) => "too_heavy",
-            (_, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE) => "unavailable",
-            _ => "internal",
-        };
+        let kind = self.kind();
         if status.is_server_error() {
             tracing::error!(status = status.as_u16(), error = %self, "request failed");
         } else {

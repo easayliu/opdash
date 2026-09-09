@@ -126,8 +126,14 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
 function AttrFilters({ attrs, service, rangeParams, onChange, className }: { attrs: string[]; service: string; rangeParams: Params; onChange: (a: string[]) => void; className?: string }) {
   const [key, setKey] = useState('')
   const [value, setValue] = useState('')
-  const keys = useAttrKeys({ ...rangeParams, service: service || undefined, limit: 300 })
-  const values = useAttrValues({ ...rangeParams, service: service || undefined, key, limit: 50 }, !!key && keys.data?.keys.some((k) => k.key === key) === true)
+  // 属性名 / 属性值的采样必须锁定服务：表按 service_name 排序，不锁的话抓到的永远是排序最靠前
+  // 那个服务的行，下拉里既不完整也不稳定（同一条查询连跑四次拿到 33 / 20 / 10 / 10 个 key）。
+  // 和「操作」下拉同一个约定：先选服务。
+  const keys = useAttrKeys({ ...rangeParams, service, limit: 300 }, !!service)
+  const values = useAttrValues(
+    { ...rangeParams, service, key, limit: 50 },
+    !!service && !!key && keys.data?.keys.some((k) => k.key === key) === true,
+  )
   const add = () => {
     const k = key.trim()
     if (!k) return
@@ -147,7 +153,16 @@ function AttrFilters({ attrs, service, rangeParams, onChange, className }: { att
           </button>
         </span>
       ))}
-      <Input value={key} onChange={(e) => setKey(e.target.value)} list="attr-keys" placeholder="属性名，如 http.route" className="mono h-8 w-full text-xs md:w-64" aria-label="属性名" />
+      <Input
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        list="attr-keys"
+        disabled={!service}
+        placeholder={service ? '属性名，如 http.route' : '属性名（先选服务）'}
+        title={service ? '属性名（span_attributes / resource_attributes）' : '先选服务'}
+        className="mono h-8 w-full text-xs md:w-64"
+        aria-label="属性名"
+      />
       <datalist id="attr-keys">
         {(keys.data?.keys ?? []).map((k) => (
           <option key={k.key} value={k.key} />
@@ -158,6 +173,7 @@ function AttrFilters({ attrs, service, rangeParams, onChange, className }: { att
         value={value}
         onChange={(e) => setValue(e.target.value)}
         list="attr-values"
+        disabled={!service}
         placeholder="值（留空 = 只要有这个属性）"
         className="mono h-8 min-w-0 flex-1 text-xs md:w-72 md:flex-none"
         aria-label="属性值"

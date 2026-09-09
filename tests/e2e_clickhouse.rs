@@ -64,7 +64,7 @@ async fn app(url: &str) -> (axum::Router, Client) {
         &config.trace_table,
     ));
     schema.refresh().await.expect("读表结构");
-    let state = AppState { config: Arc::new(config), client: client.clone(), schema };
+    let state = AppState::new(config, client.clone(), schema);
     (api::app(state, opdash::auth::Auth::disabled()), client)
 }
 

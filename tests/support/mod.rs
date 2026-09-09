@@ -303,7 +303,7 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
         &config.trace_table,
     ));
     let auth = opdash::auth::Auth::from_config(&config);
-    let state = AppState { config: Arc::new(config), client, schema };
+    let state = AppState::new(config, client, schema);
     api::app(state, auth)
 }
 
@@ -354,4 +354,84 @@ pub async fn get_full(
 
 pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+}
+
+/// 一条 SSE 事件。注释（keep-alive 的 `:`）在 [`SseStream::next_event`] 里就跳过了。
+#[derive(Debug, Clone)]
+pub struct SseEvent {
+    pub event: String,
+    pub data: String,
+    pub id: Option<String>,
+}
+
+impl SseEvent {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.data).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// 边读边解析的 SSE 连接。跟随是长连接，不能像别的接口那样 `collect()` 等它结束。
+pub struct SseStream {
+    body: axum::body::Body,
+    buf: String,
+}
+
+impl SseStream {
+    /// 下一条事件；超时或流结束返回 None。
+    pub async fn next_event(&mut self, timeout: std::time::Duration) -> Option<SseEvent> {
+        use http_body_util::BodyExt;
+        loop {
+            if let Some(idx) = self.buf.find("\n\n") {
+                let raw: String = self.buf.drain(..idx + 2).collect();
+                if let Some(event) = parse_sse(&raw) {
+                    return Some(event);
+                }
+                continue;
+            }
+            let frame = tokio::time::timeout(timeout, self.body.frame()).await.ok()??.ok()?;
+            if let Ok(data) = frame.into_data() {
+                self.buf.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    }
+}
+
+fn parse_sse(raw: &str) -> Option<SseEvent> {
+    let mut event = String::from("message");
+    let mut data: Vec<&str> = Vec::new();
+    let mut id = None;
+    for line in raw.trim_end().lines() {
+        if let Some(v) = line.strip_prefix("event:") {
+            event = v.trim().to_owned();
+        } else if let Some(v) = line.strip_prefix("data:") {
+            data.push(v.strip_prefix(' ').unwrap_or(v));
+        } else if let Some(v) = line.strip_prefix("id:") {
+            id = Some(v.trim().to_owned());
+        }
+    }
+    // 只有注释（keep-alive）的块跳过
+    (!data.is_empty()).then(|| SseEvent { event, data: data.join("\n"), id })
+}
+
+/// 开一条 SSE 连接，拿到状态码、响应头和还在流着的 body。
+pub async fn open_sse(
+    app: &axum::Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (u16, Vec<(String, String)>, SseStream) {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let mut req = axum::http::Request::builder().uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let response = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status().as_u16();
+    let head = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+        .collect();
+    (status, head, SseStream { body: response.into_body(), buf: String::new() })
 }

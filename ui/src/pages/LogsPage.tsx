@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DownloadIcon, PauseIcon, PlayIcon } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { DownloadIcon, PauseIcon, PlayIcon, TerminalIcon } from 'lucide-react'
 import { apiUrl, type Params } from '@/api/client'
 import { useLogHistogram, useLogSearch, useMeta } from '@/api/queries'
+import { TAIL_MAX_ROWS, useLogTail } from '@/api/tail'
 import type { LogRow } from '@/api/types'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { ContextDrawer } from '@/components/ContextDrawer'
 import { LogFilters, type LogFilterState } from '@/components/LogFilters'
-import { LogTable, rowKey } from '@/components/LogTable'
+import { LogStream } from '@/components/LogStream'
+import { LogTable } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { Button, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
@@ -17,8 +19,9 @@ import { useIsMobile } from '@/lib/media'
 import { positiveTerms } from '@/lib/query-syntax'
 
 const PAGE_SIZES = [100, 200, 500, 1000]
-const FOLLOW_INTERVAL_MS = 5000
-const FOLLOW_MAX_ROWS = 2000
+
+/** 跟随时表头那行的状态字 */
+const TAIL_LABEL = { connecting: '连接中…', live: '跟随中', reconnecting: '重连中…', failed: '跟随已断开' } as const
 
 interface PagerProps {
   offset: number
@@ -78,6 +81,8 @@ export function LogsPage() {
   const limit = Number(params.get('limit')) || 200
   const offset = Number(params.get('offset')) || 0
   const follow = params.get('follow') === '1' && !!range.relative && order === 'desc'
+  // 终端模式：时间正序追加在底部、自动滚到底。只在跟随时有意义（不跟随就是普通翻页）
+  const terminal = follow && params.get('term') === '1'
 
   const setFilter = useCallback(
     (next: LogFilterState) => {
@@ -120,44 +125,8 @@ export function LogsPage() {
   )
   const histogram = useLogHistogram(baseParams, !byId && meta.isSuccess)
 
-  // ---- 跟随模式：每 5 秒拉一次，回看 60 秒兜住晚到的行，按行键去重 ----
-  const [live, setLive] = useState<LogRow[]>([])
-  const seen = useRef<Set<string>>(new Set())
-  const lastMax = useRef<number>(0)
-  useEffect(() => {
-    if (!follow) {
-      setLive([])
-      seen.current = new Set()
-      lastMax.current = 0
-      return
-    }
-    let stopped = false
-    const tick = async () => {
-      const now = Date.now()
-      const from = lastMax.current ? lastMax.current - 60_000 : range.fromMs
-      try {
-        const res = await fetch(`/api/logs/search${new URLSearchParams(Object.entries({ ...baseParams, from, to: now, order: 'desc', limit: 500, count: 0 }).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)])).toString().replace(/^/, '?')}`)
-        if (!res.ok || stopped) return
-        const data = (await res.json()) as { rows: LogRow[] }
-        const fresh = data.rows.filter((r) => !seen.current.has(rowKey(r)))
-        if (fresh.length) {
-          for (const r of fresh) {
-            seen.current.add(rowKey(r))
-            lastMax.current = Math.max(lastMax.current, r.ts_ms)
-          }
-          setLive((prev) => [...fresh, ...prev].sort((a, b) => b.ts_ms - a.ts_ms).slice(0, FOLLOW_MAX_ROWS))
-        }
-      } catch {
-        // 网络抖动下一轮再试
-      }
-    }
-    tick()
-    const id = setInterval(tick, FOLLOW_INTERVAL_MS)
-    return () => {
-      stopped = true
-      clearInterval(id)
-    }
-  }, [follow, baseParams, range.fromMs])
+  // 跟随：一条 SSE 长连接，服务端按游标推增量（见 src/api/tail.rs）
+  const tail = useLogTail(baseParams, follow)
 
   const [contextRow, setContextRow] = useState<LogRow | null>(null)
   useEffect(() => {
@@ -170,7 +139,9 @@ export function LogsPage() {
   }, [contextRow])
 
   const highlight = useMemo(() => (filter.regex ? [] : positiveTerms(filter.q)), [filter.regex, filter.q])
-  const rows = follow ? live : (search.data?.rows ?? [])
+  const rows = follow ? tail.rows : (search.data?.rows ?? [])
+  // 表格是最新在前，终端是最新在后
+  const streamRows = useMemo(() => (terminal ? [...rows].reverse() : rows), [terminal, rows])
   // 检索还没回来时表里是上一次的结果（keepPreviousData）。直方图比检索快，这时候把新的总数
   // 摆在旧行上面就成了「共 4 条」配着一屏不相干的日志，所以这一段整体标成待更新。
   const stale = !follow && search.isPlaceholderData
@@ -233,14 +204,14 @@ export function LogsPage() {
           {stale
             ? '查询中…'
             : follow
-              ? `跟随中 · 已收 ${formatNumber(rows.length)} 行`
+              ? `${TAIL_LABEL[tail.status]} · 已收 ${formatNumber(rows.length)} 行`
               : total !== undefined
                 ? `共 ${formatNumber(total)} 条${total > limit ? `，显示第 ${formatNumber(offset + 1)} ~ ${formatNumber(Math.min(offset + limit, total))} 条` : ''}`
                 : search.data
                   ? `显示 ${formatNumber(rows.length)} 条`
                   : ''}
         </span>
-        {search.isFetching && <Spinner className="size-4" />}
+        {(search.isFetching || (follow && tail.status !== 'live')) && <Spinner className="size-4" />}
         {/* 整词模式是后端按词长自动切的，不提示的话「搜 id 的前半截搜不到」会很费解 */}
         {!stale && !!search.data?.token_terms?.length && (
           <span
@@ -250,18 +221,29 @@ export function LogsPage() {
             按整词匹配 · 已走索引
           </span>
         )}
-        <StatsLine stats={search.data?.stats} className={cn('hidden text-2xs text-muted-fg sm:inline', stale && 'opacity-50')} />
+        <StatsLine stats={follow ? tail.stats : search.data?.stats} className={cn('hidden text-2xs text-muted-fg sm:inline', stale && 'opacity-50')} />
         <div className="ml-auto flex items-center gap-2">
           {!byId && (
             <Button
               size="sm"
               active={follow}
               disabled={!range.relative}
-              title={range.relative ? '每 5 秒拉一次新日志（回看 60 秒兜住晚到的行）' : '只有相对时间范围（最近 N 分钟）才能跟随'}
+              title={range.relative ? '新日志实时推过来（服务端每秒查一次增量，并回看一分钟兜住晚到的行）' : '只有相对时间范围（最近 N 分钟）才能跟随'}
               onClick={() => set({ follow: follow ? null : '1', order: null, offset: null })}
             >
               {follow ? <PauseIcon className="size-4" /> : <PlayIcon className="size-4" />}
               <span className="hidden sm:inline">{follow ? '停止跟随' : '跟随'}</span>
+            </Button>
+          )}
+          {follow && (
+            <Button
+              size="sm"
+              active={terminal}
+              title="终端模式：新日志正序追加在底部、自动滚到底；往上滚就停住"
+              onClick={() => set({ term: terminal ? null : '1' })}
+            >
+              <TerminalIcon className="size-4" />
+              <span className="hidden sm:inline">终端</span>
             </Button>
           )}
           {!byId && !follow && (
@@ -294,35 +276,47 @@ export function LogsPage() {
       </div>
       <div className={cn('min-h-0 flex-1 overflow-auto bg-card', stale && 'opacity-40 transition-opacity')}>
         {search.isError && <ErrorBox error={search.error} onRetry={() => search.refetch()} />}
+        {follow && tail.error && <ErrorBox error={{ message: tail.error }} />}
         {!follow && search.isPending && !search.isError && (
           <div className="flex justify-center py-16">
             <Spinner />
           </div>
         )}
-        {(follow || search.data) && (
-          <LogTable
-            rows={rows}
-            dims={dims}
-            highlight={highlight}
-            onContext={setContextRow}
-            onPivot={onPivot}
-            emptyText={
-              <EmptyState
-                title={follow ? '等待新日志…' : '这个范围内没有匹配的日志'}
-                hint={
-                  byId
-                    ? '这个 trace / span 没有对应的日志：可能是采集延迟（等几秒再刷新），或者这个服务没有打 TID。'
-                    : '试试放宽时间范围、去掉一个筛选条件，或者检查关键字是否写在了 message 里（logger / thread 有单独的框）。'
-                }
-              />
-            }
-          />
-        )}
+        {(follow || search.data) &&
+          (terminal ? (
+            <LogStream
+              rows={streamRows}
+              dims={dims}
+              highlight={highlight}
+              onContext={setContextRow}
+              onPivot={onPivot}
+              emptyText={<EmptyState title="等待新日志…" hint="新的行会一条条打在下面。往上滚可以停住不跟，滚回底部又接上。" />}
+            />
+          ) : (
+            <LogTable
+              rows={rows}
+              dims={dims}
+              highlight={highlight}
+              onContext={setContextRow}
+              onPivot={onPivot}
+              emptyText={
+                <EmptyState
+                  title={follow ? '等待新日志…' : '这个范围内没有匹配的日志'}
+                  hint={
+                    byId
+                      ? '这个 trace / span 没有对应的日志：可能是采集延迟（等几秒再刷新），或者这个服务没有打 TID。'
+                      : '试试放宽时间范围、去掉一个筛选条件，或者检查关键字是否写在了 message 里（logger / thread 有单独的框）。'
+                  }
+                />
+              }
+            />
+          ))}
         {rows.length > 0 && (
           <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-3 text-xs text-muted-fg md:px-4">
             {follow ? (
               <span>
-                跟随中，每 {FOLLOW_INTERVAL_MS / 1000} 秒拉一次新日志；最多保留 {formatNumber(FOLLOW_MAX_ROWS)} 行，更早的会被丢掉
+                新日志由服务端推送（每 {(tail.hello?.interval_ms ?? 1000) / 1000} 秒查一次增量，回看 {(tail.hello?.lookback_ms ?? 60_000) / 1000} 秒兜住晚到的行）；
+                {terminal ? '正序打在下面，往上滚可以停住；' : ''}最多保留 {formatNumber(TAIL_MAX_ROWS)} 行，更早的会被丢掉
               </span>
             ) : byId ? (
               <span>{rows.length >= limit ? `只显示了前 ${formatNumber(limit)} 条，可以把「每页」调大` : `共 ${formatNumber(rows.length)} 条，已经到底了`}</span>

@@ -38,7 +38,7 @@ const CONTROL_KEYS: &[&str] = &[
 ];
 
 /// 从查询串拼筛选条件。动态列名必须是表里真有的字符串列，否则 400 报清楚。
-fn build_filter(state: &AppState, schema: &Schema, p: &Params) -> Result<LogFilter> {
+pub(super) fn build_filter(state: &AppState, schema: &Schema, p: &Params) -> Result<LogFilter> {
     let has_id = p.get("trace_id").is_some() || p.get("span_id").is_some();
     let explicit_range = p.get("from").is_some() || p.get("to").is_some();
     let range = if has_id && !explicit_range {

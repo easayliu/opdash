@@ -75,6 +75,14 @@ pub struct Config {
     #[arg(long, env = "OPDASH_MAX_CONCURRENT_QUERIES", default_value_t = 16)]
     pub max_concurrent_queries: usize,
 
+    /// 日志跟随（SSE）时服务端多久查一次增量。每个跟随连接就是这个频率的一条轻量查询
+    #[arg(long, env = "OPDASH_TAIL_INTERVAL", default_value = "1s", value_parser = parse_duration)]
+    pub tail_interval: Duration,
+
+    /// 同时最多几条跟随连接（每条都在按 --tail-interval 轮 ClickHouse）；满了回 503
+    #[arg(long, env = "OPDASH_MAX_TAIL_STREAMS", default_value_t = 8)]
+    pub max_tail_streams: usize,
+
     /// 多久重新读一次 system.columns（新加的 fields 列不用重启就能筛）
     #[arg(long, env = "OPDASH_SCHEMA_REFRESH", default_value = "5m", value_parser = parse_duration)]
     pub schema_refresh: Duration,
@@ -168,6 +176,15 @@ impl Config {
         }
         if self.oidc_issuer.is_some() && self.oidc_client_id.is_none() {
             return Err("配了 --oidc-issuer 就必须配 --oidc-client-id".into());
+        }
+        if self.tail_interval < Duration::from_millis(200) {
+            return Err("--tail-interval 至少 200ms，再快就是在刷库了".into());
+        }
+        if self.tail_interval > Duration::from_secs(60) {
+            return Err("--tail-interval 最多 60s，再慢就不叫跟随了".into());
+        }
+        if self.max_tail_streams == 0 {
+            return Err("--max-tail-streams 至少 1".into());
         }
         if self.session_ttl.as_secs() < 60 {
             return Err("--session-ttl 至少 1 分钟".into());
