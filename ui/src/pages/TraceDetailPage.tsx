@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { CopyIcon } from 'lucide-react'
 import { useMeta, useTraceDetail, useTraceLogs } from '@/api/queries'
@@ -64,18 +64,6 @@ export function TraceDetailPage() {
   const onSort = (key: string) => setSort((s) => ({ key, dir: s.key === key && s.dir === 'asc' ? 'desc' : 'asc' }))
   const sortedLogs = useMemo(() => (logs.data ? sortLogRows(logs.data.rows, sort) : []), [logs.data, sort])
   const selectedLogCount = useMemo(() => (selected ? sortedLogs.filter((r) => r.span_id === selected).length : 0), [sortedLogs, selected])
-  // 点了 span 就把它的日志高亮，并把第一条滚到日志区顶部（留出 sticky 表头的高度）。
-  // 不用 scrollIntoView：它会连外层容器一起滚，而且会把行塞到表头底下。
-  const logsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const box = logsRef.current
-    if (!box || !selected || logsOnlySpan) return
-    const row = box.querySelector<HTMLTableRowElement>('tr[data-selected]')
-    if (!row) return
-    const head = box.querySelector('thead')?.getBoundingClientRect().height ?? 0
-    const top = row.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - head - 4
-    box.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
-  }, [selected, logsOnlySpan, sortedLogs])
   const dims = meta.data?.logs.dimensions ?? []
 
   return (
@@ -211,7 +199,7 @@ export function TraceDetailPage() {
               </span>
             </div>
             {showLogs && (
-              <div ref={logsRef} className="min-h-0 flex-1 overflow-auto border-t border-border/60">
+              <div className="min-h-0 flex-1 overflow-auto border-t border-border/60">
                 {logs.isError && <ErrorBox error={logs.error} />}
                 {logs.data && (
                   <LogTable

@@ -1,4 +1,5 @@
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
@@ -45,6 +46,71 @@ export function sortLogRows(rows: LogRow[], sort: LogSort): LogRow[] {
     return dimValue(a, sort.key).localeCompare(dimValue(b, sort.key))
   }
   return [...rows].sort((a, b) => dir * cmp(a, b) || a.ts_ms - b.ts_ms)
+}
+
+/** 最近的纵向滚动祖先：表格自己不滚，滚的是页面 / 抽屉里那层 overflow-auto */
+function scrollParent(el: HTMLElement | null): HTMLElement | null {
+  for (let box = el?.parentElement ?? null; box; box = box.parentElement) {
+    if (/(auto|scroll)/.test(getComputedStyle(box).overflowY)) return box
+  }
+  return null
+}
+
+/** 表格 / 卡片列表底部估算的一行高度（px）；真实高度渲染后再量 */
+const EST_ROW_H = 34
+const EST_CARD_H = 76
+
+/**
+ * 只渲染视口里的行。行高不固定（消息两行截断、展开后更高），渲染后按 `data-index` 实测。
+ * 表头是 sticky 的，滚到某一行时要让出它的高度。
+ */
+function useRowVirtualizer(rows: LogRow[], hostRef: React.RefObject<HTMLElement | null>, estimate: number, stickyPx: number) {
+  const scrollEl = useRef<HTMLElement | null>(null)
+  const [margin, setMargin] = useState(0)
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => (scrollEl.current ??= scrollParent(hostRef.current)),
+    estimateSize: () => estimate,
+    overscan: 8,
+    scrollMargin: margin,
+    scrollPaddingStart: stickyPx,
+    getItemKey: (i) => rowKey(rows[i]),
+  })
+  // 表格前面可能还有别的东西（报错框、空态），量一下它在滚动容器里的起点
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    const box = scrollEl.current ?? scrollParent(host)
+    if (!host || !box) return
+    scrollEl.current = box
+    const m = Math.max(0, Math.round(host.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop))
+    setMargin((prev) => (prev === m ? prev : m))
+  })
+  return virtualizer
+}
+
+/** 选中的 span 变了：把它的第一条日志滚到表头下面。上下文视图里的锚点行第一次出现时滚到中间。 */
+function useScrollToMarked(
+  virtualizer: Virtualizer<HTMLElement, Element>,
+  rows: LogRow[],
+  selectedSpanId: string | null | undefined,
+  anchorKey: string | undefined,
+) {
+  useEffect(() => {
+    if (!selectedSpanId) return
+    const idx = rows.findIndex((r) => r.span_id === selectedSpanId)
+    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: 'start', behavior: 'smooth' })
+    // rows 换了（重新排序）也要跟着滚，virtualizer 本身稳定
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSpanId, rows])
+  const anchored = useRef<string | null>(null)
+  useEffect(() => {
+    if (!anchorKey || anchored.current === anchorKey) return
+    const idx = rows.findIndex((r) => rowKey(r) === anchorKey)
+    if (idx < 0) return
+    anchored.current = anchorKey
+    virtualizer.scrollToIndex(idx, { align: 'center' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorKey, rows])
 }
 
 function SortHeader({ label, col, sort, onSort }: { label: string; col: string; sort?: LogSort; onSort?: (key: string) => void }) {
@@ -136,7 +202,44 @@ export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onC
     )
   }
   return (
-    <table className="w-full table-fixed border-collapse text-xs">
+    <LogRows
+      rows={rows}
+      dims={dims}
+      cols={cols}
+      highlight={highlight}
+      anchorKey={anchorKey}
+      selectedSpanId={selectedSpanId}
+      onContext={onContext}
+      onPivot={onPivot}
+      compact={compact}
+      sort={sort}
+      onSort={onSort}
+      expanded={expanded}
+      toggle={toggle}
+    />
+  )
+}
+
+type RowsProps = Pick<LogTableProps, 'rows' | 'dims' | 'highlight' | 'anchorKey' | 'selectedSpanId' | 'onContext' | 'onPivot'> & {
+  cols: string[]
+  expanded: Set<string>
+  toggle: (k: string) => void
+}
+
+/** sticky 表头的高度，滚到某行时让出来 */
+const THEAD_H = 30
+
+function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, sort, onSort, expanded, toggle }: RowsProps & Pick<LogTableProps, 'compact' | 'sort' | 'onSort'>) {
+  const tableRef = useRef<HTMLTableElement>(null)
+  const virtualizer = useRowVirtualizer(rows, tableRef, EST_ROW_H, THEAD_H)
+  useScrollToMarked(virtualizer, rows, selectedSpanId, anchorKey)
+  const items = virtualizer.getVirtualItems()
+  const margin = virtualizer.options.scrollMargin
+  const padTop = items.length ? items[0].start - margin : 0
+  const padBottom = items.length ? virtualizer.getTotalSize() - (items[items.length - 1].end - margin) : 0
+  const span = cols.length + (compact ? 4 : 5) + (onContext ? 1 : 0)
+  return (
+    <table ref={tableRef} className="w-full table-fixed border-collapse text-xs">
       <thead className="sticky top-0 z-[1] bg-card text-2xs text-muted-fg shadow-[inset_0_-1px_0_var(--border)]">
         <tr>
           <th className="w-7" />
@@ -161,125 +264,134 @@ export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onC
           {onContext && <th className="w-10" />}
         </tr>
       </thead>
-      <tbody>
-        {rows.map((r) => {
-          const key = rowKey(r)
-          const open = expanded.has(key)
-          const [first, rest] = splitFirstLine(r.message)
-          const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
-          return (
-            <Fragment key={key}>
-              <tr
-                className={cn('row-hover cursor-pointer border-b border-border/60 align-top', isAnchor && 'row-selected', open && 'bg-muted/40')}
-                data-selected={isAnchor ? '1' : undefined}
-                onClick={() => toggle(key)}
-              >
-                <td className="py-1.5 pl-2 text-muted-fg">
-                  {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
-                </td>
-                <td className="mono px-1.5 py-1.5 whitespace-nowrap text-muted-fg tabular-nums">{formatTs(r.ts_ms)}</td>
-                <td className="px-1.5 py-1.5">
-                  <Badge tone={levelTone(r.level)}>{r.level || '-'}</Badge>
-                </td>
-                {cols.map((c) => (
-                  <td key={c} className="truncate px-1.5 py-1.5 text-muted-fg" title={dimValue(r, c)}>
-                    {onPivot ? (
-                      <button
-                        type="button"
-                        className="max-w-full truncate hover:text-accent hover:underline"
-                        title={`只看 ${c} = ${dimValue(r, c)}`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onPivot(c, dimValue(r, c))
-                        }}
-                      >
-                        {dimValue(r, c) || '-'}
-                      </button>
-                    ) : (
-                      dimValue(r, c) || '-'
-                    )}
-                  </td>
-                ))}
-                {!compact && (
-                  <td className="mono truncate px-1.5 py-1.5 text-muted-fg" title={r.logger}>
-                    {r.logger}
-                  </td>
-                )}
-                <td className="px-1.5 py-1.5">
-                  <div className={cn('mono break-all leading-5', !open && 'line-clamp-2')}>
-                    <Highlight text={first} terms={highlight} />
-                    {!open && rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
-                  </div>
-                </td>
-                <td className="mono px-1.5 py-1.5 text-2xs">
-                  {r.trace_id ? (
-                    <Link
-                      to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
-                      className="text-accent hover:underline"
-                      title={`查看链路 ${r.trace_id}`}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {r.trace_id.slice(0, 8)}…
-                    </Link>
-                  ) : (
-                    <span className="text-muted-fg">-</span>
-                  )}
-                </td>
-                {onContext && (
-                  <td className="px-1 py-1">
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      className="px-1.5"
-                      title="查看这一行前后的日志（同一容器日志流）"
+      {/* 视口外的行用一段空白顶着，滚动条长度和全量渲染时一样 */}
+      {padTop > 0 && (
+        <tbody>
+          <tr style={{ height: padTop }}>
+            <td colSpan={span} className="p-0" />
+          </tr>
+        </tbody>
+      )}
+      {items.map((item) => {
+        const r = rows[item.index]
+        const key = rowKey(r)
+        const open = expanded.has(key)
+        const [first, rest] = splitFirstLine(r.message)
+        const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
+        // 一条日志一个 tbody：主行加展开行一起量高度
+        return (
+          <tbody key={key} data-index={item.index} ref={virtualizer.measureElement}>
+            <tr
+              className={cn('row-hover cursor-pointer border-b border-border/60 align-top', isAnchor && 'row-selected', open && 'bg-muted/40')}
+              data-selected={isAnchor ? '1' : undefined}
+              onClick={() => toggle(key)}
+            >
+              <td className="py-1.5 pl-2 text-muted-fg">
+                {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
+              </td>
+              <td className="mono px-1.5 py-1.5 whitespace-nowrap text-muted-fg tabular-nums">{formatTs(r.ts_ms)}</td>
+              <td className="px-1.5 py-1.5">
+                <Badge tone={levelTone(r.level)}>{r.level || '-'}</Badge>
+              </td>
+              {cols.map((c) => (
+                <td key={c} className="truncate px-1.5 py-1.5 text-muted-fg" title={dimValue(r, c)}>
+                  {onPivot ? (
+                    <button
+                      type="button"
+                      className="max-w-full truncate hover:text-accent hover:underline"
+                      title={`只看 ${c} = ${dimValue(r, c)}`}
                       onClick={(e) => {
                         e.stopPropagation()
-                        onContext(r)
+                        onPivot(c, dimValue(r, c))
                       }}
                     >
-                      <ListTreeIcon className="size-4" />
-                    </Button>
-                  </td>
-                )}
-              </tr>
-              {open && (
-                <tr className="border-b border-border/60 bg-muted/30">
-                  <td />
-                  <td colSpan={cols.length + (compact ? 4 : 5) + (onContext ? 1 : 0)} className="px-2 py-3">
-                    <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
-                  </td>
-                </tr>
+                      {dimValue(r, c) || '-'}
+                    </button>
+                  ) : (
+                    dimValue(r, c) || '-'
+                  )}
+                </td>
+              ))}
+              {!compact && (
+                <td className="mono truncate px-1.5 py-1.5 text-muted-fg" title={r.logger}>
+                  {r.logger}
+                </td>
               )}
-            </Fragment>
-          )
-        })}
-      </tbody>
+              <td className="px-1.5 py-1.5">
+                <div className={cn('mono break-all leading-5', !open && 'line-clamp-2')}>
+                  <Highlight text={first} terms={highlight} />
+                  {!open && rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
+                </div>
+              </td>
+              <td className="mono px-1.5 py-1.5 text-2xs">
+                {r.trace_id ? (
+                  <Link
+                    to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
+                    className="text-accent hover:underline"
+                    title={`查看链路 ${r.trace_id}`}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {r.trace_id.slice(0, 8)}…
+                  </Link>
+                ) : (
+                  <span className="text-muted-fg">-</span>
+                )}
+              </td>
+              {onContext && (
+                <td className="px-1 py-1">
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="px-1.5"
+                    title="查看这一行前后的日志（同一容器日志流）"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onContext(r)
+                    }}
+                  >
+                    <ListTreeIcon className="size-4" />
+                  </Button>
+                </td>
+              )}
+            </tr>
+            {open && (
+              <tr className="border-b border-border/60 bg-muted/30">
+                <td />
+                <td colSpan={span} className="px-2 py-3">
+                  <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
+                </td>
+              </tr>
+            )}
+          </tbody>
+        )
+      })}
+      {padBottom > 0 && (
+        <tbody>
+          <tr style={{ height: padBottom }}>
+            <td colSpan={span} className="p-0" />
+          </tr>
+        </tbody>
+      )}
     </table>
   )
 }
 
 /** 手机上的日志列表：一条一张卡，点开看全文和字段。列太多的表格在窄屏上只能横滚，不如卡片。 */
-function LogCards({
-  rows,
-  dims,
-  cols,
-  highlight,
-  anchorKey,
-  selectedSpanId,
-  onContext,
-  onPivot,
-  expanded,
-  toggle,
-}: Pick<LogTableProps, 'rows' | 'dims' | 'highlight' | 'anchorKey' | 'selectedSpanId' | 'onContext' | 'onPivot'> & {
-  cols: string[]
-  expanded: Set<string>
-  toggle: (k: string) => void
-}) {
+function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, expanded, toggle }: RowsProps) {
+  const listRef = useRef<HTMLUListElement>(null)
+  const virtualizer = useRowVirtualizer(rows, listRef, EST_CARD_H, 0)
+  useScrollToMarked(virtualizer, rows, selectedSpanId, anchorKey)
+  const items = virtualizer.getVirtualItems()
+  const margin = virtualizer.options.scrollMargin
+  const padTop = items.length ? items[0].start - margin : 0
+  const padBottom = items.length ? virtualizer.getTotalSize() - (items[items.length - 1].end - margin) : 0
   // 卡片上只放第一个维度（一般是 service_name），其余的点开再看
   const primary = cols[0]
   return (
-    <ul className="text-xs">
-      {rows.map((r) => {
+    <ul ref={listRef} className="text-xs">
+      {padTop > 0 && <li aria-hidden style={{ height: padTop }} />}
+      {items.map((item) => {
+        const r = rows[item.index]
         const key = rowKey(r)
         const open = expanded.has(key)
         const [first, rest] = splitFirstLine(r.message)
@@ -287,6 +399,8 @@ function LogCards({
         return (
           <li
             key={key}
+            data-index={item.index}
+            ref={virtualizer.measureElement}
             data-selected={isAnchor ? '1' : undefined}
             className={cn('border-b border-border/60 px-3 py-2', isAnchor && 'row-selected', open && 'bg-muted/40')}
             onClick={() => toggle(key)}
@@ -332,6 +446,7 @@ function LogCards({
           </li>
         )
       })}
+      {padBottom > 0 && <li aria-hidden style={{ height: padBottom }} />}
     </ul>
   )
 }

@@ -136,13 +136,23 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   `output_format_json_quote_64bit_integers=0`；span 表的查询另带 `optimize_skip_unused_shards=1`。
 * 时间范围：`timestamp >= fromUnixTimestamp64Milli({from:Int64})`，参数代入后是常量，能裁剪分区、走主键。
 * 日志：`ORDER BY timestamp DESC, host, file, thread, logger, message LIMIT n OFFSET m`——排序键前缀是
-  `timestamp`，ClickHouse 按排序键倒着读、读够就停；后面几列只是让同一毫秒的行有确定顺序。关键字是
-  `positionCaseInsensitiveUTF8(message, ...)`，没有索引，扫的是时间范围内的全部行，所以关键字搜索
-  用 `exact_rows_before_limit=1` 一次扫描顺带把总数算出来，不扫两遍。
+  `timestamp`，ClickHouse 按排序键倒着读、读够就停；后面几列只是让同一毫秒的行有确定顺序。
+* 关键字语法参考 Kibana / Datadog：空格 = AND，`a OR b`，`-词` / `NOT 词`，`"带 空格"`，`( )` 分组，
+  优先级 NOT > AND > OR；`AND` / `OR` / `NOT` 全大写才是操作符。解析不报错，悬空的操作符和多余的括号
+  直接忽略；词内配对的括号（`getUser(id)`）照字面搜。每个词是 `positionCaseInsensitiveUTF8(message, ...)`，
+  全是词的 OR 合成一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])` 一趟扫完。message 没有索引，
+  扫的是时间范围内的全部行，所以关键字搜索用 `exact_rows_before_limit=1` 一次扫描顺带把总数算出来，不扫两遍。
 * 链路检索两次往返：先 `SELECT trace_id ... ORDER BY timestamp DESC LIMIT 1 BY trace_id LIMIT n`
   拿候选 id，再 `WHERE trace_id IN {ids:Array(String)} GROUP BY trace_id` 聚合摘要。不用嵌套子查询，
   Distributed 表上 `distributed_product_mode=deny` 也没问题。「请求耗时」= 根 span 的耗时（根缺失时
   退回最早的 span）；「总跨度」= 最早 span 开始到最晚 span 结束，异步消费会让它比请求耗时长得多。
+* 链路详情也两次往返：先 `WHERE trace_id = ?` 只读 `span_id, service_name, span_name, timestamp` 定位，
+  再按 `service_name IN ... AND span_name IN ... AND timestamp BETWEEN ...` 走排序键前缀取 JSON 属性、
+  events / links 这些重列。`trace_id` 只有 bloom filter（GRANULARITY 4，2.5% 误报），一天一亿多 span 时
+  过了索引的块绝大多数是误报（线上 EXPLAIN：18371 个 granule 剩 476 个，和期望误报数正好对上），一步
+  到位地读完整 JSON 就是几个 GB、30 秒超时；拆开后误报块只读几十字节一行，重列由主键精确圈到。
+  第二步不传 span id 列表：参数都在 URL 里，5000 个 id 会超过 64 KB 的 URI 上限；两步排序相同、
+  时间区间卡在第一步的首尾毫秒，取同样多的行就是同一批 span。
 * 属性过滤写成子列标识符 `` span_attributes.`http.route` ``：只读那一个子列（线上 10 分钟数据 12 MB、
   40 ms）。`getSubcolumn(col, {path:String})` 虽然能把路径当参数，但 MergeTree 上会把整个 JSON 列读出来
   （同一查询 5.9 GB、5 秒）。路径进 SQL 前按标识符规则校验（不含反引号 / 反斜杠 / 控制字符）。
@@ -150,7 +160,8 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
 * 直方图分桶：`intDiv(toUnixTimestamp64Milli(timestamp) - origin, width)`，原点是范围起点那天的本地零点。
   不用 `toStartOfInterval(..., INTERVAL n SECOND)`：它按 UTC 取整，6 小时一桶时边界落在北京时间 02 / 08 点。
 * 老分区没有索引：`ADD INDEX` 只对新写入的 part 生效，按 trace id 查历史日志慢的话在库上
-  `ALTER TABLE logs.app_log_local ON CLUSTER log MATERIALIZE INDEX idx_trace_id`。
+  `ALTER TABLE logs.app_log_local ON CLUSTER log MATERIALIZE INDEX idx_trace_id`（`otel_trace_local` 同理）。
+  哪些 part 没索引看 `system.parts` 的 `secondary_indices_compressed_bytes`，为 0 就是没有。
 
 ## 部署
 

@@ -91,7 +91,7 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
           <Input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder={state.regex ? '正则（RE2）：如 orderId=\\d+ .*timeout' : '搜索 message：多个词都要命中；-词 排除；"带 空格" 整体匹配'}
+            placeholder={state.regex ? '正则（RE2）：如 orderId=\\d+ .*timeout' : '搜索 message：空格 = 且；a OR b 任一；-词 排除；"带 空格" 整体；( ) 分组'}
             className="mono pr-9"
             aria-label="日志关键字"
           />
@@ -132,8 +132,10 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
       {idChip && !mobileOpen && <div className="flex md:hidden">{idChip}</div>}
       {help && (
         <div className="rounded-md border border-border bg-muted/50 px-4 py-2.5 text-xs leading-6 text-muted-fg">
-          关键字模式：空格分隔的词全部要命中（不分大小写）；<Kbd>-词</Kbd> 排除；<Kbd>"带 空格"</Kbd> 当一个整体。正则模式（<Kbd>.*</Kbd>）：ClickHouse{' '}
-          <code>match()</code>，RE2 语法，区分大小写，<Kbd>(?i)</Kbd> 忽略大小写。message 没有索引，扫的是时间范围内的全部日志——先选服务 / pod、缩小时间范围，查询更快。
+          关键字模式（不分大小写）：空格分隔的词全部要命中；<Kbd>a OR b</Kbd> 任一命中；<Kbd>-词</Kbd> / <Kbd>NOT 词</Kbd> 排除；<Kbd>"带 空格"</Kbd> 当一个整体；
+          <Kbd>( )</Kbd> 分组，如 <Kbd>(timeout OR refused) -重试</Kbd>。<Kbd>AND</Kbd> / <Kbd>OR</Kbd> / <Kbd>NOT</Kbd> 全大写才是操作符，小写的 or 是普通词。
+          正则模式（<Kbd>.*</Kbd>）：ClickHouse <code>match()</code>，RE2 语法，区分大小写，<Kbd>(?i)</Kbd> 忽略大小写。message
+          没有索引，扫的是时间范围内的全部日志——先选服务 / pod、缩小时间范围，查询更快。
         </div>
       )}
       <div className={cn('flex flex-wrap items-center gap-2', !mobileOpen && 'hidden md:flex')}>

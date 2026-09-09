@@ -36,6 +36,11 @@ export function parseRange(params: URLSearchParams, now = Date.now()): Range {
   return { fromMs: now - quick.ms, toMs: now, relative: quick.key }
 }
 
+/** URL 上是否显式指定了时间范围（没有就吃默认值）。 */
+export function hasRangeParams(params: URLSearchParams): boolean {
+  return params.has('range') || (params.has('from') && params.has('to'))
+}
+
 /** 把范围写回 URL 参数（原地修改）。 */
 export function writeRange(params: URLSearchParams, range: Range): void {
   if (range.relative) {
