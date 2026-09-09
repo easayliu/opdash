@@ -5,6 +5,7 @@ import type { AttrValue, Span } from '@/api/types'
 import { Badge, Button } from '@/components/ui'
 import type { ColorAssigner } from '@/lib/colors'
 import { formatDuration, formatTsMicro } from '@/lib/time'
+import { fillSqlParams, formatSql } from '@/lib/sql'
 import { cn, copyText } from '@/lib/utils'
 
 export interface SpanNode {
@@ -401,6 +402,30 @@ function fmtValue(v: AttrValue): string {
   return String(v)
 }
 
+/** db.statement + db.query.parameter.N 拼出来的可执行 SQL，放在属性页顶上，一键复制。 */
+function FilledSql({ sql, dbSystem }: { sql: string; dbSystem?: AttrValue }) {
+  const [pretty, setPretty] = useState(sql)
+  useEffect(() => {
+    let alive = true
+    setPretty(sql)
+    formatSql(sql, dbSystem).then((s) => alive && setPretty(s))
+    return () => {
+      alive = false
+    }
+  }, [sql, dbSystem])
+  return (
+    <div className="border-b border-border/60 px-4 py-3">
+      <div className="mb-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
+        <span className="font-medium">填参后的 SQL</span>
+        <button type="button" onClick={() => copyText(pretty)} title="复制 SQL" className="hover:text-fg">
+          <CopyIcon className="size-3" />
+        </button>
+      </div>
+      <pre className="mono max-h-96 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-2xs leading-[1.125rem] whitespace-pre-wrap break-all">{pretty}</pre>
+    </div>
+  )
+}
+
 function KV({ entries }: { entries: [string, AttrValue][] }) {
   if (!entries.length) return <div className="px-4 py-4 text-xs text-muted-fg">（无）</div>
   return (
@@ -423,6 +448,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
   const attrs = Object.entries(span.attributes)
   const resource = Object.entries(span.resource)
   const subtitle = spanSubtitle(span)
+  const filledSql = useMemo(() => fillSqlParams(span.attributes), [span.attributes])
   return (
     <aside className="flex min-h-0 w-[30rem] shrink-0 flex-col border-l border-border bg-card">
       <header className="border-b border-border px-4 py-3">
@@ -479,7 +505,12 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {tab === 'attrs' && <KV entries={attrs} />}
+        {tab === 'attrs' && (
+          <>
+            {filledSql && <FilledSql sql={filledSql} dbSystem={span.attributes['db.system']} />}
+            <KV entries={attrs} />
+          </>
+        )}
         {tab === 'resource' && <KV entries={resource} />}
         {tab === 'events' &&
           (span.events.length ? (
