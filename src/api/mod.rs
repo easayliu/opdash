@@ -12,8 +12,9 @@ use std::sync::Arc;
 use axum::{Router, middleware, routing::get};
 use tower_http::trace::TraceLayer;
 
+use crate::auth::{self as authn, Auth};
 use crate::clickhouse::Client;
-use crate::config::{BasicAuth, Config};
+use crate::config::Config;
 use crate::schema::SchemaCache;
 use crate::ui;
 
@@ -41,19 +42,20 @@ pub fn api_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// 整个应用：API + 内嵌前端 + 可选 Basic 认证。
+/// 整个应用：API + 内嵌前端 + 可选认证（Basic / OIDC）。
 ///
-/// `/api/health` 放在认证外面，k8s 探针不带密码。
-pub fn app(state: AppState, auth: Option<&BasicAuth>) -> Router {
+/// `/api/health` 放在认证外面，k8s 探针不带密码；`/api/auth/*` 也在外面，不然没法登录。
+pub fn app(state: AppState, auth: Auth) -> Router {
     let mut protected = api_router(state.clone())
         .route("/", get(ui::fallback).post(ui::redirect_root_post))
         .fallback_service(get(ui::fallback));
-    if let Some(auth) = auth {
-        protected = protected.layer(middleware::from_fn_with_state(auth.clone(), auth::require));
+    if auth.enabled() {
+        protected = protected.layer(middleware::from_fn_with_state(auth.clone(), authn::require));
     }
     Router::new()
         .route("/api/health", get(meta::health))
         .with_state(state)
+        .merge(auth::routes(auth))
         .merge(protected)
         .layer(ui::compression())
         .layer(TraceLayer::new_for_http())

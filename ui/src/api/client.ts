@@ -43,16 +43,31 @@ export async function apiGet<T>(path: string, params: Params = {}, signal?: Abor
   let message = `${res.status} ${res.statusText}`
   let kind = 'internal'
   let code: number | undefined
+  let loginUrl: string | undefined
   try {
     const body = await res.json()
     if (typeof body?.error === 'string') message = body.error
     if (typeof body?.kind === 'string') kind = body.kind
     if (typeof body?.clickhouse_code === 'number') code = body.clickhouse_code
+    if (typeof body?.login_url === 'string') loginUrl = body.login_url
   } catch {
     // 不是 JSON（比如 401 的纯文本）
     if (res.status === 401) message = '需要登录'
   }
+  if (res.status === 401 && loginUrl) {
+    // OIDC 会话过期：整页跳去登录，登录完回到当前页。同一时刻多个请求一起 401 只跳一次
+    redirectToLogin(loginUrl)
+  }
   throw new ApiError(res.status, message, kind, code)
+}
+
+let redirecting = false
+/** 带上当前路径跳登录页；登录成功后后端把人送回来。 */
+export function redirectToLogin(loginUrl = '/api/auth/login') {
+  if (redirecting) return
+  redirecting = true
+  const next = window.location.pathname + window.location.search
+  window.location.assign(`${loginUrl}?next=${encodeURIComponent(next)}`)
 }
 
 /** 下载链接（导出用），浏览器直接打开。 */

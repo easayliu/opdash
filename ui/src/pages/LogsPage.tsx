@@ -201,7 +201,7 @@ export function LogsPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <LogFilters state={filter} dims={dims} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
       {!byId && (
-        <section className="border-b border-border bg-card px-3 pt-2 pb-1">
+        <section className="border-b border-border bg-card px-4 pt-3 pb-2">
           {histogram.isError ? (
             <ErrorBox error={histogram.error} />
           ) : (
@@ -211,16 +211,16 @@ export function LogsPage() {
               widthMs={histogram.data?.width_ms ?? 60_000}
               buckets={(histogram.data?.buckets ?? []).map((b) => ({ t_ms: b.t_ms, values: b.counts }))}
               series={(histogram.data?.levels ?? []).map((l) => ({ key: l, label: l, color: levelColor(l) }))}
-              height={120}
+              height={150}
               stale={histogram.isFetching}
               onBrush={(f, t) => setRange({ fromMs: f, toMs: t, relative: null })}
             />
           )}
-          <div className="flex items-center justify-between text-2xs text-muted-fg">
-            <span className="flex flex-wrap gap-x-3">
+          <div className="mt-1 flex items-center justify-between text-2xs text-muted-fg">
+            <span className="flex flex-wrap gap-x-4">
               {(histogram.data?.levels ?? []).map((l) => (
                 <span key={l} className="inline-flex items-center gap-1">
-                  <span className="inline-block size-2 rounded-sm" style={{ background: levelColor(l) }} />
+                  <span className="inline-block size-2.5 rounded-sm" style={{ background: levelColor(l) }} />
                   {l}
                 </span>
               ))}
@@ -230,8 +230,8 @@ export function LogsPage() {
           </div>
         </section>
       )}
-      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-xs">
-        <span className="text-muted-fg">
+      <div className="flex flex-wrap items-center gap-3 border-b border-border bg-card px-4 py-2 text-xs">
+        <span className="font-medium text-fg">
           {follow
             ? `跟随中 · 已收 ${formatNumber(rows.length)} 行`
             : total !== undefined
@@ -240,9 +240,9 @@ export function LogsPage() {
                 ? `显示 ${formatNumber(rows.length)} 条`
                 : ''}
         </span>
-        {search.isFetching && <Spinner className="size-3.5" />}
+        {search.isFetching && <Spinner className="size-4" />}
         <StatsLine stats={search.data?.stats} />
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex items-center gap-2">
           {!byId && (
             <Button
               size="sm"
@@ -251,18 +251,18 @@ export function LogsPage() {
               title={range.relative ? '每 5 秒拉一次新日志（回看 60 秒兜住晚到的行）' : '只有相对时间范围（最近 N 分钟）才能跟随'}
               onClick={() => set({ follow: follow ? null : '1', order: null, offset: null })}
             >
-              {follow ? <PauseIcon className="size-3.5" /> : <PlayIcon className="size-3.5" />}
+              {follow ? <PauseIcon className="size-4" /> : <PlayIcon className="size-4" />}
               {follow ? '停止跟随' : '跟随'}
             </Button>
           )}
           {!byId && !follow && (
-            <Select value={order} onChange={(e) => set({ order: e.target.value === 'asc' ? 'asc' : null, offset: null })} className="h-7 text-xs">
+            <Select value={order} onChange={(e) => set({ order: e.target.value === 'asc' ? 'asc' : null, offset: null })} className="h-8 text-xs">
               <option value="desc">最新在前</option>
               <option value="asc">最早在前</option>
             </Select>
           )}
           {!follow && (
-            <Select value={String(limit)} onChange={(e) => set({ limit: e.target.value === '200' ? null : e.target.value, offset: null })} className="h-7 text-xs">
+            <Select value={String(limit)} onChange={(e) => set({ limit: e.target.value === '200' ? null : e.target.value, offset: null })} className="h-8 text-xs">
               {PAGE_SIZES.map((n) => (
                 <option key={n} value={n}>
                   每页 {n}
@@ -273,7 +273,7 @@ export function LogsPage() {
           {!follow && !byId && <Pager {...pager} />}
           <a href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })} className="inline-flex" download title={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`}>
             <Button size="sm">
-              <DownloadIcon className="size-3.5" />
+              <DownloadIcon className="size-4" />
               CSV
             </Button>
           </a>
@@ -309,7 +309,7 @@ export function LogsPage() {
           />
         )}
         {rows.length > 0 && (
-          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2 text-2xs text-muted-fg">
+          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-3 text-xs text-muted-fg">
             {follow ? (
               <span>
                 跟随中，每 {FOLLOW_INTERVAL_MS / 1000} 秒拉一次新日志；最多保留 {formatNumber(FOLLOW_MAX_ROWS)} 行，更早的会被丢掉

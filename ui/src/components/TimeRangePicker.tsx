@@ -41,18 +41,18 @@ export function TimeRangePicker({ className }: { className?: string }) {
 
   return (
     <div ref={ref} className={cn('relative flex items-center gap-1', className)}>
-      <Button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="gap-1.5 pl-2.5">
-        <CalendarIcon className="size-3.5 text-muted-fg" />
+      <Button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="gap-1.5 pl-3">
+        <CalendarIcon className="size-4 text-muted-fg" />
         <span className="max-w-[22rem] truncate">{rangeLabel(range)}</span>
-        <ChevronDownIcon className="size-3.5 text-muted-fg" />
+        <ChevronDownIcon className="size-4 text-muted-fg" />
       </Button>
-      <Button variant="ghost" size="md" className="px-2" onClick={refresh} title="按当前时间重新查询">
-        <RefreshCwIcon className="size-3.5" />
+      <Button variant="ghost" size="md" className="px-2.5" onClick={refresh} title="按当前时间重新查询">
+        <RefreshCwIcon className="size-4" />
       </Button>
       {open && (
-        <div className="absolute top-full right-0 z-30 mt-1 w-[26rem] rounded-lg border border-border bg-card p-3 shadow-lg">
+        <div className="absolute top-full right-0 z-30 mt-1 w-[28rem] rounded-lg border border-border bg-card p-4 shadow-lg">
           <div className="mb-2 text-2xs font-semibold tracking-wide text-muted-fg uppercase">快捷范围</div>
-          <div className="grid grid-cols-3 gap-1">
+          <div className="grid grid-cols-3 gap-1.5">
             {QUICK_RANGES.map((q) => (
               <Button
                 key={q.key}

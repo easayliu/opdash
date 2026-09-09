@@ -18,7 +18,7 @@ export function ChartTooltip({
   const flip = x > width - 180
   return (
     <div
-      className="pointer-events-none absolute z-10 min-w-36 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs shadow-md"
+      className="pointer-events-none absolute z-10 min-w-40 rounded-md border border-border bg-card px-3 py-2 text-xs shadow-md"
       style={{ left: flip ? undefined : x + 12, right: flip ? width - x + 12 : undefined, top: Math.max(0, y - 8) }}
     >
       <div className="mb-1 text-2xs text-muted-fg">{title}</div>

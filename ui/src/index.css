@@ -10,8 +10,14 @@
   --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
 
-  --text-2xs: 0.6875rem;
-  --text-2xs--line-height: 1rem;
+  /* 字号：正文 14px，表格 / 次要文字 13px，说明文字 12px。
+     html 保持浏览器默认 16px，rem 不缩放，间距按 Tailwind 原尺寸走。 */
+  --text-2xs: 0.75rem;
+  --text-2xs--line-height: 1.125rem;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.25rem;
 
   /* Cloudflare 控制台的圆角基本只有 4px 一档：按钮、输入框、卡片都贴着直角走，
      平面优先，靠 1px 实线描边分层，不投影。 */
@@ -120,8 +126,12 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-sans);
-  font-size: 13px;
   -webkit-font-smoothing: antialiased;
+}
+
+body {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
 }
 
 #root {

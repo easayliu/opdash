@@ -16,6 +16,13 @@ services:
       - OPDASH_TIMEZONE=${OPDASH_TIMEZONE:-Asia/Shanghai}
       # 内网可不配；配了就是一组共享账号密码
       - OPDASH_BASIC_AUTH=${OPDASH_BASIC_AUTH:-}
+      # Keycloak 登录（README「登录」）：issuer + client id 一起配才生效
+      - OPDASH_OIDC_ISSUER=${OPDASH_OIDC_ISSUER:-}
+      - OPDASH_OIDC_CLIENT_ID=${OPDASH_OIDC_CLIENT_ID:-}
+      - OPDASH_OIDC_CLIENT_SECRET=${OPDASH_OIDC_CLIENT_SECRET:-}
+      - OPDASH_OIDC_REQUIRED_ROLE=${OPDASH_OIDC_REQUIRED_ROLE:-}
+      - OPDASH_PUBLIC_URL=${OPDASH_PUBLIC_URL:-}
+      - OPDASH_SESSION_SECRET=${OPDASH_SESSION_SECRET:-}
       - RUST_LOG=${RUST_LOG:-info}
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -40,12 +40,12 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
   const opOptions = state.span_name && !ops.data?.values.some((v) => v.value === state.span_name) ? [{ value: state.span_name, count: 0 }, ...(ops.data?.values ?? [])] : (ops.data?.values ?? [])
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-2 border-b border-border bg-card px-3 py-2">
+    <form onSubmit={submit} className="flex flex-col gap-2.5 border-b border-border bg-card px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <Select
           value={state.service}
           onChange={(e) => onChange({ ...state, service: e.target.value, span_name: '' })}
-          className={cn('max-w-64', state.service && 'border-accent text-accent')}
+          className={cn('max-w-72', state.service && 'border-accent text-accent')}
           title="服务（service.name）"
         >
           <option value="">全部服务{services.isPending ? '…' : ''}</option>
@@ -59,7 +59,7 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
         <Select
           value={state.span_name}
           onChange={(e) => onChange({ ...state, span_name: e.target.value })}
-          className={cn('max-w-80', state.span_name && 'border-accent text-accent')}
+          className={cn('max-w-96', state.span_name && 'border-accent text-accent')}
           disabled={!state.service}
           title={state.service ? '接口 / 操作（span_name）' : '先选服务'}
         >
@@ -71,13 +71,13 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
             </option>
           ))}
         </Select>
-        <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5" title="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
+        <div className="flex h-9 items-center gap-0.5 rounded-md border border-input p-0.5" title="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
           {KINDS.map((k) => (
             <button
               key={k}
               type="button"
               onClick={() => onChange({ ...state, kinds: state.kinds.includes(k) ? state.kinds.filter((x) => x !== k) : [...state.kinds, k] })}
-              className={cn('h-6 rounded-sm px-2 text-2xs font-semibold text-muted-fg hover:bg-muted', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
+              className={cn('h-full rounded-sm px-2.5 text-xs font-semibold text-muted-fg hover:bg-muted', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
             >
               {k}
             </button>
@@ -86,17 +86,17 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
         <Button size="md" active={state.error_only} onClick={() => onChange({ ...state, error_only: !state.error_only })} title="只看 status = Error 的 span 所在的链路">
           只看错误
         </Button>
-        <span className="flex items-center gap-1 text-xs text-muted-fg">
+        <span className="flex items-center gap-1.5 text-sm text-muted-fg">
           耗时
-          <Input value={minMs} onChange={(e) => setMinMs(e.target.value)} placeholder="≥ ms" className="w-20" inputMode="decimal" aria-label="最小耗时" />
+          <Input value={minMs} onChange={(e) => setMinMs(e.target.value)} placeholder="≥ ms" className="w-24" inputMode="decimal" aria-label="最小耗时" />
           ~
-          <Input value={maxMs} onChange={(e) => setMaxMs(e.target.value)} placeholder="≤ ms" className="w-20" inputMode="decimal" aria-label="最大耗时" />
+          <Input value={maxMs} onChange={(e) => setMaxMs(e.target.value)} placeholder="≤ ms" className="w-24" inputMode="decimal" aria-label="最大耗时" />
         </span>
         <Select value={state.sort} onChange={(e) => onChange({ ...state, sort: e.target.value === 'duration' ? 'duration' : 'time' })} title="排序">
           <option value="time">最新在前</option>
           <option value="duration">最慢在前</option>
         </Select>
-        <Button type="submit" variant="primary">
+        <Button type="submit" variant="primary" className="px-5">
           查询
         </Button>
       </div>
@@ -120,17 +120,17 @@ function AttrFilters({ attrs, service, rangeParams, onChange }: { attrs: string[
     setValue('')
   }
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <span className="text-2xs text-muted-fg">属性</span>
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-sm text-muted-fg">属性</span>
       {attrs.map((a) => (
-        <span key={a} className="mono inline-flex items-center gap-1 rounded-md bg-accent-soft px-2 py-0.5 text-2xs text-accent">
+        <span key={a} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
           {a}
           <button type="button" onClick={() => onChange(attrs.filter((x) => x !== a))} title="去掉">
-            <XIcon className="size-3" />
+            <XIcon className="size-3.5" />
           </button>
         </span>
       ))}
-      <Input value={key} onChange={(e) => setKey(e.target.value)} list="attr-keys" placeholder="属性名，如 http.route" className="mono h-7 w-56 text-xs" aria-label="属性名" />
+      <Input value={key} onChange={(e) => setKey(e.target.value)} list="attr-keys" placeholder="属性名，如 http.route" className="mono h-8 w-64 text-xs" aria-label="属性名" />
       <datalist id="attr-keys">
         {(keys.data?.keys ?? []).map((k) => (
           <option key={k.key} value={k.key} />
@@ -142,7 +142,7 @@ function AttrFilters({ attrs, service, rangeParams, onChange }: { attrs: string[
         onChange={(e) => setValue(e.target.value)}
         list="attr-values"
         placeholder="值（留空 = 只要有这个属性）"
-        className="mono h-7 w-64 text-xs"
+        className="mono h-8 w-72 text-xs"
         aria-label="属性值"
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
@@ -157,7 +157,7 @@ function AttrFilters({ attrs, service, rangeParams, onChange }: { attrs: string[
         ))}
       </datalist>
       <Button size="sm" onClick={add} disabled={!key.trim()}>
-        <PlusIcon className="size-3.5" />
+        <PlusIcon className="size-4" />
         加条件
       </Button>
     </div>

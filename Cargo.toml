@@ -1,6 +1,6 @@
 [package]
 name = "opdash"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Trace & log query UI over ClickHouse (logpipe app_log + tracepipe otel_trace)"
 license = "MIT"
@@ -31,6 +31,11 @@ humantime = "2"
 base64 = "0.22"
 # 自己解 URL 查询串：axum 的 Query 不支持重复的键（attr=k=v 要能给多个），也不方便逐个报清楚哪个参数错
 form_urlencoded = "1"
+# OIDC 登录（Keycloak）：会话 cookie 的 HMAC、PKCE 的 SHA-256、state / nonce 的随机数。
+# ring 本来就随 rustls 在依赖树里，不另拉 hmac / sha2 / rand 三个 crate
+ring = "0.17"
+# 拼授权 / 登出跳转 URL；reqwest 已经带了
+url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -70,30 +70,30 @@ export function TracesPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <TraceFilters state={filter} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
-      <section className="border-b border-border bg-card px-3 pt-2 pb-1">
+      <section className="border-b border-border bg-card px-4 pt-3 pb-2">
         <Scatter
           fromMs={range.fromMs}
           toMs={range.toMs}
           points={traces.map((t) => ({ id: t.trace_id, t_ms: t.start_us / 1000, value: t.duration_ns / 1e6, error: t.error_count > 0, label: `${t.root_service} ${t.root_name}` }))}
-          height={140}
+          height={170}
           stale={search.isFetching}
           onClick={(id) => navigate(`/traces/${id}`)}
         />
-        <div className="flex items-center justify-between text-2xs text-muted-fg">
+        <div className="mt-1 flex items-center justify-between text-2xs text-muted-fg">
           <span>
-            纵轴为请求耗时（根 span，对数刻度）；<span className="inline-block size-2 rounded-full align-middle" style={{ background: 'var(--level-error)' }} /> 有错误的链路。点一个点打开详情。
+            纵轴为请求耗时（根 span，对数刻度）；<span className="inline-block size-2.5 rounded-full align-middle" style={{ background: 'var(--level-error)' }} /> 有错误的链路。点一个点打开详情。
           </span>
           <StatsLine stats={search.data?.stats} />
         </div>
       </section>
-      <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-xs text-muted-fg">
+      <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-2 text-xs text-muted-fg">
         {search.data && (
-          <span>
+          <span className="font-medium text-fg">
             {traces.length} 条链路{traces.length >= limit && `（只取前 ${limit} 条，${filter.sort === 'duration' ? '最慢在前' : '最新在前'}）`}
           </span>
         )}
-        {search.isFetching && <Spinner className="size-3.5" />}
-        <span className="ml-auto flex items-center gap-1">
+        {search.isFetching && <Spinner className="size-4" />}
+        <span className="ml-auto flex items-center gap-2">
           每页
           {[50, 100, 200].map((n) => (
             <button key={n} type="button" onClick={() => set({ limit: n === 50 ? null : n })} className={n === limit ? 'font-semibold text-accent' : 'hover:text-fg'}>
@@ -121,25 +121,25 @@ export function TracesPage() {
         )}
         {traces.length > 0 && (
           <table className="w-full table-fixed border-collapse text-xs">
-            <thead className="sticky top-0 bg-card text-2xs text-muted-fg">
-              <tr className="border-b border-border">
-                <th className="w-[10.5rem] px-2 py-1.5 text-left font-medium">开始时间</th>
-                <th className="px-2 py-1.5 text-left font-medium">入口（根 span）</th>
-                <th className="w-24 px-2 py-1.5 text-right font-medium">请求耗时</th>
-                <th className="w-24 px-2 py-1.5 text-right font-medium" title="最早 span 开始到最晚 span 结束（含异步消费）">
+            <thead className="sticky top-0 bg-card text-2xs text-muted-fg shadow-[inset_0_-1px_0_var(--border)]">
+              <tr>
+                <th className="w-52 px-3 py-2 text-left font-medium">开始时间</th>
+                <th className="px-3 py-2 text-left font-medium">入口（根 span）</th>
+                <th className="w-28 px-3 py-2 text-right font-medium">请求耗时</th>
+                <th className="w-28 px-3 py-2 text-right font-medium" title="最早 span 开始到最晚 span 结束（含异步消费）">
                   总跨度
                 </th>
-                <th className="w-16 px-2 py-1.5 text-right font-medium">span</th>
-                <th className="w-16 px-2 py-1.5 text-right font-medium">错误</th>
-                <th className="w-72 px-2 py-1.5 text-left font-medium">涉及服务</th>
-                <th className="w-28 px-2 py-1.5 text-left font-medium">trace id</th>
+                <th className="w-20 px-3 py-2 text-right font-medium">span</th>
+                <th className="w-20 px-3 py-2 text-right font-medium">错误</th>
+                <th className="w-80 px-3 py-2 text-left font-medium">涉及服务</th>
+                <th className="w-36 px-3 py-2 text-left font-medium">trace id</th>
               </tr>
             </thead>
             <tbody>
               {traces.map((t) => (
                 <tr key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60" onClick={() => navigate(`/traces/${t.trace_id}`)}>
-                  <td className="mono px-2 py-1.5 text-muted-fg tabular-nums">{formatTsMicro(t.start_us).slice(0, 23)}</td>
-                  <td className="truncate px-2 py-1.5">
+                  <td className="mono px-3 py-2 whitespace-nowrap text-muted-fg tabular-nums">{formatTsMicro(t.start_us).slice(0, 23)}</td>
+                  <td className="truncate px-3 py-2">
                     <span className="text-muted-fg">{t.root_service}</span> <span className="font-medium">{t.root_name}</span>
                     {t.root_missing && (
                       <Badge tone="warn" className="ml-1" title="没找到根 span，显示的是最早的那个 span">
@@ -147,14 +147,14 @@ export function TracesPage() {
                       </Badge>
                     )}
                   </td>
-                  <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{formatDuration(t.duration_ns)}</td>
-                  <td className="px-2 py-1.5 text-right text-muted-fg tabular-nums">{formatDuration(t.span_ns)}</td>
-                  <td className="px-2 py-1.5 text-right tabular-nums">{t.span_count}</td>
-                  <td className="px-2 py-1.5 text-right tabular-nums">{t.error_count > 0 ? <Badge tone="danger">{t.error_count}</Badge> : <span className="text-muted-fg">0</span>}</td>
-                  <td className="truncate px-2 py-1.5 text-muted-fg" title={t.services.join(', ')}>
+                  <td className="px-3 py-2 text-right font-semibold tabular-nums">{formatDuration(t.duration_ns)}</td>
+                  <td className="px-3 py-2 text-right text-muted-fg tabular-nums">{formatDuration(t.span_ns)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{t.span_count}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{t.error_count > 0 ? <Badge tone="danger">{t.error_count}</Badge> : <span className="text-muted-fg">0</span>}</td>
+                  <td className="truncate px-3 py-2 text-muted-fg" title={t.services.join(', ')}>
                     {t.services.join(', ')}
                   </td>
-                  <td className="mono px-2 py-1.5 text-2xs">
+                  <td className="mono px-3 py-2 text-2xs">
                     <Link to={`/traces/${t.trace_id}`} className="text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
                       {t.trace_id.slice(0, 12)}…
                     </Link>

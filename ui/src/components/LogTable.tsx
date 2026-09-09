@@ -79,24 +79,24 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
     })
 
   if (!rows.length) {
-    return <div className="px-3 py-10 text-center text-xs text-muted-fg">{emptyText ?? '没有日志'}</div>
+    return <div className="px-4 py-12 text-center text-sm text-muted-fg">{emptyText ?? '没有日志'}</div>
   }
   return (
     <table className="w-full table-fixed border-collapse text-xs">
-      <thead className="sticky top-0 z-[1] bg-card text-2xs text-muted-fg">
-        <tr className="border-b border-border">
-          <th className="w-5" />
-          <th className="w-[9.5rem] px-1 py-1.5 text-left font-medium">时间</th>
-          <th className="w-14 px-1 py-1.5 text-left font-medium">级别</th>
+      <thead className="sticky top-0 z-[1] bg-card text-2xs text-muted-fg shadow-[inset_0_-1px_0_var(--border)]">
+        <tr>
+          <th className="w-7" />
+          <th className="w-[12.5rem] px-1.5 py-2 text-left font-medium">时间</th>
+          <th className="w-16 px-1.5 py-2 text-left font-medium">级别</th>
           {cols.map((c) => (
-            <th key={c} className={cn('px-1 py-1.5 text-left font-medium', c === 'pod' ? 'w-52' : 'w-36')}>
+            <th key={c} className={cn('px-1.5 py-2 text-left font-medium', c === 'pod' ? 'w-56' : 'w-40')}>
               {c}
             </th>
           ))}
-          {!compact && <th className="w-44 px-1 py-1.5 text-left font-medium">logger</th>}
-          <th className="px-1 py-1.5 text-left font-medium">message</th>
-          <th className="w-24 px-1 py-1.5 text-left font-medium">trace</th>
-          {onContext && <th className="w-8" />}
+          {!compact && <th className="w-48 px-1.5 py-2 text-left font-medium">logger</th>}
+          <th className="px-1.5 py-2 text-left font-medium">message</th>
+          <th className="w-28 px-1.5 py-2 text-left font-medium">trace</th>
+          {onContext && <th className="w-10" />}
         </tr>
       </thead>
       <tbody>
@@ -111,15 +111,15 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
                 className={cn('row-hover cursor-pointer border-b border-border/60 align-top', isAnchor && 'row-selected', open && 'bg-muted/40')}
                 onClick={() => toggle(key)}
               >
-                <td className="py-1 pl-1 text-muted-fg">
-                  {open ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}
+                <td className="py-1.5 pl-2 text-muted-fg">
+                  {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
                 </td>
-                <td className="mono px-1 py-1 whitespace-nowrap text-muted-fg tabular-nums">{formatTs(r.ts_ms)}</td>
-                <td className="px-1 py-1">
+                <td className="mono px-1.5 py-1.5 whitespace-nowrap text-muted-fg tabular-nums">{formatTs(r.ts_ms)}</td>
+                <td className="px-1.5 py-1.5">
                   <Badge tone={levelTone(r.level)}>{r.level || '-'}</Badge>
                 </td>
                 {cols.map((c) => (
-                  <td key={c} className="truncate px-1 py-1 text-muted-fg" title={dimValue(r, c)}>
+                  <td key={c} className="truncate px-1.5 py-1.5 text-muted-fg" title={dimValue(r, c)}>
                     {onPivot ? (
                       <button
                         type="button"
@@ -138,17 +138,17 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
                   </td>
                 ))}
                 {!compact && (
-                  <td className="mono truncate px-1 py-1 text-muted-fg" title={r.logger}>
+                  <td className="mono truncate px-1.5 py-1.5 text-muted-fg" title={r.logger}>
                     {r.logger}
                   </td>
                 )}
-                <td className="px-1 py-1">
-                  <div className={cn('mono break-all', !open && 'line-clamp-2')}>
+                <td className="px-1.5 py-1.5">
+                  <div className={cn('mono break-all leading-5', !open && 'line-clamp-2')}>
                     <Highlight text={first} terms={highlight} />
                     {!open && rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
                   </div>
                 </td>
-                <td className="mono px-1 py-1 text-2xs">
+                <td className="mono px-1.5 py-1.5 text-2xs">
                   {r.trace_id ? (
                     <Link
                       to={`/traces/${r.trace_id}`}
@@ -163,18 +163,18 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
                   )}
                 </td>
                 {onContext && (
-                  <td className="px-1 py-0.5">
+                  <td className="px-1 py-1">
                     <Button
                       variant="ghost"
                       size="xs"
-                      className="px-1"
+                      className="px-1.5"
                       title="查看这一行前后的日志（同一容器日志流）"
                       onClick={(e) => {
                         e.stopPropagation()
                         onContext(r)
                       }}
                     >
-                      <ListTreeIcon className="size-3.5" />
+                      <ListTreeIcon className="size-4" />
                     </Button>
                   </td>
                 )}
@@ -182,7 +182,7 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
               {open && (
                 <tr className="border-b border-border/60 bg-muted/30">
                   <td />
-                  <td colSpan={cols.length + (compact ? 4 : 5) + (onContext ? 1 : 0)} className="px-1 py-2">
+                  <td colSpan={cols.length + (compact ? 4 : 5) + (onContext ? 1 : 0)} className="px-2 py-3">
                     <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
                   </td>
                 </tr>
@@ -207,11 +207,11 @@ function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; dims: str
     ['span_id', row.span_id],
   ]
   return (
-    <div className="space-y-2">
-      <pre className="mono max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-2 text-xs leading-5 whitespace-pre-wrap break-all">
+    <div className="space-y-3">
+      <pre className="mono max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-3 text-xs leading-5 whitespace-pre-wrap break-all">
         <Highlight text={row.message} terms={highlight} />
       </pre>
-      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-2xs">
+      <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
         {fields
           .filter(([, v]) => v)
           .map(([k, v]) => (
@@ -234,7 +234,7 @@ function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; dims: str
                   v
                 )}
                 <button type="button" className="text-muted-fg hover:text-fg" title="复制" onClick={() => copyText(v)}>
-                  <CopyIcon className="size-3" />
+                  <CopyIcon className="size-3.5" />
                 </button>
               </span>
             </Fragment>

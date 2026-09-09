@@ -47,9 +47,9 @@ export function TraceDetailPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-card px-3 py-2">
+      <header className="flex flex-wrap items-center gap-x-6 gap-y-1 border-b border-border bg-card px-4 py-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-semibold">
+          <div className="flex items-center gap-2 text-base font-semibold">
             {root ? (
               <>
                 <span className="text-muted-fg">{root.service}</span>
@@ -60,10 +60,10 @@ export function TraceDetailPage() {
               '链路详情'
             )}
           </div>
-          <div className="mono flex items-center gap-1 text-2xs text-muted-fg">
+          <div className="mono mt-0.5 flex items-center gap-1.5 text-2xs text-muted-fg">
             {traceId}
             <button type="button" onClick={() => copyText(traceId)} title="复制 trace id" className="hover:text-fg">
-              <CopyIcon className="size-3" />
+              <CopyIcon className="size-3.5" />
             </button>
             <button type="button" onClick={() => copyText(window.location.href)} title="复制本页链接" className="ml-2 hover:text-fg">
               复制链接
@@ -71,7 +71,7 @@ export function TraceDetailPage() {
           </div>
         </div>
         {detail.data && spans.length > 0 && (
-          <dl className="flex items-center gap-4 text-xs">
+          <dl className="flex items-center gap-6 text-sm">
             <div>
               <dt className="text-2xs text-muted-fg">开始</dt>
               <dd className="tabular-nums">{formatTsMicro(tree.startUs)}</dd>
@@ -101,10 +101,10 @@ export function TraceDetailPage() {
             </div>
           </dl>
         )}
-        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg">
+        <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-2xs text-muted-fg">
           {colors.entries().map(([name, color]) => (
             <span key={name} className="inline-flex items-center gap-1">
-              <span className="inline-block h-3 w-1 rounded-sm" style={{ background: color }} />
+              <span className="inline-block h-3.5 w-1 rounded-sm" style={{ background: color }} />
               {name}
             </span>
           ))}
@@ -133,7 +133,7 @@ export function TraceDetailPage() {
             {spans.length > 0 && <Waterfall tree={tree} colors={colors} selected={selected} onSelect={(id) => set({ span: id, span_logs: id ? undefined : null }, { replace: true })} />}
           </div>
           <section className="flex min-h-0 flex-col border-t border-border bg-card" style={{ height: showLogs ? '40%' : undefined }}>
-            <div className="flex h-8 shrink-0 items-center gap-2 px-3 text-xs">
+            <div className="flex h-10 shrink-0 items-center gap-2 px-4 text-xs">
               <Button variant="ghost" size="xs" onClick={() => setShowLogs((v) => !v)}>
                 {showLogs ? '▾' : '▸'} 关联日志
                 {logs.data && ` (${logs.data.rows.length}${logs.data.rows.length >= 500 ? '+' : ''})`}
@@ -143,7 +143,7 @@ export function TraceDetailPage() {
                   只看选中 span 的日志
                 </Button>
               )}
-              {showLogs && logs.isFetching && <Spinner className="size-3" />}
+              {showLogs && logs.isFetching && <Spinner className="size-3.5" />}
               <span className="ml-auto flex items-center gap-3 text-2xs text-muted-fg">
                 <StatsLine stats={logs.data?.stats} />
                 <Link to={`/logs?trace_id=${traceId}`} className="text-accent hover:underline">

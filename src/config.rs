@@ -79,9 +79,44 @@ pub struct Config {
     #[arg(long, env = "OPDASH_SCHEMA_REFRESH", default_value = "5m", value_parser = parse_duration)]
     pub schema_refresh: Duration,
 
-    /// 可选的 HTTP Basic 认证，格式 user:password。内网、不配也行
+    /// 可选的 HTTP Basic 认证，格式 user:password。内网、不配也行；和 OIDC 可以同时开（脚本 / curl 用）
     #[arg(long, env = "OPDASH_BASIC_AUTH", hide_env_values = true, value_parser = parse_basic_auth)]
     pub basic_auth: Option<BasicAuth>,
+
+    /// OIDC 登录（Keycloak）：realm 的 issuer 地址，如 https://sso.example.com/realms/ops。
+    /// 配了就走浏览器跳 Keycloak 登录；`--oidc-client-id` 必须一起配
+    #[arg(long, env = "OPDASH_OIDC_ISSUER", value_parser = parse_issuer)]
+    pub oidc_issuer: Option<String>,
+
+    /// Keycloak 里给 opdash 建的 client 的 Client ID
+    #[arg(long, env = "OPDASH_OIDC_CLIENT_ID")]
+    pub oidc_client_id: Option<String>,
+
+    /// client 的密钥（Keycloak 里 Client authentication 打开时有）；public client 不用配，PKCE 照样保护
+    #[arg(long, env = "OPDASH_OIDC_CLIENT_SECRET", hide_env_values = true)]
+    pub oidc_client_secret: Option<String>,
+
+    /// 授权请求的 scope
+    #[arg(long, env = "OPDASH_OIDC_SCOPES", default_value = "openid profile email")]
+    pub oidc_scopes: String,
+
+    /// 要求用户带这个角色才放行（realm 角色或本 client 的角色都认）；不配 = 登录了就行
+    #[arg(long, env = "OPDASH_OIDC_REQUIRED_ROLE")]
+    pub oidc_required_role: Option<String>,
+
+    /// 浏览器访问 opdash 的地址（如 https://opdash.example.com），用来拼 OIDC 回调地址。
+    /// 不配则按请求的 Host / X-Forwarded-* 头推；本地 vite 开发时配成 http://localhost:5173
+    #[arg(long, env = "OPDASH_PUBLIC_URL", value_parser = parse_public_url)]
+    pub public_url: Option<String>,
+
+    /// 登录后会话多久失效（会话是签名 cookie，到期要重新跳一次 Keycloak）
+    #[arg(long, env = "OPDASH_SESSION_TTL", default_value = "12h", value_parser = parse_duration)]
+    pub session_ttl: Duration,
+
+    /// 会话 cookie 的签名密钥（随便一串长随机字符）。不配则每次启动随机生成：重启后大家都要重新登录，
+    /// 多副本部署时必须配同一个
+    #[arg(long, env = "OPDASH_SESSION_SECRET", hide_env_values = true)]
+    pub session_secret: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +134,25 @@ fn parse_basic_auth(raw: &str) -> Result<BasicAuth, String> {
     Ok(BasicAuth { user: user.to_owned(), password: password.to_owned() })
 }
 
+/// issuer 必须和 Keycloak 签在 token 里的 `iss` 一字不差，末尾的斜杠去掉，避免比对时差一个字符。
+fn parse_issuer(raw: &str) -> Result<String, String> {
+    let s = raw.trim().trim_end_matches('/');
+    if !(s.starts_with("https://") || s.starts_with("http://")) {
+        return Err(
+            "应是 http(s):// 开头的 realm 地址，如 https://sso.example.com/realms/ops".to_owned()
+        );
+    }
+    Ok(s.to_owned())
+}
+
+fn parse_public_url(raw: &str) -> Result<String, String> {
+    let s = raw.trim().trim_end_matches('/');
+    if !(s.starts_with("https://") || s.starts_with("http://")) {
+        return Err("应是 http(s):// 开头的地址，如 https://opdash.example.com".to_owned());
+    }
+    Ok(s.to_owned())
+}
+
 fn parse_duration(raw: &str) -> Result<Duration, String> {
     humantime::parse_duration(raw).map_err(|e| format!("{e}（例：30s / 5m / 7d）"))
 }
@@ -111,6 +165,12 @@ impl Config {
         }
         if self.query_timeout.as_secs() == 0 {
             return Err("--query-timeout 至少 1 秒".into());
+        }
+        if self.oidc_issuer.is_some() && self.oidc_client_id.is_none() {
+            return Err("配了 --oidc-issuer 就必须配 --oidc-client-id".into());
+        }
+        if self.session_ttl.as_secs() < 60 {
+            return Err("--session-ttl 至少 1 分钟".into());
         }
         for (flag, name) in [
             ("--database", &self.database),
@@ -153,6 +213,23 @@ mod tests {
         assert_eq!(auth.user, "ops");
         assert_eq!(auth.password, "s3cret:x");
         assert_eq!(cfg.query_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn oidc_needs_client_id_and_trims_issuer() {
+        let cfg =
+            Config::parse_from(["opdash", "--oidc-issuer", "https://sso.example.com/realms/ops/"]);
+        assert_eq!(cfg.oidc_issuer.as_deref(), Some("https://sso.example.com/realms/ops"));
+        assert!(cfg.validate().is_err());
+        let cfg = Config::parse_from([
+            "opdash",
+            "--oidc-issuer",
+            "https://sso.example.com/realms/ops",
+            "--oidc-client-id",
+            "opdash",
+        ]);
+        cfg.validate().unwrap();
+        assert!(Config::try_parse_from(["opdash", "--oidc-issuer", "sso.example.com"]).is_err());
     }
 
     #[test]
