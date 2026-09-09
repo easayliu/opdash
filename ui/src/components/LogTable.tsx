@@ -1,6 +1,6 @@
 import { Fragment, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { ChevronDownIcon, ChevronRightIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
+import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
 import { Badge, Button, levelTone } from '@/components/ui'
 import { formatTs } from '@/lib/time'
@@ -14,11 +14,47 @@ export interface LogTableProps {
   highlight?: string[]
   /** 锚点行（上下文视图里高亮） */
   anchorKey?: string
+  /** 高亮这个 span 打的日志（链路详情里点了某个 span） */
+  selectedSpanId?: string | null
   onContext?: (row: LogRow) => void
   /** 点某个值 → 加为筛选条件 */
   onPivot?: (field: string, value: string) => void
   compact?: boolean
   emptyText?: ReactNode
+  /** 给了就显示可点的表头（客户端排序，rows 已按它排好） */
+  sort?: LogSort
+  onSort?: (key: string) => void
+}
+
+export interface LogSort {
+  /** 'ts_ms' / 'level' / 'logger' / 某个维度列名 */
+  key: string
+  dir: 'asc' | 'desc'
+}
+
+/** 级别按严重程度排，认不出的排最后 */
+const LEVEL_RANK: Record<string, number> = { FATAL: 0, ERROR: 1, WARN: 2, WARNING: 2, INFO: 3, DEBUG: 4, TRACE: 5 }
+
+/** 按 sort 排序（稳定，同值按时间再排一次），不改原数组。 */
+export function sortLogRows(rows: LogRow[], sort: LogSort): LogRow[] {
+  const dir = sort.dir === 'asc' ? 1 : -1
+  const cmp = (a: LogRow, b: LogRow): number => {
+    if (sort.key === 'ts_ms') return a.ts_ms - b.ts_ms
+    if (sort.key === 'level') return (LEVEL_RANK[a.level.toUpperCase()] ?? 9) - (LEVEL_RANK[b.level.toUpperCase()] ?? 9)
+    return dimValue(a, sort.key).localeCompare(dimValue(b, sort.key))
+  }
+  return [...rows].sort((a, b) => dir * cmp(a, b) || a.ts_ms - b.ts_ms)
+}
+
+function SortHeader({ label, col, sort, onSort }: { label: string; col: string; sort?: LogSort; onSort?: (key: string) => void }) {
+  if (!onSort) return <>{label}</>
+  const active = sort?.key === col
+  return (
+    <button type="button" onClick={() => onSort(col)} className={cn('inline-flex items-center gap-0.5 hover:text-fg', active && 'text-fg')} title="点击排序">
+      {label}
+      {active ? <span aria-hidden>{sort?.dir === 'asc' ? '▲' : '▼'}</span> : <ChevronsUpDownIcon className="size-3 opacity-50" />}
+    </button>
+  )
 }
 
 /** 一行日志的唯一键：和后端排序键一致，跟随模式去重也用它。 */
@@ -67,7 +103,7 @@ export function visibleDims(dims: string[]): string[] {
   return out
 }
 
-export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot, compact, emptyText }: LogTableProps) {
+export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, emptyText, sort, onSort }: LogTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const cols = visibleDims(dims)
   const toggle = (k: string) =>
@@ -86,14 +122,22 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
       <thead className="sticky top-0 z-[1] bg-card text-2xs text-muted-fg shadow-[inset_0_-1px_0_var(--border)]">
         <tr>
           <th className="w-7" />
-          <th className="w-[12.5rem] px-1.5 py-2 text-left font-medium">时间</th>
-          <th className="w-16 px-1.5 py-2 text-left font-medium">级别</th>
+          <th className="w-[12.5rem] px-1.5 py-2 text-left font-medium">
+            <SortHeader label="时间" col="ts_ms" sort={sort} onSort={onSort} />
+          </th>
+          <th className="w-16 px-1.5 py-2 text-left font-medium">
+            <SortHeader label="级别" col="level" sort={sort} onSort={onSort} />
+          </th>
           {cols.map((c) => (
             <th key={c} className={cn('px-1.5 py-2 text-left font-medium', c === 'pod' ? 'w-56' : 'w-40')}>
-              {c}
+              <SortHeader label={c} col={c} sort={sort} onSort={onSort} />
             </th>
           ))}
-          {!compact && <th className="w-48 px-1.5 py-2 text-left font-medium">logger</th>}
+          {!compact && (
+            <th className="w-48 px-1.5 py-2 text-left font-medium">
+              <SortHeader label="logger" col="logger" sort={sort} onSort={onSort} />
+            </th>
+          )}
           <th className="px-1.5 py-2 text-left font-medium">message</th>
           <th className="w-28 px-1.5 py-2 text-left font-medium">trace</th>
           {onContext && <th className="w-10" />}
@@ -104,11 +148,12 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
           const key = rowKey(r)
           const open = expanded.has(key)
           const [first, rest] = splitFirstLine(r.message)
-          const isAnchor = anchorKey === key
+          const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
           return (
             <Fragment key={key}>
               <tr
                 className={cn('row-hover cursor-pointer border-b border-border/60 align-top', isAnchor && 'row-selected', open && 'bg-muted/40')}
+                data-selected={isAnchor ? '1' : undefined}
                 onClick={() => toggle(key)}
               >
                 <td className="py-1.5 pl-2 text-muted-fg">
@@ -151,7 +196,7 @@ export function LogTable({ rows, dims, highlight, anchorKey, onContext, onPivot,
                 <td className="mono px-1.5 py-1.5 text-2xs">
                   {r.trace_id ? (
                     <Link
-                      to={`/traces/${r.trace_id}`}
+                      to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
                       className="text-accent hover:underline"
                       title={`查看链路 ${r.trace_id}`}
                       onClick={(e) => e.stopPropagation()}
@@ -223,7 +268,7 @@ function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; dims: str
                     {v}
                   </button>
                 ) : k === 'trace_id' ? (
-                  <Link to={`/traces/${v}`} className="text-accent hover:underline">
+                  <Link to={`/traces/${v}?at=${row.ts_ms}`} className="text-accent hover:underline">
                     {v}
                   </Link>
                 ) : k === 'span_id' ? (

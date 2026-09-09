@@ -1,19 +1,25 @@
 import { useCallback, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router'
-import { useMeta, useTraceSearch } from '@/api/queries'
+import { useMeta, useTraceHeatmap, useTraceSearch } from '@/api/queries'
 import type { Params } from '@/api/client'
-import { Scatter } from '@/components/charts/Scatter'
+import type { TraceSummary } from '@/api/types'
+import { Heatmap, type HeatCellRange } from '@/components/charts/Heatmap'
 import { StatsLine } from '@/components/StatsLine'
 import { TraceFilters, type TraceFilterState } from '@/components/TraceFilters'
 import { Badge, EmptyState, ErrorBox, Spinner } from '@/components/ui'
-import { formatDuration, formatTsMicro } from '@/lib/time'
+import { formatDuration, formatTsMicro, writeRange } from '@/lib/time'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
+
+/** 详情页带上开始时间，服务端只查附近分区 */
+function traceHref(t: TraceSummary): string {
+  return `/traces/${t.trace_id}?at=${Math.floor(t.start_us / 1000)}`
+}
 
 export function TracesPage() {
   const meta = useMeta()
   const navigate = useNavigate()
   const { params, set, setParams } = useUrlState()
-  const { range } = useTimeRange()
+  const { range, setRange } = useTimeRange()
 
   const filter: TraceFilterState = useMemo(
     () => ({
@@ -66,24 +72,51 @@ export function TracesPage() {
   )
   const search = useTraceSearch(searchParams, meta.isSuccess)
   const traces = search.data?.traces ?? []
+  // 热力图和检索同一套条件，但不分页也不排序：在库里聚合，画的是范围内的全部
+  const heatParams: Params = useMemo(() => {
+    const { limit: _limit, sort: _sort, ...rest } = searchParams
+    return rest
+  }, [searchParams])
+  const heat = useTraceHeatmap(heatParams, meta.isSuccess)
+  // 点一格：时间缩到这个桶，耗时限定到这一档，列表就是这格里的链路
+  const onCellClick = useCallback(
+    (cell: HeatCellRange) => {
+      setParams((prev) => {
+        const p = new URLSearchParams(prev)
+        writeRange(p, { fromMs: cell.fromMs, toMs: cell.toMs, relative: null })
+        p.set('min_ms', String(Number(cell.minMs.toPrecision(4))))
+        p.set('max_ms', String(Number(cell.maxMs.toPrecision(4))))
+        return p
+      })
+    },
+    [setParams],
+  )
+  const heatSubject = filter.kinds.length ? '匹配的 span' : '入口 span（Server / Consumer）'
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <TraceFilters state={filter} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
       <section className="border-b border-border bg-card px-4 pt-3 pb-2">
-        <Scatter
+        {heat.isError && <ErrorBox error={heat.error} onRetry={() => heat.refetch()} />}
+        <Heatmap
           fromMs={range.fromMs}
           toMs={range.toMs}
-          points={traces.map((t) => ({ id: t.trace_id, t_ms: t.start_us / 1000, value: t.duration_ns / 1e6, error: t.error_count > 0, label: `${t.root_service} ${t.root_name}` }))}
-          height={170}
-          stale={search.isFetching}
-          onClick={(id) => navigate(`/traces/${id}`)}
+          widthMs={heat.data?.width_ms ?? Math.max(1, (range.toMs - range.fromMs) / 120)}
+          binsPerDecade={heat.data?.bins_per_decade ?? 4}
+          cells={heat.data?.cells ?? []}
+          height={200}
+          stale={heat.isFetching}
+          onBrush={(fromMs, toMs) => setRange({ fromMs, toMs, relative: null })}
+          onCellClick={onCellClick}
         />
         <div className="mt-1 flex items-center justify-between text-2xs text-muted-fg">
           <span>
-            纵轴为请求耗时（根 span，对数刻度）；<span className="inline-block size-2.5 rounded-full align-middle" style={{ background: 'var(--level-error)' }} /> 有错误的链路。点一个点打开详情。
+            纵轴为耗时（对数刻度），每格是一个时间桶里落在这一档的{heatSubject}数：
+            <span className="mx-0.5 inline-block size-2.5 rounded-sm align-middle" style={{ background: 'var(--chart-1)' }} /> 越深越多，
+            <span className="mx-0.5 inline-block size-2.5 rounded-sm align-middle" style={{ background: 'var(--level-error)' }} /> 偏红表示错误占比高
+            {heat.data && `；共 ${heat.data.total.toLocaleString('zh-CN')} 个`}。拖一段缩小时间，点一格只看这一档。
           </span>
-          <StatsLine stats={search.data?.stats} />
+          <StatsLine stats={heat.data?.stats} />
         </div>
       </section>
       <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-2 text-xs text-muted-fg">
@@ -92,6 +125,7 @@ export function TracesPage() {
             {traces.length} 条链路{traces.length >= limit && `（只取前 ${limit} 条，${filter.sort === 'duration' ? '最慢在前' : '最新在前'}）`}
           </span>
         )}
+        {search.data && <StatsLine stats={search.data.stats} />}
         {search.isFetching && <Spinner className="size-4" />}
         <span className="ml-auto flex items-center gap-2">
           每页
@@ -137,7 +171,7 @@ export function TracesPage() {
             </thead>
             <tbody>
               {traces.map((t) => (
-                <tr key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60" onClick={() => navigate(`/traces/${t.trace_id}`)}>
+                <tr key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60" onClick={() => navigate(traceHref(t))}>
                   <td className="mono px-3 py-2 whitespace-nowrap text-muted-fg tabular-nums">{formatTsMicro(t.start_us).slice(0, 23)}</td>
                   <td className="truncate px-3 py-2">
                     <span className="text-muted-fg">{t.root_service}</span> <span className="font-medium">{t.root_name}</span>
@@ -155,7 +189,7 @@ export function TracesPage() {
                     {t.services.join(', ')}
                   </td>
                   <td className="mono px-3 py-2 text-2xs">
-                    <Link to={`/traces/${t.trace_id}`} className="text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
+                    <Link to={traceHref(t)} className="text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
                       {t.trace_id.slice(0, 12)}…
                     </Link>
                   </td>

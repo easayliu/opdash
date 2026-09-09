@@ -10,17 +10,18 @@ use serde::Serialize;
 use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
-use crate::query::TimeRange;
 use crate::query::traces::{
-    AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, KeyRow, Span, SpanRow, SummaryRow,
-    TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow, normalize_kind,
+    AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, HeatmapRow, KeyRow, Span, SpanRow,
+    SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow, normalize_kind,
     normalize_trace_id,
 };
+use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/traces/search", get(search))
+        .route("/api/traces/heatmap", get(heatmap))
         .route("/api/traces/values", get(values))
         .route("/api/traces/attr_keys", get(attr_keys))
         .route("/api/traces/attr_values", get(attr_values))
@@ -81,18 +82,19 @@ fn dims(schema: &Schema, p: &Params) -> Result<Vec<(String, Vec<String>)>> {
     Ok(dims)
 }
 
+/// `entry_by_default`：没选 kind 时是否只看入口 span（Server / Consumer）。
 fn build_filter(
     state: &AppState,
     schema: &Schema,
     p: &Params,
-    sort: TraceSort,
+    entry_by_default: bool,
 ) -> Result<TraceFilter> {
     let ms_to_ns = |v: Option<f64>| v.map(|ms| (ms.max(0.0) * 1_000_000.0) as u64);
     let mut kinds: Vec<String> =
         p.get_list("kind").iter().map(|k| normalize_kind(k)).collect::<Result<_>>()?;
-    // 「最慢的请求」默认看入口 span：不限 kind 的话排在前面的会是慢 SQL、慢下游调用，
+    // 「最慢的请求」和热力图默认看入口 span：不限 kind 的话排在前面的会是慢 SQL、慢下游调用，
     // 而 Java 开发说的慢请求是 Server span
-    if sort == TraceSort::Duration && kinds.is_empty() {
+    if entry_by_default && kinds.is_empty() {
         kinds = ENTRY_KINDS.iter().map(|k| (*k).to_owned()).collect();
     }
     Ok(TraceFilter {
@@ -131,7 +133,7 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
     let (ids, range, mut stats) = if let Some(raw) = p.get("trace_id") {
         (vec![normalize_trace_id(raw)?], None, Stats::default())
     } else {
-        let filter = build_filter(&state, &schema, &p, sort)?;
+        let filter = build_filter(&state, &schema, &p, sort == TraceSort::Duration)?;
         let candidates =
             state.client.rows::<CandidateRow>(queries.candidates(&filter, sort, limit)?).await?;
         (
@@ -171,27 +173,118 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
     Ok(Json(SearchResponse { traces, limit, sort, stats }))
 }
 
+/// 热力图每个数量级分几档。4 档 = 1 / 1.8 / 3.2 / 5.6 倍的边界。
+const HEATMAP_BINS_PER_DECADE: u32 = 4;
+
+#[derive(Serialize)]
+pub struct HeatmapCell {
+    pub t_ms: i64,
+    /// 对数耗时档序号：耗时 ms 落在 `[10^(lvl/bins), 10^((lvl+1)/bins))`；最底一档（1µs）含更短的
+    pub lvl: i32,
+    pub count: u64,
+    pub errors: u64,
+}
+
+#[derive(Serialize)]
+pub struct HeatmapResponse {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub width_ms: i64,
+    pub bins_per_decade: u32,
+    /// 实际参与统计的 span kind；没选时默认入口 span
+    pub kinds: Vec<String>,
+    /// 只有非空格子
+    pub cells: Vec<HeatmapCell>,
+    pub total: u64,
+    pub max_count: u64,
+    pub stats: Stats,
+}
+
+/// 耗时 × 时间的热力图。和检索用同一套筛选条件，但不取前 N 条，而是在库里按
+/// 时间桶 × 对数耗时档聚合，返回的格子数有上限，任意范围都能看到全貌。
+async fn heatmap(State(state): State<AppState>, p: Params) -> Result<Json<HeatmapResponse>> {
+    let schema = state.schema.get().await?;
+    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
+    let filter = build_filter(&state, &schema, &p, true)?;
+    let range = filter.range.expect("build_filter 总会填 range");
+    let tz = parse_tz(&state.config.timezone)?;
+    let bucket = Bucket::choose(&range, tz, 120);
+    let result = state
+        .client
+        .rows::<HeatmapRow>(queries.heatmap(&filter, &bucket, HEATMAP_BINS_PER_DECADE)?)
+        .await?;
+    let first = bucket.first_index(&range);
+    let count = bucket.count(&range).max(0);
+    let mut total = 0;
+    let mut max_count = 0;
+    let mut cells = Vec::with_capacity(result.rows.len());
+    for r in result.rows {
+        if r.bucket < first || r.bucket >= first + count {
+            continue;
+        }
+        total += r.n;
+        max_count = max_count.max(r.n);
+        cells.push(HeatmapCell {
+            t_ms: bucket.start_ms(r.bucket),
+            lvl: r.lvl,
+            count: r.n,
+            errors: r.errors,
+        });
+    }
+    Ok(Json(HeatmapResponse {
+        from_ms: range.from_ms,
+        to_ms: range.to_ms,
+        width_ms: bucket.width_ms,
+        bins_per_decade: HEATMAP_BINS_PER_DECADE,
+        kinds: filter.kinds,
+        cells,
+        total,
+        max_count,
+        stats: result.stats,
+    }))
+}
+
+/// 详情按时间窗口裁剪时，开始时间往前放多少、往后放多少：往前给时钟偏差留余量，
+/// 往后要装下根返回后才跑的异步 span（消息消费、定时补偿可能晚半小时以上）。
+const DETAIL_WINDOW_BEFORE_MS: i64 = 3_600_000;
+const DETAIL_WINDOW_AFTER_MS: i64 = 24 * 3_600_000;
+
 #[derive(Serialize)]
 pub struct DetailResponse {
     pub trace_id: String,
     pub spans: Vec<Span>,
     /// span 数超过了 `--max-trace-spans`，只返回了前面这些
     pub truncated: bool,
+    /// 按 `at` 附近的时间窗口查的（前 1 小时、后 24 小时）；不带 `at` 是全表按 bloom filter 找
+    pub windowed: bool,
     pub stats: Stats,
 }
 
+/// `at`（unix 毫秒，可选）：trace 的开始时间。列表页 / 日志页跳过来时都知道，带上就能裁剪分区。
 async fn detail(
     State(state): State<AppState>,
     Path(trace_id): Path<String>,
+    p: Params,
 ) -> Result<Json<DetailResponse>> {
     let schema = state.schema.get().await?;
     let trace_id = normalize_trace_id(&trace_id)?;
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
     let max = state.config.max_trace_spans;
-    let result = state.client.rows::<SpanRow>(queries.detail(&trace_id, max)?).await?;
+    let window = p.get_i64("at")?.map(|at| TimeRange {
+        from_ms: (at - DETAIL_WINDOW_BEFORE_MS).max(0),
+        to_ms: at + DETAIL_WINDOW_AFTER_MS,
+    });
+    let result =
+        state.client.rows::<SpanRow>(queries.detail(&trace_id, max, window.as_ref())?).await?;
     let truncated = result.rows.len() > max as usize;
     let spans: Vec<Span> = result.rows.into_iter().take(max as usize).map(Span::from).collect();
-    Ok(Json(DetailResponse { trace_id, spans, truncated, stats: result.stats }))
+    Ok(Json(DetailResponse {
+        trace_id,
+        spans,
+        truncated,
+        windowed: window.is_some(),
+        stats: result.stats,
+    }))
 }
 
 #[derive(Serialize)]

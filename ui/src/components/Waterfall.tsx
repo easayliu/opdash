@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { AlertTriangleIcon, ChevronDownIcon, ChevronRightIcon, CopyIcon } from 'lucide-react'
 import type { AttrValue, Span } from '@/api/types'
@@ -111,13 +111,27 @@ export function rootWindow(tree: SpanTree): TimeWindow | null {
   return { startUs: start, endUs: Math.max(end, start + 1) }
 }
 
-/** 默认窗口：根请求只占全跨度一小部分（有很晚的异步 span）时聚焦根请求，否则看全部。 */
+/**
+ * 默认窗口：全跨度（最早 span 开始到最晚 span 结束），打开就能看到消息消费这类异步 span 在哪。
+ * 根请求里的同步 span 被挤成一条线时，点表头的「根请求」切到 `rootWindow`。
+ */
+/** 行不在（或被 `stickyPx` 高的表头挡住）滚动容器的可视区里时，把它滚到中间；已经看得见就不动。 */
+function scrollRowIntoView(el: HTMLElement, stickyPx: number) {
+  // 找真正在纵向滚动的祖先：瀑布图自己那层 overflow-auto 只管横向，高度没限制，得再往上找
+  let box: HTMLElement | null = el.parentElement
+  while (box && !(/(auto|scroll)/.test(getComputedStyle(box).overflowY) && box.scrollHeight > box.clientHeight + 1)) {
+    box = box.parentElement
+  }
+  if (!box) return
+  const r = el.getBoundingClientRect()
+  const b = box.getBoundingClientRect()
+  if (r.top >= b.top + stickyPx && r.bottom <= b.bottom) return
+  const target = box.scrollTop + (r.top - b.top) - (b.height - r.height) / 2
+  box.scrollTo({ top: Math.max(0, target), behavior: 'smooth' })
+}
+
 export function defaultWindow(tree: SpanTree): TimeWindow {
-  const full = { startUs: tree.startUs, endUs: tree.endUs }
-  const root = rootWindow(tree)
-  if (!root) return full
-  const ratio = (root.endUs - root.startUs) / (full.endUs - full.startUs)
-  return ratio < 0.5 ? root : full
+  return { startUs: tree.startUs, endUs: tree.endUs }
 }
 
 interface Props {
@@ -137,6 +151,44 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
   const [zoom, setZoom] = useState<TimeWindow | null>(null)
   const [drag, setDrag] = useState<{ x0: number; x1: number } | null>(null)
   useEffect(() => setZoom(null), [tree])
+
+  // 外部选中一个 span（比如点顶部的错误数跳过来）：把它折叠着的祖先展开，行渲染出来后再滚到视野里
+  const parentOf = useMemo(() => {
+    const m = new Map<string, string>()
+    const walk = (n: SpanNode) => {
+      for (const c of n.children) {
+        m.set(c.span.span_id, n.span.span_id)
+        walk(c)
+      }
+    }
+    tree.roots.forEach(walk)
+    return m
+  }, [tree])
+  const listRef = useRef<HTMLDivElement>(null)
+  const pendingScroll = useRef<string | null>(null)
+  useEffect(() => {
+    if (!selected) return
+    pendingScroll.current = selected
+    const hidden: string[] = []
+    for (let p = parentOf.get(selected); p; p = parentOf.get(p)) if (collapsed.has(p)) hidden.push(p)
+    if (hidden.length) {
+      setCollapsed((s) => {
+        const n = new Set(s)
+        hidden.forEach((id) => n.delete(id))
+        return n
+      })
+    }
+    // collapsed 只在这里读一次，展开之后由下面那个 effect 接着滚
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, parentOf])
+  useEffect(() => {
+    const id = pendingScroll.current
+    if (!id) return
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-span-id="${id}"]`)
+    if (!el) return
+    pendingScroll.current = null
+    scrollRowIntoView(el, 32)
+  })
 
   const rows = useMemo(() => {
     const out: SpanNode[] = []
@@ -199,7 +251,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
   }
 
   return (
-    <div className="relative min-w-0 overflow-auto">
+    <div ref={listRef} className="relative min-w-0 overflow-auto">
       <div className="sticky top-0 z-[1] flex h-8 border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: LEFT_W + 400 }}>
         <div className="flex shrink-0 items-center gap-1 px-3" style={{ width: LEFT_W }}>
           <span className="mr-auto">服务 / 操作</span>
@@ -273,6 +325,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
         return (
           <div
             key={s.span_id}
+            data-span-id={s.span_id}
             className={cn('row-hover flex cursor-pointer border-b border-border/50', isSel && 'row-selected')}
             style={{ height: ROW_H, minWidth: LEFT_W + 400 }}
             onClick={() => onSelect(isSel ? null : s.span_id)}
