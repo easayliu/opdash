@@ -1,4 +1,5 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { AlertTriangleIcon, ChevronDownIcon, ChevronRightIcon, CopyIcon } from 'lucide-react'
 import type { AttrValue, Span } from '@/api/types'
@@ -117,21 +118,6 @@ export function rootWindow(tree: SpanTree): TimeWindow | null {
  * 默认窗口：全跨度（最早 span 开始到最晚 span 结束），打开就能看到消息消费这类异步 span 在哪。
  * 根请求里的同步 span 被挤成一条线时，点表头的「根请求」切到 `rootWindow`。
  */
-/** 行不在（或被 `stickyPx` 高的表头挡住）滚动容器的可视区里时，把它滚到中间；已经看得见就不动。 */
-function scrollRowIntoView(el: HTMLElement, stickyPx: number) {
-  // 找真正在纵向滚动的祖先：瀑布图自己那层 overflow-auto 只管横向，高度没限制，得再往上找
-  let box: HTMLElement | null = el.parentElement
-  while (box && !(/(auto|scroll)/.test(getComputedStyle(box).overflowY) && box.scrollHeight > box.clientHeight + 1)) {
-    box = box.parentElement
-  }
-  if (!box) return
-  const r = el.getBoundingClientRect()
-  const b = box.getBoundingClientRect()
-  if (r.top >= b.top + stickyPx && r.bottom <= b.bottom) return
-  const target = box.scrollTop + (r.top - b.top) - (b.height - r.height) / 2
-  box.scrollTo({ top: Math.max(0, target), behavior: 'smooth' })
-}
-
 export function defaultWindow(tree: SpanTree): TimeWindow {
   return { startUs: tree.startUs, endUs: tree.endUs }
 }
@@ -144,6 +130,8 @@ interface Props {
 }
 
 const ROW_H = 30
+/** 时间轴表头，sticky 在列表顶上 */
+const HEADER_H = 32
 const LEFT_W = 400
 /** 手机上左栏只留服务 / 操作名，时间轴至少给 260px，超出横滚 */
 const LEFT_W_MOBILE = 170
@@ -158,10 +146,9 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
   const minW = leftW + (isMobile ? AXIS_MIN_W_MOBILE : AXIS_MIN_W)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [zoom, setZoom] = useState<TimeWindow | null>(null)
-  const [drag, setDrag] = useState<{ x0: number; x1: number } | null>(null)
   useEffect(() => setZoom(null), [tree])
 
-  // 外部选中一个 span（比如点顶部的错误数跳过来）：把它折叠着的祖先展开，行渲染出来后再滚到视野里
+  // 外部选中一个 span（比如点顶部的错误数跳过来）：把它折叠着的祖先展开，行出现在列表里之后再滚到视野里
   const parentOf = useMemo(() => {
     const m = new Map<string, string>()
     const walk = (n: SpanNode) => {
@@ -190,14 +177,6 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
     // collapsed 只在这里读一次，展开之后由下面那个 effect 接着滚
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, parentOf])
-  useEffect(() => {
-    const id = pendingScroll.current
-    if (!id) return
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-span-id="${id}"]`)
-    if (!el) return
-    pendingScroll.current = null
-    scrollRowIntoView(el, 32)
-  })
 
   const rows = useMemo(() => {
     const out: SpanNode[] = []
@@ -209,6 +188,29 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
     return out
   }, [tree, collapsed])
 
+  // 只渲染视口里的几十行：几千个 span 的 trace 全画出来是几万个 DOM 节点，选中 / 缩放一次就重排一遍
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => ROW_H,
+    overscan: 12,
+    scrollMargin: HEADER_H,
+  })
+  // 行渲染出来（或者本来就在列表里）之后，不在可视区就滚到中间；已经看得见就不动
+  useEffect(() => {
+    const id = pendingScroll.current
+    const box = listRef.current
+    if (!id || !box) return
+    const idx = rows.findIndex((n) => n.span.span_id === id)
+    if (idx < 0) return
+    pendingScroll.current = null
+    const top = HEADER_H + idx * ROW_H
+    const visibleTop = box.scrollTop + HEADER_H
+    const visibleBottom = box.scrollTop + box.clientHeight
+    if (top >= visibleTop && top + ROW_H <= visibleBottom) return
+    box.scrollTo({ top: Math.max(0, top - (box.clientHeight - ROW_H) / 2), behavior: 'smooth' })
+  })
+
   const full = useMemo<TimeWindow>(() => ({ startUs: tree.startUs, endUs: tree.endUs }), [tree])
   const root = useMemo(() => rootWindow(tree), [tree])
   const view = zoom ?? defaultWindow(tree)
@@ -217,7 +219,6 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
   const isFull = view.startUs <= full.startUs && view.endUs >= full.endUs
   const isRoot = !!root && view.startUs === root.startUs && view.endUs === root.endUs
   const rootIsPartial = !!root && root.endUs - root.startUs < fullLen * 0.999
-  const x = (us: number) => ((us - view.startUs) / viewLen) * 100
   const offsetLabel = (us: number) => `+${formatDuration((us - tree.startUs) * 1000)}`
   // 手机上时间轴只有 260px，5 个刻度会挤在一起
   const ticks = isMobile ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1]
@@ -234,25 +235,60 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
     return { before, after }
   }, [rows, view])
 
-  // 在时间轴表头上拖一段来放大；双击还原
+  // 行组件是 memo 的，回调要稳定；onSelect 是父组件每次渲染新建的箭头函数，经 ref 转一手
+  const onSelectRef = useRef(onSelect)
+  onSelectRef.current = onSelect
+  const select = useCallback((id: string, isSel: boolean) => onSelectRef.current(isSel ? null : id), [])
+  const toggle = useCallback((id: string) => {
+    setCollapsed((c) => {
+      const next = new Set(c)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  // 在时间轴表头上拖一段来放大；双击还原。拖动过程中直接改选框的 style，不进 React state：
+  // 每个 pointermove 都 setState 的话，整张表跟着重画几十次每秒
+  const drag = useRef<{ x0: number; x1: number } | null>(null)
+  const dragBox = useRef<HTMLDivElement>(null)
+  const paintDrag = () => {
+    const box = dragBox.current
+    const d = drag.current
+    if (!box) return
+    if (!d || Math.abs(d.x1 - d.x0) < 4) {
+      box.style.display = 'none'
+      return
+    }
+    box.style.display = ''
+    box.style.left = `${leftW + Math.min(d.x0, d.x1)}px`
+    box.style.width = `${Math.abs(d.x1 - d.x0)}px`
+  }
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
     const rect = e.currentTarget.getBoundingClientRect()
     const px = e.clientX - rect.left
-    setDrag({ x0: px, x1: px })
+    drag.current = { x0: px, x1: px }
     e.currentTarget.setPointerCapture(e.pointerId)
   }
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!drag) return
+    const d = drag.current
+    if (!d) return
     const rect = e.currentTarget.getBoundingClientRect()
-    setDrag({ x0: drag.x0, x1: Math.max(0, Math.min(rect.width, e.clientX - rect.left)) })
+    d.x1 = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+    paintDrag()
+  }
+  const endDrag = () => {
+    drag.current = null
+    paintDrag()
   }
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!drag) return
+    const d = drag.current
+    if (!d) return
     const rect = e.currentTarget.getBoundingClientRect()
-    const a = Math.min(drag.x0, drag.x1)
-    const b = Math.max(drag.x0, drag.x1)
-    setDrag(null)
+    const a = Math.min(d.x0, d.x1)
+    const b = Math.max(d.x0, d.x1)
+    endDrag()
     if (b - a < 4 || rect.width <= 0) return
     const startUs = view.startUs + (a / rect.width) * viewLen
     const endUs = view.startUs + (b / rect.width) * viewLen
@@ -260,9 +296,10 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
     setZoom({ startUs, endUs })
   }
 
+  const items = virtualizer.getVirtualItems()
   return (
-    <div ref={listRef} className="relative min-w-0 overflow-auto">
-      <div className="sticky top-0 z-[1] flex h-8 border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: minW }}>
+    <div ref={listRef} className="relative h-full min-w-0 overflow-auto">
+      <div className="sticky top-0 z-[1] flex border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: minW, height: HEADER_H }}>
         <div className="flex shrink-0 items-center gap-1 overflow-hidden px-2 md:px-3" style={{ width: leftW }}>
           <span className="mr-auto hidden whitespace-nowrap md:inline">服务 / 操作</span>
           {rootIsPartial && (
@@ -282,7 +319,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          onPointerCancel={() => setDrag(null)}
+          onPointerCancel={endDrag}
           onDoubleClick={() => setZoom(null)}
         >
           {ticks.map((t) => (
@@ -307,103 +344,136 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
           )}
         </div>
       </div>
-      {drag && Math.abs(drag.x1 - drag.x0) >= 4 && (
-        <div
-          className="pointer-events-none absolute inset-y-0 z-[2] border-x border-accent bg-accent/15"
-          style={{ left: leftW + Math.min(drag.x0, drag.x1), width: Math.abs(drag.x1 - drag.x0) }}
-        />
-      )}
-      {rows.map((n) => {
-        const s = n.span
-        const isSel = selected === s.span_id
-        const isErr = s.status === 'Error'
-        const color = colors.color(s.service)
-        const hasKids = n.children.length > 0
-        const startUs = s.start_us
-        const endUs = startUs + s.duration_ns / 1000
-        const x0 = x(startUs)
-        const x1 = x(endUs)
-        const before = x1 < 0
-        const after = x0 > 100
-        const left = Math.max(0, x0)
-        const right = Math.min(100, Math.max(x1, left + MIN_BAR_PCT))
-        const width = right - left
-        const dur = formatDuration(s.duration_ns)
-        // 耗时标签：条后面放得下就放后面，不然放前面，再不然压在条上
-        const labelAfter = right < 84
-        const labelBefore = !labelAfter && left > 16
-        return (
-          <div
-            key={s.span_id}
-            data-span-id={s.span_id}
-            className={cn('row-hover flex cursor-pointer border-b border-border/50', isSel && 'row-selected')}
-            style={{ height: ROW_H, minWidth: minW }}
-            onClick={() => onSelect(isSel ? null : s.span_id)}
-          >
-            <div className="flex shrink-0 items-center gap-1.5 overflow-hidden pr-3" style={{ width: leftW, paddingLeft: 8 + n.depth * (isMobile ? 10 : 16) }}>
-              <button
-                type="button"
-                className={cn('shrink-0 text-muted-fg', !hasKids && 'invisible')}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setCollapsed((c) => {
-                    const next = new Set(c)
-                    if (next.has(s.span_id)) next.delete(s.span_id)
-                    else next.add(s.span_id)
-                    return next
-                  })
-                }}
-                title={collapsed.has(s.span_id) ? '展开' : '折叠'}
-              >
-                {collapsed.has(s.span_id) ? <ChevronRightIcon className="size-4" /> : <ChevronDownIcon className="size-4" />}
-              </button>
-              <span className="inline-block h-4 w-1 shrink-0 rounded-sm" style={{ background: color }} />
-              <span className="truncate text-xs">
-                <span className="text-muted-fg">{s.service}</span> <span className="font-medium">{s.name}</span>
-              </span>
-              {isErr && <AlertTriangleIcon className="size-4 shrink-0 text-danger" aria-label="错误" />}
-              {n.orphan && (
-                <Badge tone="warn" title={`父 span ${s.parent_span_id} 不在结果里（采样或未入库）`}>
-                  父缺失
-                </Badge>
-              )}
-            </div>
-            <div className="relative flex-1 overflow-hidden">
-              {ticks.slice(1, -1).map((t) => (
-                <span key={t} className="absolute inset-y-0 border-l border-border/60" style={{ left: `${t * 100}%` }} />
-              ))}
-              {before || after ? (
-                <span
-                  className={cn('absolute top-0 text-2xs leading-[30px] whitespace-nowrap text-muted-fg tabular-nums', before ? 'left-1.5' : 'right-1.5')}
-                  title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}，在当前窗口之${before ? '前' : '后'}`}
-                >
-                  {before ? `◂ ${offsetLabel(startUs)} · ${dur}` : `${offsetLabel(startUs)} · ${dur} ▸`}
-                </span>
-              ) : (
-                <>
-                  <div
-                    className={cn('absolute top-[7px] h-4 rounded-sm', isErr && 'ring-1 ring-danger', x0 < 0 && 'rounded-l-none', x1 > 100 && 'rounded-r-none')}
-                    style={{ left: `${left}%`, width: `${width}%`, background: color, opacity: isErr ? 0.9 : 0.75 }}
-                    title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}`}
-                  />
-                  <span
-                    className={cn(
-                      'absolute top-0 text-2xs leading-[30px] whitespace-nowrap tabular-nums',
-                      labelAfter || labelBefore ? 'text-muted-fg' : 'text-fg',
-                    )}
-                    style={labelAfter ? { left: `${right}%`, marginLeft: 4 } : labelBefore ? { right: `${100 - left}%`, marginRight: 4 } : { left: `${left}%`, marginLeft: 4 }}
-                  >
-                    {dur}
-                  </span>
-                </>
-              )}
-            </div>
+      <div ref={dragBox} className="pointer-events-none absolute inset-y-0 z-[2] border-x border-accent bg-accent/15" style={{ display: 'none' }} />
+      <div className="relative" style={{ height: virtualizer.getTotalSize(), minWidth: minW }}>
+        {/* 刻度竖线画一次盖在整列上，不用每行各画几根 */}
+        <div className="pointer-events-none absolute inset-0 flex">
+          <div className="shrink-0" style={{ width: leftW }} />
+          <div className="relative flex-1">
+            {ticks.slice(1, -1).map((t) => (
+              <span key={t} className="absolute inset-y-0 border-l border-border/60" style={{ left: `${t * 100}%` }} />
+            ))}
           </div>
-        )
-      })}
+        </div>
+        {items.map((item) => {
+          const n = rows[item.index]
+          const id = n.span.span_id
+          return (
+            <SpanRow
+              key={id}
+              node={n}
+              top={item.start - HEADER_H}
+              isSel={selected === id}
+              isCollapsed={collapsed.has(id)}
+              color={colors.color(n.span.service)}
+              leftW={leftW}
+              isMobile={isMobile}
+              viewStartUs={view.startUs}
+              viewLen={viewLen}
+              treeStartUs={tree.startUs}
+              onSelect={select}
+              onToggle={toggle}
+            />
+          )
+        })}
+      </div>
     </div>
   )
 }
+
+interface RowProps {
+  node: SpanNode
+  /** 在列表里的纵向位置（px，不含表头） */
+  top: number
+  isSel: boolean
+  isCollapsed: boolean
+  color: string
+  leftW: number
+  isMobile: boolean
+  viewStartUs: number
+  viewLen: number
+  treeStartUs: number
+  onSelect: (id: string, isSel: boolean) => void
+  onToggle: (id: string) => void
+}
+
+/** 一行 span。props 全是原始值和稳定引用，选中 / 折叠别的行时这一行不会重画。 */
+const SpanRow = memo(function SpanRow({ node: n, top, isSel, isCollapsed, color, leftW, isMobile, viewStartUs, viewLen, treeStartUs, onSelect, onToggle }: RowProps) {
+  const s = n.span
+  const isErr = s.status === 'Error'
+  const hasKids = n.children.length > 0
+  const x = (us: number) => ((us - viewStartUs) / viewLen) * 100
+  const offsetLabel = (us: number) => `+${formatDuration((us - treeStartUs) * 1000)}`
+  const startUs = s.start_us
+  const endUs = startUs + s.duration_ns / 1000
+  const x0 = x(startUs)
+  const x1 = x(endUs)
+  const before = x1 < 0
+  const after = x0 > 100
+  const left = Math.max(0, x0)
+  const right = Math.min(100, Math.max(x1, left + MIN_BAR_PCT))
+  const width = right - left
+  const dur = formatDuration(s.duration_ns)
+  // 耗时标签：条后面放得下就放后面，不然放前面，再不然压在条上
+  const labelAfter = right < 84
+  const labelBefore = !labelAfter && left > 16
+  return (
+    <div
+      data-span-id={s.span_id}
+      className={cn('row-hover absolute inset-x-0 flex cursor-pointer border-b border-border/50', isSel && 'row-selected')}
+      style={{ height: ROW_H, top }}
+      onClick={() => onSelect(s.span_id, isSel)}
+    >
+      <div className="flex shrink-0 items-center gap-1.5 overflow-hidden pr-3" style={{ width: leftW, paddingLeft: 8 + n.depth * (isMobile ? 10 : 16) }}>
+        <button
+          type="button"
+          className={cn('shrink-0 text-muted-fg', !hasKids && 'invisible')}
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggle(s.span_id)
+          }}
+          title={isCollapsed ? '展开' : '折叠'}
+        >
+          {isCollapsed ? <ChevronRightIcon className="size-4" /> : <ChevronDownIcon className="size-4" />}
+        </button>
+        <span className="inline-block h-4 w-1 shrink-0 rounded-sm" style={{ background: color }} />
+        <span className="truncate text-xs">
+          <span className="text-muted-fg">{s.service}</span> <span className="font-medium">{s.name}</span>
+        </span>
+        {isErr && <AlertTriangleIcon className="size-4 shrink-0 text-danger" aria-label="错误" />}
+        {n.orphan && (
+          <Badge tone="warn" title={`父 span ${s.parent_span_id} 不在结果里（采样或未入库）`}>
+            父缺失
+          </Badge>
+        )}
+      </div>
+      <div className="relative flex-1 overflow-hidden">
+        {before || after ? (
+          <span
+            className={cn('absolute top-0 text-2xs leading-[30px] whitespace-nowrap text-muted-fg tabular-nums', before ? 'left-1.5' : 'right-1.5')}
+            title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}，在当前窗口之${before ? '前' : '后'}`}
+          >
+            {before ? `◂ ${offsetLabel(startUs)} · ${dur}` : `${offsetLabel(startUs)} · ${dur} ▸`}
+          </span>
+        ) : (
+          <>
+            <div
+              className={cn('absolute top-[7px] h-4 rounded-sm', isErr && 'ring-1 ring-danger', x0 < 0 && 'rounded-l-none', x1 > 100 && 'rounded-r-none')}
+              style={{ left: `${left}%`, width: `${width}%`, background: color, opacity: isErr ? 0.9 : 0.75 }}
+              title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}`}
+            />
+            <span
+              className={cn('absolute top-0 text-2xs leading-[30px] whitespace-nowrap tabular-nums', labelAfter || labelBefore ? 'text-muted-fg' : 'text-fg')}
+              style={labelAfter ? { left: `${right}%`, marginLeft: 4 } : labelBefore ? { right: `${100 - left}%`, marginRight: 4 } : { left: `${left}%`, marginLeft: 4 }}
+            >
+              {dur}
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  )
+})
 
 function fmtValue(v: AttrValue): string {
   if (v === null || v === undefined) return ''

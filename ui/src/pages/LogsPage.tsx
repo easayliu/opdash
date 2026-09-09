@@ -13,24 +13,11 @@ import { levelColor } from '@/lib/colors'
 import { formatNumber } from '@/lib/time'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
+import { positiveTerms } from '@/lib/query-syntax'
 
 const PAGE_SIZES = [100, 200, 500, 1000]
 const FOLLOW_INTERVAL_MS = 5000
 const FOLLOW_MAX_ROWS = 2000
-
-function parseTerms(q: string): string[] {
-  // 只取要高亮的正向词（和后端 parse_terms 一致的简化版）
-  const out: string[] = []
-  const re = /-?"([^"]*)"|(\S+)/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(q))) {
-    const raw = m[0]
-    if (raw.startsWith('-')) continue
-    const word = m[1] ?? m[2]
-    if (word) out.push(word)
-  }
-  return out
-}
 
 interface PagerProps {
   offset: number
@@ -177,7 +164,7 @@ export function LogsPage() {
     return () => document.removeEventListener('keydown', onKey)
   }, [contextRow])
 
-  const highlight = filter.regex ? [] : parseTerms(filter.q)
+  const highlight = useMemo(() => (filter.regex ? [] : positiveTerms(filter.q)), [filter.regex, filter.q])
   const rows = follow ? live : (search.data?.rows ?? [])
   const total = search.data?.total
   const exportParams = { ...baseParams, order }

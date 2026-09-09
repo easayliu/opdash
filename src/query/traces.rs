@@ -14,6 +14,9 @@
 //! 集群部署时表是 `Distributed`，分片键 `cityHash64(trace_id)`：链路检索分两次往返——先找候选
 //! trace id，再 `trace_id IN {ids}` 聚合——避免嵌套分布式子查询；每个请求带
 //! `optimize_skip_unused_shards=1`，按 id 查只打对应分片。
+//!
+//! 链路详情也分两步：先按 trace id 只读轻列定位 span 在哪（bloom filter 误报块读起来便宜），
+//! 再按排序键前缀走主键取 JSON 属性这些重列，见 [`TraceQueries::detail_locate`]。
 
 use std::collections::BTreeMap;
 
@@ -24,6 +27,9 @@ use super::{Bindings, Bucket, TimeRange, quote_ident};
 use crate::clickhouse::{Query, num};
 use crate::error::{Error, Result};
 use crate::schema::{TRACE_FIXED_COLUMNS, Table};
+
+/// 详情第二步 `span_name IN` 列表的字面量上限；参数都走 URL，整条 URL 不能超过 64 KB。
+const MAX_NAMES_BYTES: usize = 16 * 1024;
 
 /// OTLP 的 span kind，存的是这些字符串。
 pub const SPAN_KINDS: &[&str] =
@@ -195,6 +201,16 @@ impl TraceFilter {
 #[derive(Debug, Deserialize)]
 pub struct CandidateRow {
     pub trace_id: String,
+}
+
+/// 详情第一步定位到的一个 span：在哪个排序键区间、哪一毫秒。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct LocatedSpan {
+    pub span_id: String,
+    pub service_name: String,
+    pub span_name: String,
+    #[serde(deserialize_with = "num::de")]
+    pub ts_ms: i64,
 }
 
 /// 聚合出来的一条 trace 的摘要（每个 trace 一行）。
@@ -474,12 +490,19 @@ impl TraceQueries<'_> {
         Ok(Self::finish(b, sql))
     }
 
-    /// 链路详情：全部 span，重复的（写入重试）只留一份。多取一行用来判断有没有截断。
+    /// 链路详情第一步：找出这条 trace 的 span 都在哪。只读 `span_id` 和排序键那几列，
+    /// 重复的（写入重试）只留一份，多取一行用来判断有没有截断。
     ///
-    /// `window` 给了就加时间谓词裁剪分区：bloom filter 是按 granule 块算的，不限时间要把
-    /// 30 天的索引块都过一遍，每个块还有 2.5% 的误报要真读；从列表页进来时知道 trace 的开始
-    /// 时间，圈到前后一两天就只剩一两个分区。
-    pub fn detail(
+    /// 详情为什么分两步：`trace_id` 只有 bloom filter（GRANULARITY 4，默认 2.5% 误报），一天
+    /// 一亿多 span 时，过了索引的索引块里绝大多数是误报（线上 EXPLAIN：18371 个 granule 剩 476 个，
+    /// 约 119 个索引块，和 4600 × 2.5% 的期望误报数正好对上）。一步到位地把 JSON 属性列、
+    /// events / links 都 SELECT 出来，就是在这几百万行误报上读完整 JSON，30 秒超时就是这么来的。
+    /// 先只读轻列定位，误报块每行几十字节，亚秒级；再由 [`Self::detail_fetch`] 按排序键前缀
+    /// `(service_name, span_name)` 加实际时间跨度走主键取重列，误报块在主键这一层就被挡掉。
+    ///
+    /// `window` 给了就加时间谓词裁剪分区：不限时间要把 30 天的索引块都过一遍；从列表页进来时
+    /// 知道 trace 的开始时间，圈到前后一两天就只剩一两个分区。
+    pub fn detail_locate(
         &self,
         trace_id: &str,
         max_spans: u32,
@@ -492,6 +515,50 @@ impl TraceQueries<'_> {
             Some(w) => format!("\n  AND {}", b.time_predicate("timestamp", w)),
             None => String::new(),
         };
+        let sql = format!(
+            "SELECT span_id, service_name, span_name, toUnixTimestamp64Milli(timestamp) AS ts_ms\nFROM {from}\nWHERE trace_id = {id}{time_sql}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
+    /// 链路详情第二步：按第一步定位到的 span 取全部列。
+    ///
+    /// `(service_name, span_name)` 是排序键前缀，加上 `toDateTime(timestamp)` 落在第一步看到的
+    /// 毫秒区间里，主键能直接圈到这条 trace 真实所在的 granule；`trace_id` 等值保留给
+    /// bloom filter 和分片裁剪。服务名和 span 名按笛卡尔积写成两个 `IN`，比 `Array(Tuple)`
+    /// 参数省事，多圈进来的组合数量有限，主键裁剪后多读的 granule 可以忽略。
+    ///
+    /// **不**把 span id 列表传进去：参数都走 URL，5000 个 id 就是 100 KB，超过 HTTP 库 64 KB
+    /// 的 URI 上限（线上一条 5000+ span 的 trace 就是这么报 `builder error for url` 的）。
+    /// 不传也不影响一致性：这一步的条件是第一步的子集，`ORDER BY` 和去重方式相同，
+    /// 时间区间又卡在第一步看到的最早、最晚那一毫秒之间，取前 `located.len()` 行就是同一批 span。
+    pub fn detail_fetch(&self, trace_id: &str, located: &[LocatedSpan]) -> Result<Query> {
+        if located.is_empty() {
+            return Err(Error::internal("detail_fetch 需要至少一个 span"));
+        }
+        let mut b = Bindings::new();
+        let id = b.bind("String", trace_id);
+        let mut services: Vec<String> = located.iter().map(|s| s.service_name.clone()).collect();
+        services.sort();
+        services.dedup();
+        let mut names: Vec<String> = located.iter().map(|s| s.span_name.clone()).collect();
+        names.sort();
+        names.dedup();
+        let min_ms = located.iter().map(|s| s.ts_ms).min().unwrap_or(0).max(0);
+        let max_ms = located.iter().map(|s| s.ts_ms).max().unwrap_or(0).max(0);
+        // 存的是纳秒精度，毫秒 X 的 span 落在 [X, X+1) 里，右边界要多放 1 毫秒
+        let range = TimeRange { from_ms: min_ms, to_ms: max_ms + 1 };
+        let services = b.bind("Array(String)", services);
+        // span 名把 SQL / 表名拼进去的服务，一条 trace 能有上千个不同的名字；列表太长就不传，
+        // 退化成服务名加时间裁剪，仍然正确，只是主键少切一层
+        let names_sql = if names.iter().map(|n| n.len() + 3).sum::<usize>() <= MAX_NAMES_BYTES {
+            format!("\n  AND span_name IN {}", b.bind("Array(String)", names))
+        } else {
+            String::new()
+        };
+        let time = b.time_predicate("timestamp", &range);
+        let limit = b.bind("UInt32", located.len() as u32);
         let mut cols: Vec<String> = vec![
             "span_id".into(),
             "parent_span_id".into(),
@@ -521,7 +588,7 @@ impl TraceQueries<'_> {
             }
         }
         let sql = format!(
-            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}{time_sql}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
+            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}\n  AND service_name IN {services}{names_sql}\n  AND {time}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
             cols = cols.join(", "),
             from = self.table_ref(),
         );
@@ -933,18 +1000,28 @@ mod tests {
     }
 
     #[test]
-    fn detail_sql_dedupes_and_over_fetches() {
+    fn detail_locate_reads_light_columns_and_over_fetches() {
         let table = table();
         let q = TraceQueries { database: "logs", table: &table };
-        let d = q.detail("abc", 5000, None).unwrap();
+        let d = q.detail_locate("abc", 5000, None).unwrap();
+        assert!(
+            d.sql().starts_with(
+                "SELECT span_id, service_name, span_name, toUnixTimestamp64Milli(timestamp) AS ts_ms\nFROM"
+            ),
+            "{}",
+            d.sql()
+        );
         assert!(d.sql().contains("WHERE trace_id = {p0:String}\nORDER BY"), "{}", d.sql());
         assert!(
             d.sql().ends_with("ORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {p1:UInt32}")
         );
         assert_eq!(d.params()[1].1, "5001");
-        assert!(d.sql().contains("`events.attributes` AS event_attrs"));
-        assert!(d.sql().contains(", `cluster`\n"), "{}", d.sql());
-        let w = q.detail("abc", 5000, Some(&range())).unwrap();
+        // 重列一个都不碰
+        for heavy in ["span_attributes", "resource_attributes", "events.", "links."] {
+            assert!(!d.sql().contains(heavy), "{heavy} 不该出现在定位查询里: {}", d.sql());
+        }
+        assert_eq!(d.settings(), &[("optimize_skip_unused_shards", "1".to_owned())]);
+        let w = q.detail_locate("abc", 5000, Some(&range())).unwrap();
         assert!(
             w.sql().contains(
                 "WHERE trace_id = {p0:String}\n  AND timestamp >= fromUnixTimestamp64Milli({p2:Int64}) AND timestamp < fromUnixTimestamp64Milli({p3:Int64})\nORDER BY"
@@ -953,6 +1030,95 @@ mod tests {
             w.sql()
         );
         assert_eq!(w.params()[2].1, "1000000");
+    }
+
+    #[test]
+    fn detail_fetch_pins_sort_key_prefix_and_time_span() {
+        let table = table();
+        let q = TraceQueries { database: "logs", table: &table };
+        let located = vec![
+            LocatedSpan {
+                span_id: "s2".into(),
+                service_name: "gateway".into(),
+                span_name: "GET /x".into(),
+                ts_ms: 1_700,
+            },
+            LocatedSpan {
+                span_id: "s1".into(),
+                service_name: "order".into(),
+                span_name: "db.query".into(),
+                ts_ms: 1_500,
+            },
+            LocatedSpan {
+                span_id: "s3".into(),
+                service_name: "order".into(),
+                span_name: "GET /x".into(),
+                ts_ms: 1_600,
+            },
+        ];
+        let f = q.detail_fetch("abc", &located).unwrap();
+        assert!(
+            f.sql().contains(
+                "WHERE trace_id = {p0:String}\n  AND service_name IN {p1:Array(String)}\n  AND span_name IN {p2:Array(String)}\n  AND timestamp >= fromUnixTimestamp64Milli({p3:Int64}) AND timestamp < fromUnixTimestamp64Milli({p4:Int64})\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {p5:UInt32}"
+            ),
+            "{}",
+            f.sql()
+        );
+        let params = f.params();
+        assert_eq!(params[0].1, "abc");
+        // 去重且有序，主键裁剪用
+        assert_eq!(params[1].1, "['gateway','order']");
+        assert_eq!(params[2].1, "['GET /x','db.query']");
+        // 毫秒区间：最早的那一毫秒到最晚的那一毫秒加 1（存的是纳秒）
+        assert_eq!(params[3].1, "1500");
+        assert_eq!(params[4].1, "1701");
+        assert_eq!(params[5].1, "3");
+        // span id 不进参数：5000 个 id 会把 URL 撑过 64 KB
+        assert!(!f.sql().contains("span_id IN"), "{}", f.sql());
+        assert_eq!(params.len(), 6);
+        // 重列在这一步取
+        assert!(f.sql().contains("`events.attributes` AS event_attrs"));
+        assert!(f.sql().contains(", `cluster`\n"), "{}", f.sql());
+        assert_eq!(f.settings(), &[("optimize_skip_unused_shards", "1".to_owned())]);
+        assert!(q.detail_fetch("abc", &[]).is_err());
+    }
+
+    /// 5000 个 span 的 trace：参数总量要留在 HTTP 库 64 KB 的 URI 上限之内。
+    #[test]
+    fn detail_fetch_params_stay_small_for_huge_traces() {
+        let table = table();
+        let q = TraceQueries { database: "logs", table: &table };
+        let located: Vec<LocatedSpan> = (0..5000)
+            .map(|i| LocatedSpan {
+                span_id: format!("{i:016x}"),
+                service_name: format!("svc-{}", i % 3),
+                span_name: format!("op-{}", i % 15),
+                ts_ms: 1_700_000 + i,
+            })
+            .collect();
+        let f = q.detail_fetch("abc", &located).unwrap();
+        let bytes: usize = f.params().iter().map(|(k, v)| k.len() + v.len()).sum();
+        assert!(bytes < 4 * 1024, "{bytes} bytes of params");
+        assert_eq!(f.params()[5].1, "5000");
+
+        // span 名各不相同且很长：列表不进参数，只剩服务名加时间
+        let noisy: Vec<LocatedSpan> = (0..2000)
+            .map(|i| LocatedSpan {
+                span_id: format!("{i:016x}"),
+                service_name: "svc".into(),
+                span_name: format!("INSERT rawdata.table_{i}_with_a_rather_long_suffix"),
+                ts_ms: 1_700_000 + i,
+            })
+            .collect();
+        let f = q.detail_fetch("abc", &noisy).unwrap();
+        assert!(!f.sql().contains("span_name IN"), "{}", f.sql());
+        assert!(
+            f.sql().contains("service_name IN {p1:Array(String)}\n  AND timestamp >="),
+            "{}",
+            f.sql()
+        );
+        let bytes: usize = f.params().iter().map(|(k, v)| k.len() + v.len()).sum();
+        assert!(bytes < 4 * 1024, "{bytes} bytes of params");
     }
 
     #[test]

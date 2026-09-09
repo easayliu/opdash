@@ -5,6 +5,7 @@ import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
 import { UserMenu } from '@/components/UserMenu'
 import { Input } from '@/components/ui'
+import { useRangeMemory } from '@/lib/url-state'
 import { cn, isHexId } from '@/lib/utils'
 import { LogsPage } from '@/pages/LogsPage'
 import { TracesPage } from '@/pages/TracesPage'
@@ -42,6 +43,26 @@ function QuickJump() {
         aria-label="快速跳转"
       />
     </form>
+  )
+}
+
+/**
+ * 路由出口。地址上没带时间范围时先补上记住的那一个再渲染页面——
+ * 补参数走 replace，不会在历史里多留一条。
+ */
+function AppRoutes() {
+  const redirect = useRangeMemory()
+  if (redirect) return <Navigate to={redirect} replace />
+  return (
+    <Routes>
+      <Route path="/" element={<Navigate to="/logs" replace />} />
+      <Route path="/logs" element={<LogsPage />} />
+      <Route path="/traces" element={<TracesPage />} />
+      <Route path="/traces/:traceId" element={<TraceDetailPage />} />
+      <Route path="/services" element={<ServicesPage />} />
+      <Route path="/services/:name" element={<ServiceDetailPage />} />
+      <Route path="*" element={<Navigate to="/logs" replace />} />
+    </Routes>
   )
 }
 
@@ -89,15 +110,7 @@ export default function App() {
         </div>
       </header>
       <main className="flex min-h-0 flex-1 flex-col overflow-auto">
-        <Routes>
-          <Route path="/" element={<Navigate to="/logs" replace />} />
-          <Route path="/logs" element={<LogsPage />} />
-          <Route path="/traces" element={<TracesPage />} />
-          <Route path="/traces/:traceId" element={<TraceDetailPage />} />
-          <Route path="/services" element={<ServicesPage />} />
-          <Route path="/services/:name" element={<ServiceDetailPage />} />
-          <Route path="*" element={<Navigate to="/logs" replace />} />
-        </Routes>
+        <AppRoutes />
       </main>
       <footer className="hidden h-8 shrink-0 items-center justify-end gap-3 border-t border-border px-4 text-2xs text-muted-fg md:flex">
         <span>opdash v{__APP_VERSION__}</span>

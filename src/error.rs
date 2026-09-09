@@ -43,6 +43,8 @@ pub mod ch_code {
     pub const READONLY: i32 = 164;
     pub const REQUIRED_PASSWORD: i32 = 194;
     pub const TOO_MANY_SIMULTANEOUS_QUERIES: i32 = 202;
+    /// 单独超 `max_bytes_to_read` 时抛这个，不是 396；396 只在行和字节一起限时出现。
+    pub const TOO_MANY_BYTES: i32 = 307;
     pub const SOCKET_TIMEOUT: i32 = 209;
     pub const NETWORK_ERROR: i32 = 210;
     pub const MEMORY_LIMIT_EXCEEDED: i32 = 241;
@@ -74,7 +76,7 @@ impl Error {
             Error::Busy => StatusCode::SERVICE_UNAVAILABLE,
             Error::ClickHouse { code, .. } => match *code {
                 TIMEOUT_EXCEEDED | TOO_SLOW | SOCKET_TIMEOUT => StatusCode::GATEWAY_TIMEOUT,
-                TOO_MANY_ROWS | TOO_MANY_ROWS_OR_BYTES | MEMORY_LIMIT_EXCEEDED => {
+                TOO_MANY_ROWS | TOO_MANY_BYTES | TOO_MANY_ROWS_OR_BYTES | MEMORY_LIMIT_EXCEEDED => {
                     StatusCode::PAYLOAD_TOO_LARGE
                 }
                 CANNOT_COMPILE_REGEXP => StatusCode::BAD_REQUEST,
@@ -99,7 +101,7 @@ impl Error {
                 TIMEOUT_EXCEEDED | TOO_SLOW => {
                     "查询超时，请缩小时间范围或加更多筛选条件".to_owned()
                 }
-                TOO_MANY_ROWS | TOO_MANY_ROWS_OR_BYTES => {
+                TOO_MANY_ROWS | TOO_MANY_BYTES | TOO_MANY_ROWS_OR_BYTES => {
                     "查询要读的数据太多，请缩小时间范围或加更多筛选条件".to_owned()
                 }
                 MEMORY_LIMIT_EXCEEDED => "查询内存超限，请缩小时间范围".to_owned(),
@@ -230,6 +232,21 @@ mod tests {
             e.user_message(),
             "正则表达式无效: cannot compile re2: (unclosed, error: missing ): (unclosed"
         );
+    }
+
+    /// `max_bytes_to_read` 护栏触发时 ClickHouse 抛 307，得和 158 / 396 一样提示缩小范围，
+    /// 而不是落到默认分支给用户看 500 + 英文原文。
+    #[test]
+    fn too_many_bytes_is_payload_too_large() {
+        let raw = "Code: 307. DB::Exception: Limit for rows or bytes to read exceeded, max bytes: 20.00 GiB, current bytes: 20.15 GiB: While executing MergeTreeSelect(pool: ReadPool, algorithm: Thread). (TOO_MANY_BYTES) (version 26.9)";
+        let e = Error::ClickHouse { code: ch_code::TOO_MANY_BYTES, message: raw.into() };
+        assert_eq!(e.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(e.user_message(), "查询要读的数据太多，请缩小时间范围或加更多筛选条件");
+        for code in [ch_code::TOO_MANY_ROWS, ch_code::TOO_MANY_ROWS_OR_BYTES] {
+            let e = Error::ClickHouse { code, message: String::new() };
+            assert_eq!(e.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(e.user_message(), "查询要读的数据太多，请缩小时间范围或加更多筛选条件");
+        }
     }
 
     #[test]

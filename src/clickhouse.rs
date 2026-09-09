@@ -377,6 +377,14 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// 两次往返合成一份：读量相加，结果行数取后一步的（前一步只是中间结果）。
+    pub fn absorb(&mut self, next: &Stats) {
+        self.read_rows += next.read_rows;
+        self.read_bytes += next.read_bytes;
+        self.elapsed_ms += next.elapsed_ms;
+        self.result_rows = next.result_rows;
+    }
+
     pub fn from_headers(headers: &HeaderMap) -> Self {
         let Some(raw) = headers.get("X-ClickHouse-Summary").and_then(|v| v.to_str().ok()) else {
             return Self::default();

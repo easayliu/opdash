@@ -12,49 +12,303 @@ use crate::clickhouse::{Query, num};
 use crate::error::{Error, Result};
 use crate::schema::{ColumnKind, LOG_FIXED_COLUMNS, Table};
 
-/// 关键字语法：空格分隔的词全部要命中（AND）；`-词` 排除；`"带 空格"` 当一个整体。
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Terms {
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
+/// 关键字语法（Kibana / Datadog 那套）：
+///
+/// * 空格分隔的词全部要命中（隐含 AND）；`a OR b` 任一命中；`-词` / `NOT 词` 排除；
+/// * `"带 空格"` 当一个整体；`( )` 分组；优先级 NOT > AND > OR；
+/// * `AND` / `OR` / `NOT` 全大写才算操作符，小写的 `or` 是普通词；要搜大写的就用引号 `"OR"`；
+/// * 括号只在词的边界算语法：`(a OR b)` 是分组，`getUser(id)` 这种词内配对的括号照字面搜。
+///
+/// 解析不会报错：悬空的 `OR`、多余的括号、空引号都忽略掉，尽量按用户的意思来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expr {
+    Term(String),
+    Not(Box<Expr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
 }
 
-pub fn parse_terms(q: &str) -> Terms {
-    let mut terms = Terms::default();
+impl Expr {
+    fn and(mut parts: Vec<Expr>) -> Option<Expr> {
+        let mut flat = Vec::with_capacity(parts.len());
+        for p in parts.drain(..) {
+            match p {
+                Expr::And(inner) => flat.extend(inner),
+                other => flat.push(other),
+            }
+        }
+        match flat.len() {
+            0 => None,
+            1 => flat.pop(),
+            _ => Some(Expr::And(flat)),
+        }
+    }
+
+    fn or(mut parts: Vec<Expr>) -> Option<Expr> {
+        let mut flat = Vec::with_capacity(parts.len());
+        for p in parts.drain(..) {
+            match p {
+                Expr::Or(inner) => flat.extend(inner),
+                other => flat.push(other),
+            }
+        }
+        match flat.len() {
+            0 => None,
+            1 => flat.pop(),
+            _ => Some(Expr::Or(flat)),
+        }
+    }
+
+    /// 要高亮的正向词：不在 NOT 下面的所有词。
+    pub fn positive_terms(&self) -> Vec<String> {
+        fn walk(e: &Expr, negated: bool, out: &mut Vec<String>) {
+            match e {
+                Expr::Term(t) => {
+                    if !negated {
+                        out.push(t.clone());
+                    }
+                }
+                Expr::Not(inner) => walk(inner, !negated, out),
+                Expr::And(parts) | Expr::Or(parts) => parts.iter().for_each(|p| walk(p, negated, out)),
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, false, &mut out);
+        out
+    }
+
+    /// 在 `message` 上的谓词。返回的 SQL 可以直接 AND 到别的条件上（OR 一定带括号）。
+    fn message_sql(&self, b: &mut Bindings) -> String {
+        match self {
+            Expr::Term(t) => format!(
+                "positionCaseInsensitiveUTF8(message, {}) > 0",
+                b.bind("String", t)
+            ),
+            Expr::Not(inner) => match &**inner {
+                Expr::Term(t) => format!(
+                    "positionCaseInsensitiveUTF8(message, {}) = 0",
+                    b.bind("String", t)
+                ),
+                Expr::And(_) => format!("NOT ({})", inner.message_sql(b)),
+                other => format!("NOT {}", other.message_sql(b)),
+            },
+            Expr::And(parts) => {
+                parts.iter().map(|p| p.message_sql(b)).collect::<Vec<_>>().join(" AND ")
+            }
+            Expr::Or(parts) => {
+                // 全是普通词的 OR 用 multiSearchAny 一趟扫完，比 N 个 position 快；
+                // ClickHouse 限制一次最多 256 个 needle，超了退回 OR 链。
+                let plain: Option<Vec<String>> = parts
+                    .iter()
+                    .map(|p| match p {
+                        Expr::Term(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                match plain {
+                    Some(terms) if terms.len() <= 256 => format!(
+                        "multiSearchAnyCaseInsensitiveUTF8(message, {})",
+                        b.bind("Array(String)", terms)
+                    ),
+                    _ => {
+                        let inner = parts
+                            .iter()
+                            .map(|p| match p {
+                                Expr::And(_) => format!("({})", p.message_sql(b)),
+                                _ => p.message_sql(b),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" OR ");
+                        format!("({inner})")
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Token {
+    Word(String),
+    Phrase(String),
+    And,
+    Or,
+    Not,
+    LParen,
+    RParen,
+}
+
+fn tokenize(q: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
     let mut chars = q.chars().peekable();
-    loop {
+    'outer: loop {
         while chars.peek().is_some_and(|c| c.is_whitespace()) {
             chars.next();
         }
-        let Some(&first) = chars.peek() else { break };
-        let negate = first == '-';
-        if negate {
-            chars.next();
-        }
-        let mut word = String::new();
-        if chars.peek() == Some(&'"') {
-            chars.next();
-            for c in chars.by_ref() {
-                if c == '"' {
-                    break;
+        // 词前面的前缀：`(` 开组，`-` 取反（后面得紧跟内容，孤零零的 `-` 忽略）
+        loop {
+            match chars.peek() {
+                Some('(') => {
+                    chars.next();
+                    tokens.push(Token::LParen);
                 }
-                word.push(c);
+                Some('-') => {
+                    let mut ahead = chars.clone();
+                    ahead.next();
+                    match ahead.peek() {
+                        Some(c) if !c.is_whitespace() && *c != ')' => {
+                            chars.next();
+                            tokens.push(Token::Not);
+                        }
+                        _ => {
+                            chars.next();
+                            continue 'outer;
+                        }
+                    }
+                }
+                _ => break,
             }
-        } else {
-            while let Some(&c) = chars.peek() {
-                if c.is_whitespace() {
-                    break;
-                }
-                word.push(c);
+        }
+        match chars.peek() {
+            None => break,
+            Some(')') => {
                 chars.next();
+                tokens.push(Token::RParen);
+            }
+            Some('"') => {
+                chars.next();
+                let mut phrase = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match chars.next() {
+                            Some(e @ ('"' | '\\')) => phrase.push(e),
+                            Some(e) => {
+                                phrase.push('\\');
+                                phrase.push(e);
+                            }
+                            None => phrase.push('\\'),
+                        },
+                        c => phrase.push(c),
+                    }
+                }
+                if !phrase.is_empty() {
+                    tokens.push(Token::Phrase(phrase));
+                }
+            }
+            Some(_) => {
+                let mut word = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_whitespace() {
+                        break;
+                    }
+                    word.push(c);
+                    chars.next();
+                }
+                // 词尾多出来的 `)` 是关组：`(a OR foo)` → foo + `)`；`getUser(id)` 配对了就不动
+                let mut closers = 0;
+                while word.ends_with(')') {
+                    let opens = word.matches('(').count();
+                    let closes = word.matches(')').count();
+                    if closes <= opens {
+                        break;
+                    }
+                    word.pop();
+                    closers += 1;
+                }
+                match word.as_str() {
+                    "" => {}
+                    "AND" => tokens.push(Token::And),
+                    "OR" => tokens.push(Token::Or),
+                    "NOT" => tokens.push(Token::Not),
+                    _ => tokens.push(Token::Word(word)),
+                }
+                tokens.extend(std::iter::repeat_n(Token::RParen, closers));
             }
         }
-        if word.is_empty() {
+    }
+    tokens
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn bump(&mut self) -> Option<Token> {
+        let t = self.tokens.get(self.pos).cloned();
+        self.pos += 1;
+        t
+    }
+
+    /// or := and ("OR" and)*
+    fn parse_or(&mut self) -> Option<Expr> {
+        let mut parts = Vec::new();
+        parts.extend(self.parse_and());
+        while self.peek() == Some(&Token::Or) {
+            self.bump();
+            parts.extend(self.parse_and());
+        }
+        Expr::or(parts)
+    }
+
+    /// and := unary (["AND"] unary)*
+    fn parse_and(&mut self) -> Option<Expr> {
+        let mut parts = Vec::new();
+        loop {
+            match self.peek() {
+                None | Some(Token::Or) | Some(Token::RParen) => break,
+                Some(Token::And) => {
+                    self.bump();
+                }
+                Some(_) => parts.extend(self.parse_unary()),
+            }
+        }
+        Expr::and(parts)
+    }
+
+    /// unary := ("NOT" | "-") unary | "(" or ")" | word | phrase
+    fn parse_unary(&mut self) -> Option<Expr> {
+        match self.bump()? {
+            Token::Not => self.parse_unary().map(|e| match e {
+                Expr::Not(inner) => *inner,
+                other => Expr::Not(Box::new(other)),
+            }),
+            Token::LParen => {
+                let inner = self.parse_or();
+                if self.peek() == Some(&Token::RParen) {
+                    self.bump();
+                }
+                inner
+            }
+            Token::Word(w) | Token::Phrase(w) => Some(Expr::Term(w)),
+            // 放错位置的操作符 / 括号：跳过
+            Token::And | Token::Or | Token::RParen => None,
+        }
+    }
+}
+
+/// 把关键字串解析成表达式；只有空白 / 只有操作符时是 `None`。
+pub fn parse_query(q: &str) -> Option<Expr> {
+    let mut p = Parser { tokens: tokenize(q), pos: 0 };
+    let mut parts = Vec::new();
+    while p.peek().is_some() {
+        let before = p.pos;
+        if p.peek() == Some(&Token::RParen) {
+            p.bump();
             continue;
         }
-        if negate { &mut terms.exclude } else { &mut terms.include }.push(word);
+        parts.extend(p.parse_or());
+        if p.pos == before {
+            p.bump();
+        }
     }
-    terms
+    Expr::and(parts)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -89,7 +343,7 @@ pub struct LogFilter {
     /// 没有时间范围只允许在给了 trace_id / span_id 时（走 bloom filter）。
     pub range: Option<TimeRange>,
     pub q: String,
-    /// `q` 按正则（ClickHouse `match`，RE2）而不是关键字语法
+    /// `q` 按正则（ClickHouse `match`，RE2）而不是关键字语法（见 [`parse_query`]）
     pub regex: bool,
     pub levels: Vec<String>,
     /// logger 包含（不分大小写）
@@ -106,7 +360,7 @@ pub struct LogFilter {
 impl LogFilter {
     /// 有没有按消息内容筛（关键字 / 正则）。这种查询没有索引可用，必须扫完整个时间范围。
     pub fn has_message_predicate(&self) -> bool {
-        !self.q.trim().is_empty()
+        if self.regex { !self.q.trim().is_empty() } else { parse_query(&self.q).is_some() }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -160,18 +414,13 @@ impl LogFilter {
             if self.regex {
                 clauses.push(format!("match(message, {})", b.bind("String", self.q.trim())));
             } else {
-                let terms = parse_terms(&self.q);
-                for term in &terms.include {
-                    clauses.push(format!(
-                        "positionCaseInsensitiveUTF8(message, {}) > 0",
-                        b.bind("String", term)
-                    ));
-                }
-                for term in &terms.exclude {
-                    clauses.push(format!(
-                        "positionCaseInsensitiveUTF8(message, {}) = 0",
-                        b.bind("String", term)
-                    ));
+                match parse_query(&self.q) {
+                    // 顶层 AND 拆成多个子句，和别的条件一起平铺，SQL 好读
+                    Some(Expr::And(parts)) => {
+                        clauses.extend(parts.iter().map(|p| p.message_sql(b)));
+                    }
+                    Some(expr) => clauses.push(expr.message_sql(b)),
+                    None => {}
                 }
             }
         }
@@ -426,14 +675,117 @@ mod tests {
         TimeRange { from_ms: 1_000, to_ms: 2_000 }
     }
 
+    fn term(s: &str) -> Expr {
+        Expr::Term(s.into())
+    }
+
+    fn not(e: Expr) -> Expr {
+        Expr::Not(Box::new(e))
+    }
+
     #[test]
     fn parses_terms() {
-        let t = parse_terms(r#"支付 失败 -超时 "order id" -"not this" - "#);
-        assert_eq!(t.include, ["支付", "失败", "order id"]);
-        assert_eq!(t.exclude, ["超时", "not this"]);
-        assert_eq!(parse_terms("   "), Terms::default());
-        assert_eq!(parse_terms("\"unterminated").include, ["unterminated"]);
-        assert_eq!(parse_terms("a\tb\nc").include, ["a", "b", "c"]);
+        assert_eq!(
+            parse_query(r#"支付 失败 -超时 "order id" -"not this" - "#),
+            Some(Expr::And(vec![
+                term("支付"),
+                term("失败"),
+                not(term("超时")),
+                term("order id"),
+                not(term("not this")),
+            ]))
+        );
+        assert_eq!(parse_query("   "), None);
+        assert_eq!(parse_query("\"unterminated"), Some(term("unterminated")));
+        assert_eq!(parse_query("a\tb\nc"), Some(Expr::And(vec![term("a"), term("b"), term("c")])));
+        // 引号里 \" 是转义；引号外的反斜杠照字面（搜 Windows 路径 / 正则片段时不用双写）
+        assert_eq!(parse_query(r#"say \"hi\" "a \"b\" c""#), Some(Expr::And(vec![
+            term("say"), term(r#"\"hi\""#), term("a \"b\" c"),
+        ])));
+    }
+
+    #[test]
+    fn parses_boolean_operators() {
+        assert_eq!(
+            parse_query("AC1062 OR Preparing:"),
+            Some(Expr::Or(vec![term("AC1062"), term("Preparing:")]))
+        );
+        // AND 比 OR 优先
+        assert_eq!(
+            parse_query("a b OR c AND d"),
+            Some(Expr::Or(vec![
+                Expr::And(vec![term("a"), term("b")]),
+                Expr::And(vec![term("c"), term("d")]),
+            ]))
+        );
+        // 括号分组 + NOT 作用于整组；-( 也行
+        assert_eq!(
+            parse_query("(a OR b) NOT (c d)"),
+            Some(Expr::And(vec![
+                Expr::Or(vec![term("a"), term("b")]),
+                not(Expr::And(vec![term("c"), term("d")])),
+            ]))
+        );
+        assert_eq!(parse_query("x -(a OR b)"), parse_query("x NOT (a OR b)"));
+        // 小写 or 是普通词；引号里的 OR 也是普通词
+        assert_eq!(parse_query("a or b"), Some(Expr::And(vec![term("a"), term("or"), term("b")])));
+        assert_eq!(parse_query(r#"a "OR" b"#), Some(Expr::And(vec![term("a"), term("OR"), term("b")])));
+        // 双重否定抵消
+        assert_eq!(parse_query("NOT -a"), Some(term("a")));
+    }
+
+    #[test]
+    fn parens_inside_words_are_literal() {
+        assert_eq!(parse_query("getUser(id) timeout"), Some(Expr::And(vec![term("getUser(id)"), term("timeout")])));
+        assert_eq!(parse_query("(getUser(id) OR foo)"), Some(Expr::Or(vec![term("getUser(id)"), term("foo")])));
+        assert_eq!(parse_query("Exception( -x"), Some(Expr::And(vec![term("Exception("), not(term("x"))])));
+        assert_eq!(parse_query("(a OR b))"), parse_query("a OR b"));
+    }
+
+    #[test]
+    fn tolerates_dangling_syntax() {
+        assert_eq!(parse_query("OR"), None);
+        assert_eq!(parse_query("AND OR NOT ( ) -"), None);
+        assert_eq!(parse_query("OR a OR"), Some(term("a")));
+        assert_eq!(parse_query("a OR OR b"), Some(Expr::Or(vec![term("a"), term("b")])));
+        assert_eq!(parse_query(") a ( b"), Some(Expr::And(vec![term("a"), term("b")])));
+        assert_eq!(parse_query(r#""" a"#), Some(term("a")));
+        assert_eq!(parse_query("- a"), Some(term("a")));
+    }
+
+    #[test]
+    fn positive_terms_skip_negated() {
+        let e = parse_query(r#"a -b (c OR -d) NOT (e f) "g h""#).unwrap();
+        assert_eq!(e.positive_terms(), ["a", "c", "g h"]);
+    }
+
+    #[test]
+    fn boolean_sql() {
+        let table = table();
+        let q = LogQueries { database: "logs", table: &table };
+        let sql_of = |s: &str| {
+            let filter = LogFilter { range: Some(range()), q: s.into(), ..Default::default() };
+            q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned()
+        };
+        // 全是词的 OR 走 multiSearchAny
+        let sql = sql_of("a OR b OR c");
+        assert!(sql.contains("AND multiSearchAnyCaseInsensitiveUTF8(message, {p2:Array(String)})"), "{sql}");
+        // 混合的 OR 带括号，里面的 AND 也带括号
+        let sql = sql_of("x (a b OR -c)");
+        assert!(
+            sql.contains(
+                "AND positionCaseInsensitiveUTF8(message, {p2:String}) > 0\n  AND ((positionCaseInsensitiveUTF8(message, {p3:String}) > 0 AND positionCaseInsensitiveUTF8(message, {p4:String}) > 0) OR positionCaseInsensitiveUTF8(message, {p5:String}) = 0)"
+            ),
+            "{sql}"
+        );
+        // NOT 整组
+        let sql = sql_of("NOT (a OR b)");
+        assert!(sql.contains("AND NOT multiSearchAnyCaseInsensitiveUTF8(message, {p2:Array(String)})"), "{sql}");
+        let sql = sql_of("NOT (a b)");
+        assert!(sql.contains("AND NOT (positionCaseInsensitiveUTF8(message, {p2:String}) > 0 AND positionCaseInsensitiveUTF8(message, {p3:String}) > 0)"), "{sql}");
+        // 只有操作符：没有 message 条件
+        let sql = sql_of("OR AND");
+        assert!(!sql.contains("(message"), "{sql}");
     }
 
     #[test]

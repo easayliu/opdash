@@ -11,9 +11,9 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
-    AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, HeatmapRow, KeyRow, Span, SpanRow,
-    SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow, normalize_kind,
-    normalize_trace_id,
+    AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, HeatmapRow, KeyRow, LocatedSpan, Span,
+    SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow,
+    normalize_kind, normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -147,10 +147,7 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
     }
     let summaries =
         state.client.rows::<SummaryRow>(queries.summaries(&ids, range.as_ref())?).await?;
-    stats.read_rows += summaries.stats.read_rows;
-    stats.read_bytes += summaries.stats.read_bytes;
-    stats.elapsed_ms += summaries.stats.elapsed_ms;
-    stats.result_rows = summaries.stats.result_rows;
+    stats.absorb(&summaries.stats);
     // 保持候选查询的顺序（按时间 / 按耗时）
     let mut by_id: std::collections::HashMap<String, TraceSummary> =
         summaries.rows.into_iter().map(|r| (r.trace_id.clone(), TraceSummary::from(r))).collect();
@@ -261,6 +258,9 @@ pub struct DetailResponse {
 }
 
 /// `at`（unix 毫秒，可选）：trace 的开始时间。列表页 / 日志页跳过来时都知道，带上就能裁剪分区。
+///
+/// 两次往返：先按 trace id 只读轻列定位 span（bloom filter 的误报块读起来便宜），再按排序键前缀
+/// 走主键取全部列。原因见 [`TraceQueries::detail_locate`]。
 async fn detail(
     State(state): State<AppState>,
     Path(trace_id): Path<String>,
@@ -274,17 +274,31 @@ async fn detail(
         from_ms: (at - DETAIL_WINDOW_BEFORE_MS).max(0),
         to_ms: at + DETAIL_WINDOW_AFTER_MS,
     });
-    let result =
-        state.client.rows::<SpanRow>(queries.detail(&trace_id, max, window.as_ref())?).await?;
-    let truncated = result.rows.len() > max as usize;
-    let spans: Vec<Span> = result.rows.into_iter().take(max as usize).map(Span::from).collect();
-    Ok(Json(DetailResponse {
-        trace_id,
-        spans,
-        truncated,
-        windowed: window.is_some(),
-        stats: result.stats,
-    }))
+    let located = state
+        .client
+        .rows::<LocatedSpan>(queries.detail_locate(&trace_id, max, window.as_ref())?)
+        .await?;
+    let mut stats = located.stats;
+    let truncated = located.rows.len() > max as usize;
+    let located: Vec<LocatedSpan> = located.rows.into_iter().take(max as usize).collect();
+    let spans: Vec<Span> = if located.is_empty() {
+        Vec::new()
+    } else {
+        let full = state.client.rows::<SpanRow>(queries.detail_fetch(&trace_id, &located)?).await?;
+        stats.absorb(&full.stats);
+        // 第二步比第一步少了行：正常不该发生（同一张表、条件是第一步的超集、排序相同），
+        // 真出现多半是分片 / 副本一时不一致，记下来好对着库查
+        if full.rows.len() < located.len() {
+            tracing::warn!(
+                trace_id,
+                located = located.len(),
+                fetched = full.rows.len(),
+                "trace detail fetched fewer spans than located"
+            );
+        }
+        full.rows.into_iter().map(Span::from).collect()
+    };
+    Ok(Json(DetailResponse { trace_id, spans, truncated, windowed: window.is_some(), stats }))
 }
 
 #[derive(Serialize)]
