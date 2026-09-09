@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { CalendarIcon, ChevronDownIcon, RefreshCwIcon } from 'lucide-react'
 import { Button, Input } from '@/components/ui'
 import { useTimeRange } from '@/lib/url-state'
-import { QUICK_RANGES, fromLocalInputValue, rangeLabel, toLocalInputValue } from '@/lib/time'
+import { QUICK_RANGES, formatTs, fromLocalInputValue, rangeLabel, toLocalInputValue } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
 /** 顶栏共享的时间范围：快捷相对范围 + 自定义绝对范围，写进 URL。 */
@@ -41,7 +41,13 @@ export function TimeRangePicker({ className }: { className?: string }) {
 
   return (
     <div ref={ref} className={cn('relative flex min-w-0 items-center gap-1', className)}>
-      <Button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="min-w-0 gap-1.5 px-2.5 md:pl-3">
+      {/* 相对范围解析成的绝对窗口固定到下次刷新，挂在 title 上让人看得见自己在看哪一段 */}
+      <Button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        title={`${formatTs(range.fromMs)} ~ ${formatTs(range.toMs)}`}
+        className="min-w-0 gap-1.5 px-2.5 md:pl-3"
+      >
         <CalendarIcon className="size-4 shrink-0 text-muted-fg" />
         <span className="max-w-[9.5rem] truncate sm:max-w-[16rem] md:max-w-[22rem]">{rangeLabel(range)}</span>
         <ChevronDownIcon className="hidden size-4 shrink-0 text-muted-fg sm:block" />

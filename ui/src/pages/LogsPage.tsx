@@ -10,6 +10,7 @@ import { LogTable, rowKey } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { Button, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
+import { cn } from '@/lib/utils'
 import { formatNumber } from '@/lib/time'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
@@ -112,7 +113,11 @@ export function LogsPage() {
     }),
     [byId, range.fromMs, range.toMs, filter],
   )
-  const search = useLogSearch({ ...baseParams, order: byId ? 'asc' : order, limit, offset }, !follow && meta.isSuccess)
+  // 直方图各桶之和就是总条数，有直方图时让检索别再跑一条扫同样数据的 count()
+  const search = useLogSearch(
+    { ...baseParams, order: byId ? 'asc' : order, limit, offset, count: byId ? undefined : 0 },
+    !follow && meta.isSuccess,
+  )
   const histogram = useLogHistogram(baseParams, !byId && meta.isSuccess)
 
   // ---- 跟随模式：每 5 秒拉一次，回看 60 秒兜住晚到的行，按行键去重 ----
@@ -166,7 +171,11 @@ export function LogsPage() {
 
   const highlight = useMemo(() => (filter.regex ? [] : positiveTerms(filter.q)), [filter.regex, filter.q])
   const rows = follow ? live : (search.data?.rows ?? [])
-  const total = search.data?.total
+  // 检索还没回来时表里是上一次的结果（keepPreviousData）。直方图比检索快，这时候把新的总数
+  // 摆在旧行上面就成了「共 4 条」配着一屏不相干的日志，所以这一段整体标成待更新。
+  const stale = !follow && search.isPlaceholderData
+  // 按 id 查没有直方图，总数还是检索自己带回来的
+  const total = byId ? search.data?.total : histogram.data?.total
   const exportParams = { ...baseParams, order }
   const maxOffset = meta.data?.limits.max_offset ?? Infinity
   const pager: PagerProps = {
@@ -221,16 +230,18 @@ export function LogsPage() {
       )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2 text-xs md:px-4">
         <span className="font-medium text-fg">
-          {follow
-            ? `跟随中 · 已收 ${formatNumber(rows.length)} 行`
-            : total !== undefined
-              ? `共 ${formatNumber(total)} 条${total > limit ? `，显示第 ${formatNumber(offset + 1)} ~ ${formatNumber(Math.min(offset + limit, total))} 条` : ''}`
-              : search.data
-                ? `显示 ${formatNumber(rows.length)} 条`
-                : ''}
+          {stale
+            ? '查询中…'
+            : follow
+              ? `跟随中 · 已收 ${formatNumber(rows.length)} 行`
+              : total !== undefined
+                ? `共 ${formatNumber(total)} 条${total > limit ? `，显示第 ${formatNumber(offset + 1)} ~ ${formatNumber(Math.min(offset + limit, total))} 条` : ''}`
+                : search.data
+                  ? `显示 ${formatNumber(rows.length)} 条`
+                  : ''}
         </span>
         {search.isFetching && <Spinner className="size-4" />}
-        <StatsLine stats={search.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
+        <StatsLine stats={search.data?.stats} className={cn('hidden text-2xs text-muted-fg sm:inline', stale && 'opacity-50')} />
         <div className="ml-auto flex items-center gap-2">
           {!byId && (
             <Button
@@ -272,7 +283,7 @@ export function LogsPage() {
           </a>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto bg-card">
+      <div className={cn('min-h-0 flex-1 overflow-auto bg-card', stale && 'opacity-40 transition-opacity')}>
         {search.isError && <ErrorBox error={search.error} onRetry={() => search.refetch()} />}
         {!follow && search.isPending && !search.isError && (
           <div className="flex justify-center py-16">

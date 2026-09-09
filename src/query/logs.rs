@@ -1,7 +1,8 @@
 //! 日志表（logpipe 的 `app_log`）的 SQL。
 //!
-//! 排序键是 `(timestamp, level, trace_id)`：带时间范围的查询 `ORDER BY timestamp DESC LIMIT n`
-//! 能按排序键倒着读、读够就停，不用把整段时间的日志都排一遍；按 trace id 查走 `idx_trace_id`
+//! 排序键是 `(timestamp, level, trace_id)`：带时间范围的查询按这个顺序 `ORDER BY ... LIMIT n`
+//! 能倒着读、读够就停，不用把整段时间的日志都排一遍（排序键以外的列参与排序会退化，见 [`order_by`]）；
+//! 按 trace id 查走 `idx_trace_id`
 //! bloom filter，不带时间范围也不慢。`message` 没有全文索引，关键字是逐行扫时间范围内的
 //! 数据，所以时间范围是所有查询的第一道闸。
 
@@ -471,10 +472,19 @@ pub struct FacetRow {
 /// 上下文查询往前 / 往后最多找多远。
 pub const CONTEXT_WINDOW_MS: i64 = 3_600_000;
 
-/// 检索 / 上下文 / 导出共用同一套排序键，三处看到的顺序才一致。
+/// 检索 / 上下文 / 导出共用同一套排序，三处看到的顺序才一致。
+///
+/// 排的就是表自己的排序键 `(timestamp, level, trace_id)`——只有这样 ClickHouse 才能纯按顺序读、
+/// 读够 LIMIT 就停。以前后面还跟着 host / file / thread / logger / message 让同毫秒的行有确定顺序，
+/// 但这些列不在排序键里，执行计划上会多出 `PartialSorting` + `FinishSorting`：线上实测一小时窗口
+/// 取 200 行，3.03 GB / 4240 ms vs 现在的 0.14 GB / 166 ms，带关键字时 9.19 GB / 20.8 s vs 6.00 GB / 4.7 s。
+///
+/// 代价是同一 `(timestamp, level, trace_id)` 的行之间先后不保证（线上 10 分钟里 38% 的行落在这种
+/// 并列组里，最大一组 233 行），页边界正好切在一组中间时翻页可能重复或漏几行。要精确得换 keyset
+/// 翻页（游标带这个元组，不用 OFFSET），那也顺带解决深 OFFSET 的翻页上限。
 fn order_by(order: Order) -> String {
     let d = order.sql();
-    format!("timestamp {d}, host {d}, file {d}, thread {d}, logger {d}, message {d}")
+    format!("timestamp {d}, level {d}, trace_id {d}")
 }
 
 /// 只有低基数的字符串列才值得做 facet；`message` / `file` / id 这些做了也没法看。
@@ -536,9 +546,7 @@ impl LogQueries<'_> {
         let where_sql = filter.where_sql(&mut b)?;
         let limit = b.bind("UInt32", limit);
         let offset = b.bind("UInt32", offset);
-        // 排序键前缀是 timestamp，ClickHouse 会按排序键顺序读、读够 LIMIT 就停；后面几列只是
-        // 让同一毫秒内的行有确定顺序（ClickHouse 的并行排序不保证稳定），翻页时不会串。
-        // 同一线程同一毫秒打两行同样的内容才会仍然分不出先后，那种情况顺序本来就无所谓。
+        // 按排序键读、读够 LIMIT 就停，见 [`order_by`]
         let sql = format!(
             "SELECT {cols}\nFROM {from}\nWHERE {where_sql}\nORDER BY {order_by}\nLIMIT {limit} OFFSET {offset}",
             cols = self.select_columns()?,
@@ -815,7 +823,7 @@ mod tests {
         assert!(sql.contains("`pod` IN {p5:Array(String)}"), "{sql}");
         assert!(sql.contains("positionCaseInsensitiveUTF8(message, {p6:String}) > 0"), "{sql}");
         assert!(sql.contains("positionCaseInsensitiveUTF8(message, {p7:String}) = 0"), "{sql}");
-        assert!(sql.ends_with("ORDER BY timestamp DESC, host DESC, file DESC, thread DESC, logger DESC, message DESC\nLIMIT {p8:UInt32} OFFSET {p9:UInt32}"), "{sql}");
+        assert!(sql.ends_with("ORDER BY timestamp DESC, level DESC, trace_id DESC\nLIMIT {p8:UInt32} OFFSET {p9:UInt32}"), "{sql}");
         let params = query.params();
         assert_eq!(params[2], ("p2".to_owned(), "['ERROR','WARN']".to_owned()));
         assert_eq!(params[5], ("p5".to_owned(), "['a','b']".to_owned()));
@@ -890,7 +898,7 @@ mod tests {
             "{}",
             c.sql()
         );
-        assert!(c.sql().contains("ORDER BY timestamp DESC, host DESC"));
+        assert!(c.sql().contains("ORDER BY timestamp DESC, level DESC, trace_id DESC"));
         assert_eq!(c.params()[3].1, CONTEXT_WINDOW_MS.to_string());
         let c = q.context("node-1", "/var/log/x.log", 1_500, false, 50).unwrap();
         assert!(
@@ -898,7 +906,7 @@ mod tests {
             "{}",
             c.sql()
         );
-        assert!(c.sql().contains("ORDER BY timestamp ASC, host ASC"));
+        assert!(c.sql().contains("ORDER BY timestamp ASC, level ASC, trace_id ASC"));
 
         let e = q.export(&filter, Order::Desc, 50_000).unwrap();
         assert!(e.sql().starts_with("SELECT toString(timestamp) AS time, level"), "{}", e.sql());

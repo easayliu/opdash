@@ -81,6 +81,8 @@ export interface HistogramResponse {
   to_ms: number
   levels: string[]
   buckets: HistogramBucket[]
+  /** 范围内总条数（各桶之和），和 count() 等价 */
+  total: number
   stats: Stats
 }
 
