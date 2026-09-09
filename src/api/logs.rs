@@ -92,7 +92,8 @@ fn build_filter(state: &AppState, schema: &Schema, p: &Params) -> Result<LogFilt
 #[derive(Serialize)]
 pub struct SearchResponse {
     pub rows: Vec<LogRow>,
-    /// 满足条件的总数。只在第一页（offset = 0）算，翻页时前端沿用。
+    /// 满足条件的总数。只在第一页（offset = 0）算；日志页有直方图时会传 `count=0` 关掉它，
+    /// 改用直方图各桶之和，不用为了一个数再扫一遍同样的数据。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
     pub limit: u32,
@@ -171,6 +172,9 @@ pub struct HistogramResponse {
     /// 出现过的级别，按严重程度排（前端堆叠顺序）
     pub levels: Vec<String>,
     pub buckets: Vec<HistogramBucket>,
+    /// 范围内的总条数 = 各桶之和。时间条件是左闭右开、桶按同一个原点切，每一行都落在某个桶里，
+    /// 所以这个和就是 `count()` 的结果——页面拿它当总数，省掉一条扫同样数据的 count 查询。
+    pub total: u64,
     pub stats: Stats,
 }
 
@@ -221,12 +225,14 @@ async fn histogram(State(state): State<AppState>, p: Params) -> Result<Json<Hist
         }
     }
     levels.sort_by_key(|l| (level_rank(l), l.clone()));
+    let total = buckets.iter().map(|b| b.total).sum();
     Ok(Json(HistogramResponse {
         width_ms: bucket.width_ms,
         from_ms: range.from_ms,
         to_ms: range.to_ms,
         levels,
         buckets,
+        total,
         stats: result.stats,
     }))
 }

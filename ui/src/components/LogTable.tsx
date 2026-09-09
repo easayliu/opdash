@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
@@ -64,7 +64,7 @@ const EST_CARD_H = 76
  * 只渲染视口里的行。行高不固定（消息两行截断、展开后更高），渲染后按 `data-index` 实测。
  * 表头是 sticky 的，滚到某一行时要让出它的高度。
  */
-function useRowVirtualizer(rows: LogRow[], hostRef: React.RefObject<HTMLElement | null>, estimate: number, stickyPx: number) {
+function useRowVirtualizer(rows: LogRow[], keys: string[], hostRef: React.RefObject<HTMLElement | null>, estimate: number, stickyPx: number) {
   const scrollEl = useRef<HTMLElement | null>(null)
   const [margin, setMargin] = useState(0)
   const virtualizer = useVirtualizer({
@@ -74,7 +74,7 @@ function useRowVirtualizer(rows: LogRow[], hostRef: React.RefObject<HTMLElement 
     overscan: 8,
     scrollMargin: margin,
     scrollPaddingStart: stickyPx,
-    getItemKey: (i) => rowKey(rows[i]),
+    getItemKey: (i) => keys[i],
   })
   // 表格前面可能还有别的东西（报错框、空态），量一下它在滚动容器里的起点
   useLayoutEffect(() => {
@@ -124,9 +124,27 @@ function SortHeader({ label, col, sort, onSort }: { label: string; col: string; 
   )
 }
 
-/** 一行日志的唯一键：和后端排序键一致，跟随模式去重也用它。 */
+/** 一行日志的身份：内容拼出来的，跟随模式按它去重，上下文视图按它认锚点行。 */
 export function rowKey(r: LogRow): string {
   return `${r.ts_ms}|${r.host}|${r.file}|${r.thread}|${r.logger}|${r.message}`
+}
+
+/**
+ * 渲染用的 key。同一毫秒、同一线程打出一模一样内容的行是真会有的，[`rowKey`] 会撞。
+ * 撞了的话 React 的 key 和虚拟列表按 key 存的
+ * 高度都会串——同一行渲染好几遍、行序错乱。所以重复的加个序号，唯一的行还是保持内容 key，
+ * 翻页 / 跟随时不会无谓重挂。
+ */
+function useRowKeys(rows: LogRow[]): string[] {
+  return useMemo(() => {
+    const seen = new Map<string, number>()
+    return rows.map((r) => {
+      const base = rowKey(r)
+      const n = seen.get(base) ?? 0
+      seen.set(base, n + 1)
+      return n === 0 ? base : `${base}#${n}`
+    })
+  }, [rows])
 }
 
 /** 把命中的关键字用 <mark> 包起来（不分大小写，纯文本，不走 innerHTML）。 */
@@ -231,7 +249,8 @@ const THEAD_H = 30
 
 function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, sort, onSort, expanded, toggle }: RowsProps & Pick<LogTableProps, 'compact' | 'sort' | 'onSort'>) {
   const tableRef = useRef<HTMLTableElement>(null)
-  const virtualizer = useRowVirtualizer(rows, tableRef, EST_ROW_H, THEAD_H)
+  const keys = useRowKeys(rows)
+  const virtualizer = useRowVirtualizer(rows, keys, tableRef, EST_ROW_H, THEAD_H)
   useScrollToMarked(virtualizer, rows, selectedSpanId, anchorKey)
   const items = virtualizer.getVirtualItems()
   const margin = virtualizer.options.scrollMargin
@@ -274,7 +293,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
       )}
       {items.map((item) => {
         const r = rows[item.index]
-        const key = rowKey(r)
+        const key = keys[item.index]
         const open = expanded.has(key)
         const [first, rest] = splitFirstLine(r.message)
         const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
@@ -379,7 +398,8 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
 /** 手机上的日志列表：一条一张卡，点开看全文和字段。列太多的表格在窄屏上只能横滚，不如卡片。 */
 function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, expanded, toggle }: RowsProps) {
   const listRef = useRef<HTMLUListElement>(null)
-  const virtualizer = useRowVirtualizer(rows, listRef, EST_CARD_H, 0)
+  const keys = useRowKeys(rows)
+  const virtualizer = useRowVirtualizer(rows, keys, listRef, EST_CARD_H, 0)
   useScrollToMarked(virtualizer, rows, selectedSpanId, anchorKey)
   const items = virtualizer.getVirtualItems()
   const margin = virtualizer.options.scrollMargin
@@ -392,7 +412,7 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
       {padTop > 0 && <li aria-hidden style={{ height: padTop }} />}
       {items.map((item) => {
         const r = rows[item.index]
-        const key = rowKey(r)
+        const key = keys[item.index]
         const open = expanded.has(key)
         const [first, rest] = splitFirstLine(r.message)
         const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)

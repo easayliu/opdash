@@ -135,13 +135,30 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   `max_execution_time`、`wait_end_of_query=1`（错误一定是干净的 5xx 而不是 200 + 半截 JSON）、
   `output_format_json_quote_64bit_integers=0`；span 表的查询另带 `optimize_skip_unused_shards=1`。
 * 时间范围：`timestamp >= fromUnixTimestamp64Milli({from:Int64})`，参数代入后是常量，能裁剪分区、走主键。
-* 日志：`ORDER BY timestamp DESC, host, file, thread, logger, message LIMIT n OFFSET m`——排序键前缀是
-  `timestamp`，ClickHouse 按排序键倒着读、读够就停；后面几列只是让同一毫秒的行有确定顺序。
+* 日志检索 / 上下文 / 导出统一 `ORDER BY timestamp, level, trace_id`——**就是表自己的排序键**，
+  ClickHouse 才能纯按顺序倒着读、读够 LIMIT 就停。排序键以外的列一旦参与排序，计划里会多出
+  `PartialSorting` + `FinishSorting`，为了定出这 200 行的先后要多读一大堆。线上 26.3 实测（1 小时窗口）：
+
+  | | 排序键以外的列也参与排序 | 只按排序键 |
+  |---|---|---|
+  | 翻一页 200 行 | 3.03 GB / 4240 ms | **0.14 GB / 166 ms** |
+  | 关键字 + 200 行 | 9.19 GB / 20.8 s | **6.00 GB / 4.7 s** |
+  | 查看上下文 50 行 | 7.58 GB / 9075 ms | **0.47 GB / 137 ms** |
+
+  代价：同一 `(timestamp, level, trace_id)` 的行之间先后不保证（线上 10 分钟里 38% 的行落在这种并列组
+  里，最大一组 233 行），页边界正好切在一组中间时翻页可能重复或漏几行。要精确得换 keyset 翻页——
+  游标带上这个元组、不用 OFFSET，顺带能解除 `max_offset` 的翻页上限，还没做。
 * 关键字语法参考 Kibana / Datadog：空格 = AND，`a OR b`，`-词` / `NOT 词`，`"带 空格"`，`( )` 分组，
   优先级 NOT > AND > OR；`AND` / `OR` / `NOT` 全大写才是操作符。解析不报错，悬空的操作符和多余的括号
   直接忽略；词内配对的括号（`getUser(id)`）照字面搜。每个词是 `positionCaseInsensitiveUTF8(message, ...)`，
   全是词的 OR 合成一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])` 一趟扫完。message 没有索引，
-  扫的是时间范围内的全部行，所以关键字搜索用 `exact_rows_before_limit=1` 一次扫描顺带把总数算出来，不扫两遍。
+  扫的是时间范围内的全部行。
+* 「共 N 条」不单独跑 `count()`：直方图各桶之和就是总数（时间条件左闭右开、桶按同一原点切，每行都
+  落在某个桶里），日志页给 `/logs/search` 传 `count=0` 关掉它，省下一条扫同样数据的查询。按 trace id
+  查（没有直方图）时才回到 `count()`；关键字搜索那条路走 `exact_rows_before_limit=1`，一次扫描顺带出总数。
+* 相对范围（`最近 N 分钟`）在前端解析成绝对毫秒后**固定到下次刷新**：翻页、改排序、切页面都不会让
+  `to` 往前爬。否则每改一个参数 `from` / `to` 就变几毫秒，直方图和 facet 明明和翻页无关也得重扫一遍，
+  而且第二页和第一页的窗口边界对不上、行会错位。点刷新（或重新选范围）才推进到当前时间。
 * 链路检索两次往返：先 `SELECT trace_id ... ORDER BY timestamp DESC LIMIT 1 BY trace_id LIMIT n`
   拿候选 id，再 `WHERE trace_id IN {ids:Array(String)} GROUP BY trace_id` 聚合摘要。不用嵌套子查询，
   Distributed 表上 `distributed_product_mode=deny` 也没问题。「请求耗时」= 根 span 的耗时（根缺失时

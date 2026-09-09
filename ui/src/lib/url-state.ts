@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useLocation, useSearchParams } from 'react-router'
 import { hasRangeParams, parseRange, writeRange, type Range } from './time'
 
@@ -27,13 +28,46 @@ export function useUrlState() {
   return { params, set, setParams }
 }
 
-/** 时间范围（读自 URL）。相对范围每次渲染都按当前时间重算，所以「刷新」就是重新查最近 N 分钟。 */
+/**
+ * 相对范围（`最近 N 分钟`）解析成绝对毫秒时用的「现在」。全局共享一个锚点，只在重新选范围、
+ * 点刷新时推进——不是每次渲染重算：
+ *
+ * * 翻页、改排序、改每页条数、切页面都会改 URL，`now` 跟着变的话直方图和 facet 的 query key
+ *   也跟着变，这些查询和翻页无关却要在 ClickHouse 上重扫一遍全时间范围；
+ * * 同一批结果也才来自同一个窗口——窗口边走边移的话，第二页和第一页的边界对不上，行会错位。
+ */
+let anchorMs = Date.now()
+const anchorSubscribers = new Set<() => void>()
+
+function advanceAnchor(): void {
+  anchorMs = Date.now()
+  for (const notify of [...anchorSubscribers]) notify()
+}
+
+function subscribeAnchor(notify: () => void): () => void {
+  anchorSubscribers.add(notify)
+  return () => {
+    anchorSubscribers.delete(notify)
+  }
+}
+
+const readAnchor = () => anchorMs
+
+/** 刷新要重查的是数据，不包括表结构和登录态。 */
+function isDataQuery(key: readonly unknown[]): boolean {
+  return key[0] !== 'meta' && key[0] !== 'auth'
+}
+
+/** 时间范围（读自 URL）。相对范围按共享锚点解析，见 [`advanceAnchor`]。 */
 export function useTimeRange(): { range: Range; setRange: (r: Range) => void; refresh: () => void } {
   const { params, setParams } = useUrlState()
-  // 把 now 固定到参数变化的那一刻，避免同一次渲染里两个 hook 算出不同的 to
-  const range = useMemo(() => parseRange(params), [params])
+  const queryClient = useQueryClient()
+  const now = useSyncExternalStore(subscribeAnchor, readAnchor, readAnchor)
+  const range = useMemo(() => parseRange(params, now), [params, now])
   const setRange = useCallback(
     (r: Range) => {
+      // 重新选范围就是一次新的查询：相对范围从这一刻起算
+      advanceAnchor()
       setParams((prev) => {
         const next = new URLSearchParams(prev)
         writeRange(next, r)
@@ -43,10 +77,16 @@ export function useTimeRange(): { range: Range; setRange: (r: Range) => void; re
     },
     [setParams],
   )
-  // 相对范围：重新 set 一遍同样的参数会触发 useMemo 重算 now
+  const relative = range.relative
   const refresh = useCallback(() => {
-    setParams((prev) => new URLSearchParams(prev), { replace: true })
-  }, [setParams])
+    // 相对范围：锚点推到现在，窗口右移，query key 跟着变，自然重查
+    if (relative) {
+      advanceAnchor()
+      return
+    }
+    // 绝对范围：窗口没变，只能让缓存失效
+    queryClient.invalidateQueries({ predicate: (q) => isDataQuery(q.queryKey) })
+  }, [relative, queryClient])
   return { range, setRange, refresh }
 }
 
