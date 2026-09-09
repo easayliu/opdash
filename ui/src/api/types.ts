@@ -63,6 +63,8 @@ export interface LogRow {
 export interface LogSearchResponse {
   rows: LogRow[]
   total?: number
+  /** 这些词按整词而不是子串匹配（走了 message 上的 token 索引） */
+  token_terms?: string[]
   limit: number
   offset: number
   order: 'asc' | 'desc'

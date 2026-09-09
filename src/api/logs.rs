@@ -96,6 +96,10 @@ pub struct SearchResponse {
     /// 改用直方图各桶之和，不用为了一个数再扫一遍同样的数据。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    /// 这些词是按整词（而不是子串）匹配的——够长的标识符走了 message 上的 token 索引。
+    /// 页面上要提示，不然「搜 id 的前半截搜不到」会很费解。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub token_terms: Vec<String>,
     pub limit: u32,
     pub offset: u32,
     pub order: Order,
@@ -116,6 +120,7 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
     }
     let queries = LogQueries { database: &state.config.database, table: &schema.logs };
     let want_total = offset == 0 && p.get_bool("count")?.unwrap_or(true);
+    let token_terms = filter.token_terms();
     let search_q = queries.search(&filter, order, limit, offset)?;
 
     if want_total && filter.has_message_predicate() {
@@ -124,6 +129,7 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
         return Ok(Json(SearchResponse {
             rows: r.rows,
             total: r.total,
+            token_terms,
             limit,
             offset,
             order,
@@ -146,6 +152,7 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
         };
         return Ok(Json(SearchResponse {
             total,
+            token_terms,
             limit,
             offset,
             order,
@@ -156,6 +163,7 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
     let rows = rows_fut.await?;
     Ok(Json(SearchResponse {
         total: None,
+        token_terms,
         limit,
         offset,
         order,
