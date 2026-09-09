@@ -82,7 +82,7 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
         <svg
           width={width}
           height={height}
-          className={cn('block', onBrush && 'cursor-crosshair')}
+          className={cn('block touch-pan-y', onBrush && 'cursor-crosshair')}
           onPointerMove={onMove}
           onPointerLeave={() => {
             setHover(null)

@@ -12,6 +12,7 @@ import { Button, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
 import { formatNumber } from '@/lib/time'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
+import { useIsMobile } from '@/lib/media'
 
 const PAGE_SIZES = [100, 200, 500, 1000]
 const FOLLOW_INTERVAL_MS = 5000
@@ -62,6 +63,7 @@ function Pager({ offset, limit, atEnd, hitCap, maxOffset, onPage }: PagerProps) 
 
 export function LogsPage() {
   const meta = useMeta()
+  const isMobile = useIsMobile()
   const { params, set } = useUrlState()
   const { range, setRange } = useTimeRange()
   const dims = meta.data?.logs.dimensions ?? []
@@ -201,7 +203,7 @@ export function LogsPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <LogFilters state={filter} dims={dims} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
       {!byId && (
-        <section className="border-b border-border bg-card px-4 pt-3 pb-2">
+        <section className="border-b border-border bg-card px-3 pt-2 pb-1.5 md:px-4 md:pt-3 md:pb-2">
           {histogram.isError ? (
             <ErrorBox error={histogram.error} />
           ) : (
@@ -211,7 +213,7 @@ export function LogsPage() {
               widthMs={histogram.data?.width_ms ?? 60_000}
               buckets={(histogram.data?.buckets ?? []).map((b) => ({ t_ms: b.t_ms, values: b.counts }))}
               series={(histogram.data?.levels ?? []).map((l) => ({ key: l, label: l, color: levelColor(l) }))}
-              height={150}
+              height={isMobile ? 96 : 150}
               stale={histogram.isFetching}
               onBrush={(f, t) => setRange({ fromMs: f, toMs: t, relative: null })}
             />
@@ -224,13 +226,13 @@ export function LogsPage() {
                   {l}
                 </span>
               ))}
-              {histogram.data && <span>拖选一段可缩小时间范围</span>}
+              {histogram.data && <span className="hidden sm:inline">拖选一段可缩小时间范围</span>}
             </span>
-            <StatsLine stats={histogram.data?.stats} />
+            <StatsLine stats={histogram.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
           </div>
         </section>
       )}
-      <div className="flex flex-wrap items-center gap-3 border-b border-border bg-card px-4 py-2 text-xs">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2 text-xs md:px-4">
         <span className="font-medium text-fg">
           {follow
             ? `跟随中 · 已收 ${formatNumber(rows.length)} 行`
@@ -241,7 +243,7 @@ export function LogsPage() {
                 : ''}
         </span>
         {search.isFetching && <Spinner className="size-4" />}
-        <StatsLine stats={search.data?.stats} />
+        <StatsLine stats={search.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
         <div className="ml-auto flex items-center gap-2">
           {!byId && (
             <Button
@@ -252,7 +254,7 @@ export function LogsPage() {
               onClick={() => set({ follow: follow ? null : '1', order: null, offset: null })}
             >
               {follow ? <PauseIcon className="size-4" /> : <PlayIcon className="size-4" />}
-              {follow ? '停止跟随' : '跟随'}
+              <span className="hidden sm:inline">{follow ? '停止跟随' : '跟随'}</span>
             </Button>
           )}
           {!byId && !follow && (
@@ -270,14 +272,15 @@ export function LogsPage() {
               ))}
             </Select>
           )}
-          {!follow && !byId && <Pager {...pager} />}
-          <a href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })} className="inline-flex" download title={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`}>
+          {!follow && !byId && !isMobile && <Pager {...pager} />}
+          {/* 导出在手机上没什么用，也省出一行 */}
+          <a href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })} className="hidden md:inline-flex" download title={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`}>
             <Button size="sm">
               <DownloadIcon className="size-4" />
               CSV
             </Button>
           </a>
-          <a href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })} className="inline-flex" download title="导出 JSON Lines">
+          <a href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })} className="hidden md:inline-flex" download title="导出 JSON Lines">
             <Button size="sm">JSONL</Button>
           </a>
         </div>
@@ -309,7 +312,7 @@ export function LogsPage() {
           />
         )}
         {rows.length > 0 && (
-          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-3 text-xs text-muted-fg">
+          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-3 text-xs text-muted-fg md:px-4">
             {follow ? (
               <span>
                 跟随中，每 {FOLLOW_INTERVAL_MS / 1000} 秒拉一次新日志；最多保留 {formatNumber(FOLLOW_MAX_ROWS)} 行，更早的会被丢掉

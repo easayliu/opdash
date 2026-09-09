@@ -9,6 +9,7 @@ import { Button, Card, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { ErrorRate } from '@/pages/ServicesPage'
 import { formatDurationMs, formatNumber } from '@/lib/time'
 import { useTimeRange, useUrlState } from '@/lib/url-state'
+import { useIsMobile } from '@/lib/media'
 import { cn } from '@/lib/utils'
 
 // 三条线两两都要分得开（会交叉）：用参考配色前三档 aqua / blue / orange，全对校验通过
@@ -30,6 +31,7 @@ export function ServiceDetailPage() {
   const meta = useMeta()
   const { range } = useTimeRange()
   const { params, set } = useUrlState()
+  const isMobile = useIsMobile()
   const kind = params.get('kind') === 'client' ? 'client' : 'entry'
   const op = params.get('op') ?? ''
   const rangeParams = { from: range.fromMs, to: range.toMs }
@@ -66,20 +68,20 @@ export function ServiceDetailPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-3 border-b border-border bg-card px-4 py-3">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
         <Link to="/services" className="text-sm text-muted-fg hover:text-fg">
           ← 服务
         </Link>
-        <h1 className="text-base font-semibold">{service}</h1>
+        <h1 className="min-w-0 truncate text-base font-semibold">{service}</h1>
         {op && (
-          <span className="inline-flex items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
-            {op}
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
+            <span className="truncate">{op}</span>
             <button type="button" onClick={() => set({ op: null })} title="看整个服务">
               ✕
             </button>
           </span>
         )}
-        <span className="ml-auto flex items-center gap-2">
+        <span className="flex w-full items-center gap-2 md:ml-auto md:w-auto">
           <Link to={`/traces?service=${encodeURIComponent(service)}${op ? `&span_name=${encodeURIComponent(op)}` : ''}&kind=Server,Consumer&sort=duration`}>
             <Button size="sm">最慢的链路</Button>
           </Link>
@@ -91,35 +93,35 @@ export function ServiceDetailPage() {
           </Link>
         </span>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        <div className="grid gap-4 lg:grid-cols-2">
+      <div className="min-h-0 flex-1 overflow-auto p-3 md:p-4">
+        <div className="grid gap-3 md:gap-4 lg:grid-cols-2">
           <Card title={`请求量与错误${op ? `：${op}` : ''}`} extra={<StatsLine stats={ts.data?.stats} />}>
-            <div className="px-3 pt-3 pb-1">
+            <div className="px-2 pt-3 pb-1 md:px-3">
               {ts.isError ? (
                 <ErrorBox error={ts.error} />
               ) : (
                 <>
                   <Legend series={TRAFFIC_SERIES} className="px-1" />
-                  <StackedBars fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} buckets={traffic} series={TRAFFIC_SERIES} height={190} stale={ts.isFetching} />
+                  <StackedBars fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} buckets={traffic} series={TRAFFIC_SERIES} height={isMobile ? 150 : 190} stale={ts.isFetching} />
                 </>
               )}
             </div>
           </Card>
           <Card title="延迟分位（毫秒）">
-            <div className="px-3 pt-3 pb-1">
+            <div className="px-2 pt-3 pb-1 md:px-3">
               {ts.isError ? (
                 <ErrorBox error={ts.error} />
               ) : (
                 <>
                   <Legend series={LATENCY_SERIES} className="px-1" />
-                  <LineChart fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} points={points} series={LATENCY_SERIES} height={190} stale={ts.isFetching} format={(v) => formatDurationMs(v)} />
+                  <LineChart fromMs={ts.data?.from_ms ?? range.fromMs} toMs={ts.data?.to_ms ?? range.toMs} widthMs={ts.data?.width_ms ?? 60_000} points={points} series={LATENCY_SERIES} height={isMobile ? 150 : 190} stale={ts.isFetching} format={(v) => formatDurationMs(v)} />
                 </>
               )}
             </div>
           </Card>
         </div>
         <Card
-          className="mt-4 overflow-hidden"
+          className="mt-3 overflow-hidden md:mt-4"
           title={
             <span className="flex items-center gap-1">
               {(['entry', 'client'] as const).map((k) => (
@@ -130,7 +132,7 @@ export function ServiceDetailPage() {
               {ops.isFetching && <Spinner className="size-3.5" />}
             </span>
           }
-          extra={<StatsLine stats={ops.data?.stats} />}
+          extra={<StatsLine stats={ops.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />}
         >
           {ops.isError && <ErrorBox error={ops.error} onRetry={() => ops.refetch()} />}
           {ops.isPending && (
@@ -139,7 +141,37 @@ export function ServiceDetailPage() {
             </div>
           )}
           {ops.data && !rows.length && <EmptyState title={kind === 'entry' ? '没有入口 span' : '没有对外调用的 span'} />}
-          {rows.length > 0 && (
+          {rows.length > 0 && isMobile && (
+            <ul className="text-xs">
+              {rows.map((o) => (
+                <li
+                  key={`${o.kind}:${o.span_name}`}
+                  className={cn('row-hover cursor-pointer border-b border-border/60 px-3 py-2.5 last:border-b-0', op === o.span_name && 'row-selected')}
+                  onClick={() => set({ op: op === o.span_name ? null : o.span_name })}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate font-medium" title={o.span_name}>
+                      {o.span_name} <span className="text-2xs font-normal text-muted-fg">{o.kind}</span>
+                    </span>
+                    <ErrorRate rate={o.error_rate} />
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 text-2xs text-muted-fg tabular-nums">
+                    <span>
+                      次数 <span className="text-fg">{formatNumber(o.requests)}</span>
+                    </span>
+                    <span>错误 {o.errors ? formatNumber(o.errors) : 0}</span>
+                    <span>P50 {formatDurationMs(o.p50_ms)}</span>
+                    <span>P95 {formatDurationMs(o.p95_ms)}</span>
+                    <span>
+                      P99 <span className="font-medium text-fg">{formatDurationMs(o.p99_ms)}</span>
+                    </span>
+                    <span>最大 {formatDurationMs(o.max_ms)}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          {rows.length > 0 && !isMobile && (
             <table className="w-full table-fixed border-collapse text-xs">
               <thead className="text-2xs text-muted-fg">
                 <tr className="border-b border-border bg-muted/40">

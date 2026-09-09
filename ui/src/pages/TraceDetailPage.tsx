@@ -80,9 +80,9 @@ export function TraceDetailPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-x-6 gap-y-1 border-b border-border bg-card px-4 py-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-base font-semibold">
+      <header className="flex flex-wrap items-center gap-x-6 gap-y-1.5 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
+        <div className="min-w-0 max-w-full">
+          <div className="flex min-w-0 items-center gap-2 text-base font-semibold">
             {root ? (
               <>
                 <span className="text-muted-fg">{root.service}</span>
@@ -93,8 +93,8 @@ export function TraceDetailPage() {
               '链路详情'
             )}
           </div>
-          <div className="mono mt-0.5 flex items-center gap-1.5 text-2xs text-muted-fg">
-            {traceId}
+          <div className="mono mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-muted-fg">
+            <span className="truncate">{traceId}</span>
             <button type="button" onClick={() => copyText(traceId)} title="复制 trace id" className="hover:text-fg">
               <CopyIcon className="size-3.5" />
             </button>
@@ -104,7 +104,7 @@ export function TraceDetailPage() {
           </div>
         </div>
         {detail.data && spans.length > 0 && (
-          <dl className="flex items-center gap-6 text-sm">
+          <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm md:gap-6">
             <div>
               <dt className="text-2xs text-muted-fg">开始</dt>
               <dd className="tabular-nums">{formatTsMicro(tree.startUs)}</dd>
@@ -142,14 +142,14 @@ export function TraceDetailPage() {
             </div>
           </dl>
         )}
-        <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-2xs text-muted-fg">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg md:ml-auto md:gap-x-4">
           {colors.entries().map(([name, color]) => (
             <span key={name} className="inline-flex items-center gap-1">
               <span className="inline-block h-3.5 w-1 rounded-sm" style={{ background: color }} />
               {name}
             </span>
           ))}
-          <StatsLine stats={detail.data?.stats} />
+          <StatsLine stats={detail.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
           {detail.data?.windowed && (
             <button
               type="button"
@@ -184,13 +184,13 @@ export function TraceDetailPage() {
             {spans.length > 0 && <Waterfall tree={tree} colors={colors} selected={selected} onSelect={(id) => set({ span: id, span_logs: id ? undefined : null }, { replace: true })} />}
           </div>
           <section className="flex min-h-0 flex-col border-t border-border bg-card" style={{ height: showLogs ? '40%' : undefined }}>
-            <div className="flex h-10 shrink-0 items-center gap-2 px-4 text-xs">
+            <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto px-3 text-xs whitespace-nowrap md:px-4">
               <Button variant="ghost" size="xs" onClick={() => setShowLogs((v) => !v)}>
                 {showLogs ? '▾' : '▸'} 关联日志
                 {logs.data && ` (${logs.data.rows.length})`}
               </Button>
               {showLogs && selected && !logsOnlySpan && logs.data && (
-                <span className="text-2xs text-muted-fg">选中 span 的 {selectedLogCount} 条已高亮</span>
+                <span className="hidden text-2xs text-muted-fg md:inline">选中 span 的 {selectedLogCount} 条已高亮</span>
               )}
               {logs.data?.truncated && (
                 <Badge tone="warn" title={`翻页深度到了上限 ${meta.data?.limits.max_offset ?? ''}，库里共 ${logs.data.total ?? '?'} 条，只拉了前面这些`}>
@@ -199,12 +199,12 @@ export function TraceDetailPage() {
               )}
               {showLogs && selected && (
                 <Button size="xs" active={logsOnlySpan} onClick={() => set({ span_logs: logsOnlySpan ? null : '1' }, { replace: true })}>
-                  只看选中 span 的日志
+                  只看选中 span<span className="hidden md:inline"> 的日志</span>
                 </Button>
               )}
               {showLogs && logs.isFetching && <Spinner className="size-3.5" />}
               <span className="ml-auto flex items-center gap-3 text-2xs text-muted-fg">
-                <StatsLine stats={logs.data?.stats} />
+                <StatsLine stats={logs.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
                 <Link to={`/logs?trace_id=${traceId}`} className="text-accent hover:underline">
                   在日志页打开
                 </Link>
