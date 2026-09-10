@@ -13,6 +13,8 @@ services:
       - OPDASH_CLICKHOUSE_USER=${OPDASH_CLICKHOUSE_USER:-default}
       - OPDASH_CLICKHOUSE_PASSWORD=${OPDASH_CLICKHOUSE_PASSWORD:-}
       - OPDASH_DATABASE=${OPDASH_DATABASE:-logs}
+      # 指标表，没部署 metricpipe 的话这张表不存在，指标页签自动不显示
+      - OPDASH_METRIC_TABLE=${OPDASH_METRIC_TABLE:-otel_metric}
       - OPDASH_TIMEZONE=${OPDASH_TIMEZONE:-Asia/Shanghai}
       # 内网可不配；配了就是一组共享账号密码
       - OPDASH_BASIC_AUTH=${OPDASH_BASIC_AUTH:-}

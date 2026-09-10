@@ -44,6 +44,10 @@ export interface Meta {
   server: { version: string; timezone: string }
   logs: TableMeta
   traces: TableMeta
+  /** metricpipe 的表；没部署就是 null，指标页不显示 */
+  metrics: TableMeta | null
+  /** 指标页没启用的原因 */
+  metrics_note?: string
 }
 
 export interface LogRow {
@@ -191,6 +195,18 @@ export interface TraceDetailResponse {
   truncated: boolean
   /** 只查了开始时间附近的时间窗口（带 at 参数） */
   windowed: boolean
+  /** span 的属性 / events / links 没跟着回来，点开某个 span 时单独取（那四个 JSON 列是详情查询的全部成本） */
+  attributes_lazy: boolean
+  stats: Stats
+}
+
+export interface SpanAttrsResponse {
+  trace_id: string
+  span_id: string
+  attributes: Record<string, AttrValue>
+  resource: Record<string, AttrValue>
+  events: SpanEvent[]
+  links: SpanLink[]
   stats: Stats
 }
 
@@ -261,5 +277,78 @@ export interface TimeseriesResponse {
   from_ms: number
   to_ms: number
   points: TimeseriesPoint[]
+  stats: Stats
+}
+
+/** 五种 OTLP 指标类型，同一张表里用 metric_type 区分 */
+export type MetricType = 'Gauge' | 'Sum' | 'Histogram' | 'ExponentialHistogram' | 'Summary'
+
+export type MetricAgg = 'avg' | 'sum' | 'min' | 'max' | 'last' | 'count' | 'rate' | 'increase' | 'mean' | 'quantile'
+
+export type MetricField = 'value' | 'count' | 'sum' | 'min' | 'max'
+
+export interface MetricInfo {
+  name: string
+  type: MetricType
+  unit: string
+  description: string
+  /** Delta 的已经是增量，Cumulative 是进程启动以来的累计值，速率要相减 */
+  temporality: 'Delta' | 'Cumulative' | 'Unspecified' | string
+  /** counter（只增不减）。up-down counter 是 false */
+  monotonic: boolean
+  services: string[]
+  points: number
+}
+
+export interface MetricCatalogResponse {
+  /** 实际扫的窗口，可能比页面选的范围窄 */
+  from_ms: number
+  to_ms: number
+  metrics: MetricInfo[]
+  stats: Stats
+}
+
+export interface MetricNamesResponse {
+  names: { name: string; count: number }[]
+  stats: Stats
+}
+
+export interface MetricSeries {
+  labels: { key: string; value: string }[]
+  name: string
+  /** 和 t_ms 等长，null = 这个桶没数据 */
+  values: (number | null)[]
+  min: number | null
+  max: number | null
+  avg: number | null
+  last: number | null
+}
+
+export interface MetricQueryResponse {
+  metric: string
+  agg: MetricAgg
+  field: MetricField
+  by: string[]
+  from_ms: number
+  to_ms: number
+  width_ms: number
+  t_ms: number[]
+  series: MetricSeries[]
+  /** 时间线太多，只返回了最大的那些 */
+  truncated: boolean
+  stats: Stats
+}
+
+export interface MetricExemplar {
+  t_ms: number
+  value: number
+  trace_id: string
+  span_id: string
+  service: string
+}
+
+export interface MetricExemplarsResponse {
+  metric: string
+  exemplars: MetricExemplar[]
   stats: Stats
 }

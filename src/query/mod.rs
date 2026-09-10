@@ -12,6 +12,7 @@ use crate::clickhouse::{Query, ToParam};
 use crate::error::{Error, Result};
 
 pub mod logs;
+pub mod metrics;
 pub mod traces;
 
 /// 参数绑定收集器：每 `bind` 一次得到一个 `{pN:Type}` 占位符，最后连同 SQL 拼成 [`Query`]。
@@ -154,6 +155,12 @@ impl Bucket {
             .find(|w| span / w <= max_buckets)
             .unwrap_or(*LADDER.last().expect("ladder non-empty"));
         Self { width_ms, origin_ms: local_midnight_ms(range.from_ms, tz) }
+    }
+
+    /// 指定桶宽（指标页让用户自己选步长）。宽度对齐到本地零点的规则不变；
+    /// 宽度整除不了一天时（比如 45s）边界只对齐到范围起点那天的零点，够用。
+    pub fn with_width(range: &TimeRange, tz: Tz, width_ms: i64) -> Self {
+        Self { width_ms: width_ms.max(1), origin_ms: local_midnight_ms(range.from_ms, tz) }
     }
 
     /// 桶序号表达式（整数），参数名固定 `bucket_origin` / `bucket_width`。

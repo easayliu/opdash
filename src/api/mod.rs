@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod logs;
 pub mod meta;
+pub mod metrics;
 pub mod params;
 pub mod services;
 pub mod tail;
@@ -49,6 +50,7 @@ pub fn api_router(state: AppState) -> Router {
         .merge(logs::routes())
         .merge(tail::routes())
         .merge(traces::routes())
+        .merge(metrics::routes())
         .merge(services::routes())
         .with_state(state)
 }

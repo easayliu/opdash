@@ -11,6 +11,11 @@ import type {
   LogRow,
   LogSearchResponse,
   Meta,
+  MetricCatalogResponse,
+  MetricExemplarsResponse,
+  MetricNamesResponse,
+  MetricQueryResponse,
+  SpanAttrsResponse,
   OperationsResponse,
   OverviewResponse,
   Stats,
@@ -144,6 +149,31 @@ export function useTraceDetail(traceId: string | undefined, at?: string | null) 
   })
 }
 
+/**
+ * 一个 span 的属性 / events / links。详情那一趟故意不取这四个 JSON 列——线上实测它们就是
+ * 整条查询的全部成本（0.259 GB / 1.8~43 s 对 0.002 GB / 50 ms），点开哪个 span 才查哪个。
+ */
+export function useSpanAttrs(
+  traceId: string | undefined,
+  spanId: string | null,
+  /** 这个 span 的排序键前缀（service_name / span_name / 毫秒时间戳），详情响应里都有。
+   *  带上服务端就不用先跑一遍定位查询：线上实测 0.11 GB → 0.001 GB 量级 */
+  hint?: { service: string; name: string; ts_ms: number },
+  at?: string | null,
+) {
+  return useQuery({
+    queryKey: ['traces', 'span_attrs', traceId, spanId, at ?? null],
+    queryFn: ({ signal }) =>
+      apiGet<SpanAttrsResponse>(
+        `/traces/${encodeURIComponent(traceId ?? '')}/spans/${encodeURIComponent(spanId ?? '')}`,
+        { at: at ?? undefined, service: hint?.service, name: hint?.name, ts: hint?.ts_ms },
+        signal,
+      ),
+    enabled: !!traceId && !!spanId,
+    staleTime: 5 * 60_000,
+  })
+}
+
 export function useTraceValues(params: Params, enabled = true) {
   return useQuery({
     queryKey: ['traces', 'values', params],
@@ -195,5 +225,54 @@ export function useTimeseries(service: string, params: Params) {
     queryFn: ({ signal }) => apiGet<TimeseriesResponse>(`/services/${encodeURIComponent(service)}/timeseries`, params, signal),
     placeholderData: keepPreviousData,
     enabled: !!service,
+  })
+}
+
+export function useMetricCatalog(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['metrics', 'catalog', params],
+    queryFn: ({ signal }) => apiGet<MetricCatalogResponse>('/metrics', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    enabled,
+  })
+}
+
+export function useMetricQuery(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['metrics', 'query', params],
+    queryFn: ({ signal }) => apiGet<MetricQueryResponse>('/metrics/query', params, signal),
+    placeholderData: keepPreviousData,
+    enabled,
+  })
+}
+
+export function useMetricLabels(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['metrics', 'labels', params],
+    queryFn: ({ signal }) => apiGet<MetricNamesResponse>('/metrics/labels', params, signal),
+    staleTime: 60_000,
+    enabled,
+  })
+}
+
+export function useMetricLabelValues(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['metrics', 'label_values', params],
+    queryFn: ({ signal }) => apiGet<MetricNamesResponse>('/metrics/label_values', params, signal),
+    staleTime: 60_000,
+    enabled,
+  })
+}
+
+/** exemplar 是旁路数据，没有也不影响画图，所以单独查、失败不打扰 */
+export function useMetricExemplars(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['metrics', 'exemplars', params],
+    queryFn: ({ signal }) => apiGet<MetricExemplarsResponse>('/metrics/exemplars', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    retry: false,
+    enabled,
   })
 }

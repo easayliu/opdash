@@ -31,6 +31,15 @@ use crate::schema::{TRACE_FIXED_COLUMNS, Table};
 /// 详情第二步 `span_name IN` 列表的字面量上限；参数都走 URL，整条 URL 不能超过 64 KB。
 const MAX_NAMES_BYTES: usize = 16 * 1024;
 
+/// 四个 JSON 属性列。查一次贵得多（见 [`TraceQueries::detail_fetch`]），单独拎出来，
+/// 只有「点开某个 span」时才读。
+const HEAVY_COLUMNS: &[&str] = &[
+    "resource_attributes",
+    "span_attributes",
+    "`events.attributes` AS event_attrs",
+    "`links.attributes` AS link_attrs",
+];
+
 /// OTLP 的 span kind，存的是这些字符串。
 pub const SPAN_KINDS: &[&str] =
     &["Server", "Client", "Internal", "Producer", "Consumer", "Unspecified"];
@@ -59,6 +68,15 @@ pub fn normalize_trace_id(raw: &str) -> Result<String> {
     Ok(format!("{id:0>32}"))
 }
 
+/// 16 位小写 hex。和 [`normalize_trace_id`] 同一套校验，长度不同。
+pub fn normalize_span_id(raw: &str) -> Result<String> {
+    let id = raw.trim().to_ascii_lowercase();
+    if id.is_empty() || id.len() > 16 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::bad_request(format!("span id 应为 16 位 hex，不是 {raw:?}")));
+    }
+    Ok(format!("{id:0>16}"))
+}
+
 /// 属性过滤：`key=value` 精确匹配，或只给 key 表示「有这个属性」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttrFilter {
@@ -79,7 +97,9 @@ impl AttrFilter {
         Ok(Self { key: key.to_owned(), value })
     }
 
-    fn sql(&self, column: &str, b: &mut Bindings) -> Result<String> {
+    /// 拼成 `toString(col.`key`) = {p}`。指标那边（`resource_attributes` /
+    /// `attributes`）用的是同一套写法，所以是 `pub`。
+    pub fn sql(&self, column: &str, b: &mut Bindings) -> Result<String> {
         let path = attr_path(column, &self.key)?;
         Ok(match &self.value {
             Some(v) => format!("toString({path}) = {}", b.bind("String", v)),
@@ -291,15 +311,25 @@ pub struct SpanRow {
     pub scope_name: String,
     pub scope_version: String,
     pub trace_state: String,
+    // 属性 / events / links 的四个 JSON 列只在「取某个 span 的属性」时才查（见
+    // [`TraceQueries::detail_fetch`] 的 `heavy`），瀑布图那一趟里它们不在 SELECT 里
+    #[serde(default)]
     pub resource_attributes: Value,
+    #[serde(default)]
     pub span_attributes: Value,
-    #[serde(deserialize_with = "num::de_vec")]
+    #[serde(default, deserialize_with = "num::de_vec")]
     pub event_ts: Vec<i64>,
+    #[serde(default)]
     pub event_names: Vec<String>,
+    #[serde(default)]
     pub event_attrs: Vec<Value>,
+    #[serde(default)]
     pub link_trace_ids: Vec<String>,
+    #[serde(default)]
     pub link_span_ids: Vec<String>,
+    #[serde(default)]
     pub link_states: Vec<String>,
+    #[serde(default)]
     pub link_attrs: Vec<Value>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -533,7 +563,19 @@ impl TraceQueries<'_> {
     /// 的 URI 上限（线上一条 5000+ span 的 trace 就是这么报 `builder error for url` 的）。
     /// 不传也不影响一致性：这一步的条件是第一步的子集，`ORDER BY` 和去重方式相同，
     /// 时间区间又卡在第一步看到的最早、最晚那一毫秒之间，取前 `located.len()` 行就是同一批 span。
-    pub fn detail_fetch(&self, trace_id: &str, located: &[LocatedSpan]) -> Result<Query> {
+    ///
+    /// `heavy = false` 时四个 JSON 属性列**一列都不取**。它们是这一步的全部成本：线上同一条
+    /// 查询实测 **带属性 0.259 GB / 1.8 s，不带 0.002 GB / 50 ms**（另有 22 s、43 s 的样本）。
+    /// 原因是主键前缀 `(service_name, span_name, toDateTime(timestamp))` 只能圈到秒级，一条
+    /// trace 的几十个 span 会拖进五万行候选，JSON 列又是按 granule 整块读的（每个子列一条流，
+    /// 路径一多，读一个 granule 的固定开销就压过了真正要的那几行）。所以瀑布图只取轻列，
+    /// 属性等用户点开某个 span 再按 [`Self::detail_span`] 单独取。
+    pub fn detail_fetch(
+        &self,
+        trace_id: &str,
+        located: &[LocatedSpan],
+        heavy: bool,
+    ) -> Result<Query> {
         if located.is_empty() {
             return Err(Error::internal("detail_fetch 需要至少一个 span"));
         }
@@ -559,6 +601,17 @@ impl TraceQueries<'_> {
         };
         let time = b.time_predicate("timestamp", &range);
         let limit = b.bind("UInt32", located.len() as u32);
+        let cols = self.detail_columns(heavy)?;
+        let sql = format!(
+            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}\n  AND service_name IN {services}{names_sql}\n  AND {time}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
+            cols = cols.join(", "),
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
+    /// 详情要取的列。`heavy` 决定带不带四个 JSON 属性列。
+    fn detail_columns(&self, heavy: bool) -> Result<Vec<String>> {
         let mut cols: Vec<String> = vec![
             "span_id".into(),
             "parent_span_id".into(),
@@ -572,24 +625,40 @@ impl TraceQueries<'_> {
             "scope_name".into(),
             "scope_version".into(),
             "trace_state".into(),
-            "resource_attributes".into(),
-            "span_attributes".into(),
             "arrayMap(t -> toUnixTimestamp64Micro(t), `events.timestamp`) AS event_ts".into(),
             "`events.name` AS event_names".into(),
-            "`events.attributes` AS event_attrs".into(),
             "`links.trace_id` AS link_trace_ids".into(),
             "`links.span_id` AS link_span_ids".into(),
             "`links.trace_state` AS link_states".into(),
-            "`links.attributes` AS link_attrs".into(),
         ];
+        if heavy {
+            cols.extend(HEAVY_COLUMNS.iter().map(|c| (*c).to_owned()));
+        }
         for c in &self.table.columns {
             if !TRACE_FIXED_COLUMNS.contains(&c.name.as_str()) {
                 cols.push(quote_ident(&c.name)?);
             }
         }
+        Ok(cols)
+    }
+
+    /// 某一个 span 的属性 / events / links —— 也就是 [`Self::detail_fetch`] 里省掉的那几列。
+    ///
+    /// 主键前缀钉到这一个 `(service_name, span_name)`、时间窗只留它自己那一毫秒，读的
+    /// granule 从「整条 trace 的五万行候选」缩到一两个：线上实测 0.011 GB / 690 ms。
+    pub fn detail_span(&self, trace_id: &str, span: &LocatedSpan) -> Result<Query> {
+        let mut b = Bindings::new();
+        let id = b.bind("String", trace_id);
+        let span_id = b.bind("String", &span.span_id);
+        let service = b.bind("String", &span.service_name);
+        let name = b.bind("String", &span.span_name);
+        // 存的是纳秒精度，毫秒 X 的 span 落在 [X, X+1) 里
+        let range = TimeRange { from_ms: span.ts_ms.max(0), to_ms: span.ts_ms.max(0) + 1 };
+        let time = b.time_predicate("timestamp", &range);
+        // 列取全的（轻列 + 重列）：一行而已，多几列不花钱，SpanRow 和瀑布图那一趟共用
         let sql = format!(
-            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}\n  AND service_name IN {services}{names_sql}\n  AND {time}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
-            cols = cols.join(", "),
+            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}\n  AND service_name = {service}\n  AND span_name = {name}\n  AND {time}\n  AND span_id = {span_id}\nLIMIT 1",
+            cols = self.detail_columns(true)?.join(", "),
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
@@ -1106,7 +1175,7 @@ mod tests {
                 ts_ms: 1_600,
             },
         ];
-        let f = q.detail_fetch("abc", &located).unwrap();
+        let f = q.detail_fetch("abc", &located, false).unwrap();
         assert!(
             f.sql().contains(
                 "WHERE trace_id = {p0:String}\n  AND service_name IN {p1:Array(String)}\n  AND span_name IN {p2:Array(String)}\n  AND timestamp >= fromUnixTimestamp64Milli({p3:Int64}) AND timestamp < fromUnixTimestamp64Milli({p4:Int64})\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {p5:UInt32}"
@@ -1126,11 +1195,28 @@ mod tests {
         // span id 不进参数：5000 个 id 会把 URL 撑过 64 KB
         assert!(!f.sql().contains("span_id IN"), "{}", f.sql());
         assert_eq!(params.len(), 6);
-        // 重列在这一步取
-        assert!(f.sql().contains("`events.attributes` AS event_attrs"));
+        // 瀑布图这一趟一列 JSON 属性都不读：它们是详情查询的全部成本
+        for heavy in
+            ["resource_attributes", "span_attributes", "events.attributes", "links.attributes"]
+        {
+            assert!(!f.sql().contains(heavy), "{heavy} 不该出现在瀑布图查询里: {}", f.sql());
+        }
+        assert!(f.sql().contains("`events.name` AS event_names"), "{}", f.sql());
         assert!(f.sql().contains(", `cluster`\n"), "{}", f.sql());
+        // 点开某个 span 才取属性，主键前缀钉死到这一个 span
+        let one = q.detail_span("abc", &located[0]).unwrap();
+        assert!(one.sql().contains("resource_attributes, span_attributes"), "{}", one.sql());
+        assert!(
+            one.sql().contains("AND service_name = {p2:String}\n  AND span_name = {p3:String}"),
+            "{}",
+            one.sql()
+        );
+        assert!(one.sql().contains("AND span_id = {p1:String}\nLIMIT 1"), "{}", one.sql());
+        // 时间窗只留这一毫秒
+        assert_eq!(one.params()[4].1, "1700");
+        assert_eq!(one.params()[5].1, "1701");
         assert_eq!(f.settings(), &[("optimize_skip_unused_shards", "1".to_owned())]);
-        assert!(q.detail_fetch("abc", &[]).is_err());
+        assert!(q.detail_fetch("abc", &[], false).is_err());
     }
 
     /// 5000 个 span 的 trace：参数总量要留在 HTTP 库 64 KB 的 URI 上限之内。
@@ -1146,7 +1232,7 @@ mod tests {
                 ts_ms: 1_700_000 + i,
             })
             .collect();
-        let f = q.detail_fetch("abc", &located).unwrap();
+        let f = q.detail_fetch("abc", &located, false).unwrap();
         let bytes: usize = f.params().iter().map(|(k, v)| k.len() + v.len()).sum();
         assert!(bytes < 4 * 1024, "{bytes} bytes of params");
         assert_eq!(f.params()[5].1, "5000");
@@ -1160,7 +1246,7 @@ mod tests {
                 ts_ms: 1_700_000 + i,
             })
             .collect();
-        let f = q.detail_fetch("abc", &noisy).unwrap();
+        let f = q.detail_fetch("abc", &noisy, false).unwrap();
         assert!(!f.sql().contains("span_name IN"), "{}", f.sql());
         assert!(
             f.sql().contains("service_name IN {p1:Array(String)}\n  AND timestamp >="),

@@ -153,10 +153,22 @@ export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="rounded border border-border bg-muted px-1 font-mono text-2xs text-muted-fg">{children}</kbd>
 }
 
-/** 顶部带标题的小卡片 */
-export function Card({ title, extra, children, className }: { title?: ReactNode; extra?: ReactNode; children: ReactNode; className?: string }) {
+/** 顶部带标题的小卡片。`ref` 是给「滚进视口才查」用的（见 useInView）。 */
+export function Card({
+  title,
+  extra,
+  children,
+  className,
+  ref,
+}: {
+  title?: ReactNode
+  extra?: ReactNode
+  children: ReactNode
+  className?: string
+  ref?: React.Ref<HTMLElement>
+}) {
   return (
-    <section className={cn('rounded-lg border border-border bg-card', className)}>
+    <section ref={ref} className={cn('rounded-lg border border-border bg-card', className)}>
       {(title || extra) && (
         <header className="flex h-11 items-center justify-between gap-2 border-b border-border px-4">
           <div className="text-sm font-semibold text-fg">{title}</div>

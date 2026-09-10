@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router'
-import { ActivityIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
+import { ActivityIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
 import { UserMenu } from '@/components/UserMenu'
 import { Input } from '@/components/ui'
+import { useMeta } from '@/api/queries'
 import { useRangeMemory } from '@/lib/url-state'
 import { cn, isHexId } from '@/lib/utils'
 import { LogsPage } from '@/pages/LogsPage'
@@ -12,10 +13,12 @@ import { TracesPage } from '@/pages/TracesPage'
 import { TraceDetailPage } from '@/pages/TraceDetailPage'
 import { ServicesPage } from '@/pages/ServicesPage'
 import { ServiceDetailPage } from '@/pages/ServiceDetailPage'
+import { MetricsPage } from '@/pages/MetricsPage'
 
 const NAV = [
   { to: '/logs', label: '日志', icon: ScrollTextIcon },
   { to: '/traces', label: '链路', icon: GitBranchIcon },
+  { to: '/metrics', label: '指标', icon: ChartLineIcon, needs: 'metrics' as const },
   { to: '/services', label: '服务', icon: ActivityIcon },
 ]
 
@@ -59,6 +62,7 @@ function AppRoutes() {
       <Route path="/logs" element={<LogsPage />} />
       <Route path="/traces" element={<TracesPage />} />
       <Route path="/traces/:traceId" element={<TraceDetailPage />} />
+      <Route path="/metrics" element={<MetricsPage />} />
       <Route path="/services" element={<ServicesPage />} />
       <Route path="/services/:name" element={<ServiceDetailPage />} />
       <Route path="*" element={<Navigate to="/logs" replace />} />
@@ -67,6 +71,9 @@ function AppRoutes() {
 }
 
 export default function App() {
+  // 没部署 metricpipe（指标表不存在）就不显示指标页签，点进去也只会看到一句「未启用」
+  const meta = useMeta()
+  const nav = NAV.filter((n) => n.needs !== 'metrics' || meta.data?.metrics)
   return (
     // 外壳钉在视口高度，页面各自在内部滚（表头 sticky、瀑布图 / 日志分栏滚动、右侧 span 面板都靠这个），
     // 顶栏和页脚固定；没自带滚动区的页面退回到 main 滚
@@ -81,7 +88,7 @@ export default function App() {
             <span className="text-base font-semibold tracking-tight">opdash</span>
           </NavLink>
           <nav className="order-last -mx-3 flex h-10 w-[calc(100%+1.5rem)] items-stretch border-t border-border md:order-none md:mx-0 md:h-auto md:w-auto md:gap-1 md:border-t-0">
-            {NAV.map(({ to, label, icon: Icon }) => (
+            {nav.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
                 to={to}

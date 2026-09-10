@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router'
 import { DownloadIcon, PauseIcon, PlayIcon, TerminalIcon } from 'lucide-react'
 import { apiUrl, type Params } from '@/api/client'
 import { useLogHistogram, useLogSearch, useMeta } from '@/api/queries'
@@ -14,6 +15,7 @@ import { Button, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/lib/time'
+import { metricsHref, serviceHref, tracesHref } from '@/lib/links'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
 import { positiveTerms } from '@/lib/query-syntax'
@@ -123,7 +125,19 @@ export function LogsPage() {
     { ...baseParams, order: byId ? 'asc' : order, limit, offset, count: byId ? undefined : 0 },
     !follow && meta.isSuccess,
   )
-  const histogram = useLogHistogram(baseParams, !byId && meta.isSuccess)
+  /**
+   * 带关键字时**等检索回来再发直方图**，两条不再并发。
+   *
+   * 两条查询的 WHERE 一模一样，而 `message` 没有索引，要扫完整个时间范围（线上一小时约
+   * 10 GB 未压缩——整张表 83% 的体积就是这一列）。并发发出去就是同一段数据扫两遍；错开之后
+   * 第二条命中 ClickHouse 26.x 的 **query condition cache**（`use_query_condition_cache`
+   * 服务端默认开）：线上实测第一条 39.8 GB / 3.5 s，紧接着同条件的第二条 **0 GB / 18 ms**。
+   *
+   * 顺序是「检索在前」：列表是人盯着的那一块，不能为了直方图让它变慢。而且关键字命中多的
+   * 时候检索读够 200 行就停、本来就快，这种情况下直方图仍要自己扫——两种情况加起来，
+   * 集群总共大约只扫一遍。检索失败（比如读量超限）也放行，不然一个错误连累两块都空着。
+   */
+  const histogram = useLogHistogram(baseParams, !byId && meta.isSuccess && (!filter.q || search.isFetched))
 
   // 跟随：一条 SSE 长连接，服务端按游标推增量（见 src/api/tail.rs）
   const tail = useLogTail(baseParams, follow)
@@ -159,6 +173,9 @@ export function LogsPage() {
     onPage: (next) => set({ offset: next || null }),
   }
 
+  // 日志表上「服务」这一维叫什么（老表没有 service_name 就退回 container）
+  const serviceDim = dims.includes('service_name') ? 'service_name' : 'container'
+
   const onPivot = (field: string, value: string) => {
     if (dims.includes(field)) setFilter({ ...filter, dims: { ...filter.dims, [field]: [value] } })
     else if (field === 'level') setFilter({ ...filter, levels: [value] })
@@ -169,6 +186,7 @@ export function LogsPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <LogFilters state={filter} dims={dims} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
+      <CrossLinks service={filter.dims[serviceDim]?.[0]} win={{ fromMs: range.fromMs, toMs: range.toMs }} hasMetrics={!!meta.data?.metrics} />
       {!byId && (
         <section className="border-b border-border bg-card px-3 pt-2 pb-1.5 md:px-4 md:pt-3 md:pb-2">
           {histogram.isError ? (
@@ -336,6 +354,33 @@ export function LogsPage() {
         )}
       </div>
       {contextRow && <ContextDrawer row={contextRow} dims={dims} onClose={() => setContextRow(null)} />}
+    </div>
+  )
+}
+
+/**
+ * 筛到某一个服务时，给出跳到另外两个信号的入口——同一个服务、同一段时间。
+ * 没筛服务就不显示：跳过去也不知道该看哪个服务的指标。
+ */
+function CrossLinks({ service, win, hasMetrics }: { service?: string; win: { fromMs: number; toMs: number }; hasMetrics: boolean }) {
+  if (!service) return null
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 md:px-4">
+      <span className="text-2xs text-muted-fg">{service} 这段时间的</span>
+      {hasMetrics && (
+        <Link to={metricsHref(service, win)}>
+          <Button size="xs">指标看板</Button>
+        </Link>
+      )}
+      <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)}>
+        <Button size="xs">最慢的链路</Button>
+      </Link>
+      <Link to={tracesHref({ service, errorOnly: true }, win)}>
+        <Button size="xs">出错的链路</Button>
+      </Link>
+      <Link to={serviceHref(service, win)}>
+        <Button size="xs">服务概览</Button>
+      </Link>
     </div>
   )
 }

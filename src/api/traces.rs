@@ -5,15 +5,18 @@ use axum::{
     extract::{Path, State},
     routing::get,
 };
+use std::collections::BTreeMap;
+
 use serde::Serialize;
+use serde_json::Value;
 
 use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
     AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, HeatmapRow, KeyRow, LocatedSpan, Span,
-    SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow,
-    normalize_kind, normalize_trace_id,
+    SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary,
+    ValueRow, normalize_kind, normalize_span_id, normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -26,6 +29,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/traces/attr_keys", get(attr_keys))
         .route("/api/traces/attr_values", get(attr_values))
         .route("/api/traces/{trace_id}", get(detail))
+        .route("/api/traces/{trace_id}/spans/{span_id}", get(span_attrs))
 }
 
 const CONTROL_KEYS: &[&str] = &[
@@ -247,6 +251,17 @@ const DETAIL_WINDOW_BEFORE_MS: i64 = 3_600_000;
 const DETAIL_WINDOW_AFTER_MS: i64 = 24 * 3_600_000;
 
 #[derive(Serialize)]
+pub struct SpanAttrsResponse {
+    pub trace_id: String,
+    pub span_id: String,
+    pub attributes: BTreeMap<String, Value>,
+    pub resource: BTreeMap<String, Value>,
+    pub events: Vec<SpanEvent>,
+    pub links: Vec<SpanLink>,
+    pub stats: Stats,
+}
+
+#[derive(Serialize)]
 pub struct DetailResponse {
     pub trace_id: String,
     pub spans: Vec<Span>,
@@ -254,6 +269,9 @@ pub struct DetailResponse {
     pub truncated: bool,
     /// 按 `at` 附近的时间窗口查的（前 1 小时、后 24 小时）；不带 `at` 是全表按 bloom filter 找
     pub windowed: bool,
+    /// span 的属性 / events / links 没在这里返回，点开某个 span 时按
+    /// `/api/traces/{trace_id}/spans/{span_id}` 单独取（那四个 JSON 列是详情查询的全部成本）
+    pub attributes_lazy: bool,
     pub stats: Stats,
 }
 
@@ -284,7 +302,9 @@ async fn detail(
     let spans: Vec<Span> = if located.is_empty() {
         Vec::new()
     } else {
-        let full = state.client.rows::<SpanRow>(queries.detail_fetch(&trace_id, &located)?).await?;
+        // 瀑布图不要属性列：那四列是这一步的全部成本，点开某个 span 时再单独取
+        let full =
+            state.client.rows::<SpanRow>(queries.detail_fetch(&trace_id, &located, false)?).await?;
         stats.absorb(&full.stats);
         // 第二步比第一步少了行：正常不该发生（同一张表、条件是第一步的超集、排序相同），
         // 真出现多半是分片 / 副本一时不一致，记下来好对着库查
@@ -298,7 +318,80 @@ async fn detail(
         }
         full.rows.into_iter().map(Span::from).collect()
     };
-    Ok(Json(DetailResponse { trace_id, spans, truncated, windowed: window.is_some(), stats }))
+    Ok(Json(DetailResponse {
+        trace_id,
+        spans,
+        truncated,
+        windowed: window.is_some(),
+        attributes_lazy: true,
+        stats,
+    }))
+}
+
+/// 一个 span 的属性 / events / links。瀑布图那一趟故意不取这几列，用户点开哪个 span 才查哪个。
+///
+/// 要圈到这一个 span，得知道它的 `service_name` / `span_name` / 毫秒时间戳——它们是排序键
+/// 前缀。页面上这三个值就在手里（详情响应里给过），带上就直接查；不带就自己先跑一遍定位
+/// 查询。差别不小：定位要按 trace id 扫 bloom filter（线上一条 25 小时窗口 0.11 GB），
+/// 带上前缀之后这一趟只剩 0.001 GB 量级。
+async fn span_attrs(
+    State(state): State<AppState>,
+    Path((trace_id, span_id)): Path<(String, String)>,
+    p: Params,
+) -> Result<Json<SpanAttrsResponse>> {
+    let schema = state.schema.get().await?;
+    let trace_id = normalize_trace_id(&trace_id)?;
+    let span_id = normalize_span_id(&span_id)?;
+    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
+    let window = p.get_i64("at")?.map(|at| TimeRange {
+        from_ms: (at - DETAIL_WINDOW_BEFORE_MS).max(0),
+        to_ms: at + DETAIL_WINDOW_AFTER_MS,
+    });
+    let hint = match (p.get("service"), p.get("name"), p.get_i64("ts")?) {
+        (Some(service), Some(name), Some(ts_ms)) => Some(LocatedSpan {
+            span_id: span_id.clone(),
+            service_name: service.to_owned(),
+            span_name: name.to_owned(),
+            ts_ms,
+        }),
+        _ => None,
+    };
+    let mut stats = Stats::default();
+    let span =
+        match hint {
+            Some(span) => span,
+            None => {
+                let located = state
+                    .client
+                    .rows::<LocatedSpan>(queries.detail_locate(
+                        &trace_id,
+                        state.config.max_trace_spans,
+                        window.as_ref(),
+                    )?)
+                    .await?;
+                stats = located.stats;
+                located.rows.into_iter().find(|s| s.span_id == span_id).ok_or_else(|| {
+                    Error::bad_request(format!("这条 trace 里没有 span {span_id}"))
+                })?
+            }
+        };
+    let full = state.client.rows::<SpanRow>(queries.detail_span(&trace_id, &span)?).await?;
+    stats.absorb(&full.stats);
+    let span = full
+        .rows
+        .into_iter()
+        .next()
+        .map(Span::from)
+        .ok_or_else(|| Error::bad_request("span 已经不在库里了（可能刚过 TTL）"))?;
+    Ok(Json(SpanAttrsResponse {
+        trace_id,
+        span_id,
+        attributes: span.attributes,
+        resource: span.resource,
+        events: span.events,
+        links: span.links,
+        stats,
+    }))
 }
 
 #[derive(Serialize)]
