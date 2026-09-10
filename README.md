@@ -1,9 +1,13 @@
 # opdash
 
-trace 和日志的查询页面。数据来自 [logpipe](../log) 写的 `logs.app_log` 和 [tracepipe](../trace) 写的
-`logs.otel_trace` 两张 ClickHouse 表，给内部业务开发排障用：拿一个 trace id 看整条链路和这条请求的
-全部日志；按服务 / 接口找慢请求、错请求；按关键字翻日志、看堆栈、看上下文；看某个服务的错误率和
-P95。单二进制，只读，不需要别的服务。
+trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `logs.app_log`、[tracepipe](../trace) 写的
+`logs.otel_trace` 和 [metricpipe](../metric) 写的 `logs.otel_metric` 三张 ClickHouse 表，给内部业务开发
+排障用：拿一个 trace id 看整条链路和这条请求的全部日志；按服务 / 接口找慢请求、错请求；按关键字翻日志、
+看堆栈、看上下文；看某个服务的错误率和 P95；按标签画指标曲线，从指标上的 exemplar 直接跳到那次请求。
+单二进制，只读，不需要别的服务。
+
+指标表是**可选**的：没部署 metricpipe 的地方 `logs.otel_metric` 不存在，指标页签自动不显示，另外两张表
+照常用。
 
 ```text
   浏览器 ──▶ /api/*  axum ── 参数化 SQL、readonly=2 ──▶ ClickHouse HTTP（单机或 Distributed）
@@ -18,8 +22,29 @@ P95。单二进制，只读，不需要别的服务。
 | `/logs` | 日志检索：关键字 / 正则、级别、服务 / namespace / pod 等维度、logger、thread；直方图拖选缩小范围；展开看全文；上下文；跟随（SSE 推送，秒级；可切终端模式正序打印、自动滚到底）；导出 CSV / JSONL |
 | `/traces` | 链路检索：服务、接口、span 类型、只看错误、耗时区间、属性 `key=value`；耗时 × 时间散点图 |
 | `/traces/:trace_id` | 链路详情：瀑布图、span 属性 / 资源 / 事件（异常堆栈）/ 链接、这条 trace 的日志 |
+| `/metrics` | 指标，两个页签：**服务看板**（选一个服务，按 OTel 语义约定自动拼出 HTTP / JVM / 连接池 / Kafka / Go 几套面板，顶上三个数是请求量、错误率、P95）和**全部指标**（233 个指标名平铺，自己选算法、分组、过滤；图上的圆点是 exemplar，点开就是那次请求的链路） |
 | `/services` | 服务概览：请求数、QPS、错误率、P50 / P95 / P99（只算 Server / Consumer 这类入口 span） |
 | `/services/:name` | 单个服务：入口接口 / 下游调用两张表，请求量与错误、延迟分位趋势 |
+
+### 四个页面互相怎么跳
+
+三个信号加服务概览，两两之间都能跳，**跳过去看到的是同一个服务、同一段时间**（地址拼装都在
+`ui/src/lib/links.ts`，散在各页手写迟早有一处忘了带 `from` / `to`）：
+
+| 从 | 到 | 入口 |
+| --- | --- | --- |
+| 日志行 | 链路详情 | 行尾的 trace id；16 位的 span id 跳「这个 span 的全部日志」 |
+| 日志页（筛了服务） | 指标看板 / 最慢的链路 / 出错的链路 / 服务概览 | 筛选栏下面那一排 |
+| 链路列表（筛了服务） | 指标看板 / 错误日志 / 服务概览 | 筛选栏下面那一排 |
+| 链路详情 | 服务指标 / 服务概览 / 这条链路的全部日志 | 顶部；指标的时间窗以这条 trace 为中心前后各 15 分钟 |
+| 链路详情 · 某个 span | 这个服务的指标 / 只看这个 span 的日志 | 右侧 span 面板 |
+| 指标看板 | 最慢的链路 / 出错的链路 / 错误日志 / 服务概览 | 顶部；图上拖一段之后带的就是拖出来的窗口 |
+| 指标图上的 exemplar | 那一次请求的链路详情 | 图上的圆点 |
+| 服务概览 | 三个信号 | 顶部 |
+
+从「一个时刻」（一条日志、一个 span、一个 exemplar）跳到按时间段看的页面时，前后各放宽
+15 分钟（`WINDOW_AROUND_MS`）——只给那一毫秒的话指标图上一个点都没有，放宽了才看得出尖峰
+是从什么时候开始的。按 trace id / span id 查日志则**不带**时间范围，理由见下面「查询是怎么写的」。
 
 顶栏：时间范围（相对 / 绝对）、直达框（粘一个 trace id 直接开链路，16 位 hex 当 span id，其它当关键字搜日志）、
 深浅色。**所有筛选条件都在 URL 里**，链接复制给同事就是同一个视图；相对范围（`range=1h`）打开时按当时的
@@ -52,6 +77,7 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--clickhouse-url` | `OPDASH_CLICKHOUSE_URL` | `http://127.0.0.1:8123` | ClickHouse HTTP 地址 |
 | `--clickhouse-user` / `--clickhouse-password` | `OPDASH_CLICKHOUSE_USER` / `OPDASH_CLICKHOUSE_PASSWORD` | `default` / 空 | 建议给 opdash 建一个只读账号，profile 里钉住 `readonly=2`、`max_execution_time` |
 | `--database` / `--log-table` / `--trace-table` | `OPDASH_DATABASE` / `OPDASH_LOG_TABLE` / `OPDASH_TRACE_TABLE` | `logs` / `app_log` / `otel_trace` | 和采集端 sink 配置一致；集群上填 Distributed 表名 |
+| `--metric-table` | `OPDASH_METRIC_TABLE` | `otel_metric` | metricpipe 的表。**可以不存在**——那样指标页不显示，启动日志里说一句原因 |
 | `--timezone` | `OPDASH_TIMEZONE` | `Asia/Shanghai` | 直方图分桶对齐的时区，和两张表 `timestamp` 列的时区一致 |
 | `--query-timeout` | `OPDASH_QUERY_TIMEOUT` | `30s` | 传给 ClickHouse 的 `max_execution_time` |
 | `--max-range` | `OPDASH_MAX_RANGE` | `31d` | 允许查询的最大时间跨度 |
@@ -121,13 +147,17 @@ GET /api/auth/logout    清会话，跳 Keycloak 登出再回首页
 
 ## 表结构：程序知道什么、不知道什么
 
-固定列是程序写死的（logpipe 的 9 列、tracepipe 的 22 列），启动时读 `system.columns` 校验，缺列直接在
-`/api/health` 里报出来。**固定列之外的字符串列自动变成筛选维度**：k8s 元数据（`service_name` /
+固定列是程序写死的（logpipe 的 9 列、tracepipe 的 22 列、metricpipe 的 27 列），启动时读
+`system.columns` 校验，日志表 / span 表缺列直接在 `/api/health` 里报出来。**固定列之外的字符串列自动变成筛选维度**：k8s 元数据（`service_name` /
 `namespace` / `pod` / `container` / `stream`）、采集端配置里 `fields` 加的静态列（`cluster` / `env` ……）
 都不用改 opdash，`/api/meta` 的 `dimensions` 里有什么页面就显示什么筛选项。新加了列过 5 分钟自动认到。
 
 span 表的四个属性列必须是 ClickHouse 的 `JSON` 类型（tracepipe v0.2.0 起，ClickHouse 25.3+）。
 v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 tracepipe README 重建即可。
+
+指标表和这两张不一样，**它缺了不算错**：表不存在、缺 metricpipe 的固定列、或者属性列不是 JSON，
+都只是让 `/api/meta` 的 `metrics` 变成 `null`（`metrics_note` 里是原因，启动日志里也有一句），
+指标页签不显示，日志和链路一切照旧。硬要求三张表齐全的话，一个还没上指标的环境连日志都打不开了。
 
 ### 查询是怎么写的（排障时看这里）
 
@@ -170,13 +200,48 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   * 语义确实收紧了：搜 id 的前半截不再命中。响应里的 `token_terms` 列出哪些词按整词匹配了，
     页面上标成「按整词匹配 · 已走索引」，要搜片段用正则模式。
   * 短词故意不走索引——搜 `health` 得能匹配 `healthcheck`。阈值在 `TOKEN_MIN_LEN`。
+* **文本索引（26.2 GA 的 `TYPE text`）对我们的常见关键字也没用**，2026-09-10 实测过再下的结论。
+  判断一个跳数索引的**上限**不用真建索引：直接数「有多少个 granule 至少命中一次」就行
+  （`uniqExactIf((_part, intDiv(_part_offset, 8192)), 条件)`）。一小时窗口 740 个 granule：
+
+  | 关键字 | 命中的 granule | 索引最多能省 |
+  |---|---|---|
+  | `青栀`（生僻中文） | 23 / 740 | 32× |
+  | `发送私信事件监听器` | 740 / 740 | 0 |
+  | `im_enter_direct_msg` | 740 / 740 | 0 |
+  | `WX_RECOGNIZE_SHADOW` | 736 / 740 | 0 |
+  | `sendWebHooksMsgId` | 740 / 740 | 0 |
+  | `timeout` / `msgId` | ~740 / 740 | 0 |
+
+  一个 granule 是 8192 行、约 5 秒的全量日志（1600 行/秒，所有服务混在一起）；只要这个词
+  平均每几秒出现一次，它就在每个 granule 里，**任何**跳数索引都跳不掉。真正稀疏的是
+  32 位 id 那类——那已经由 `idx_message_tokens` 覆盖了。（关键字取自 `system.query_log` 里
+  近 7 天用户真实搜过的词，不是拍脑袋选的。）
+* **别把 `service_name` 挪进日志表的排序键**——直觉上「按服务排就能只扫这个服务的 message」，
+  实测是亏的：近 7 天 12823 次日志检索里只有 **394 次（3%）**带服务筛选，其余 97% 是「最近 N 条」。
+  时间打头时后者顺序读、读够就停（0.334 GB）；服务打头就没法顺序读，要把整段时间的行排一遍
+  （**3.49 GB，10 倍**，`optimize_read_in_order = 0` 模拟出来的）。为 3% 的查询让 97% 的查询贵十倍，
+  不划算。想要「按服务扫得少」得等一个不牺牲时间序的方案（投影要多存一份 message，136 GiB，
+  更不划算）。
+* 手动写 `PREWHERE` 没有意义：`optimize_move_to_prewhere` 默认开着，实测把 `service_name`
+  显式提到 PREWHERE 读量一字不差（39.6 GB → 40.5 GB，还略涨）。
 * **`ngrambf_v1` 试过，无效，别再走这条路**：8192 行日志里就有 13 万个不同 trigram，几乎覆盖整个
   现实 trigram 空间。取 20 个 granule 对 6 个真实关键字（含 32 位十六进制 msgId）验证，一个都跳不掉。
   token 不一样是因为它的取值空间无穷大——一个 msgId 只落在真正含它的那一两个 granule 上。
-* 用不上索引的关键字（带标点 / 中文的子串）仍要扫完时间范围内的 message：线上一小时约 8.9 GB
-  （三分片各 3 GB）。这类查询的长尾成因没查出来——不是 Keeper（复制队列全 0）、不是后台合并
+* 用不上索引的关键字（带标点 / 中文的子串）仍要扫完时间范围内的 message：2026-09-10 复测
+  **一小时约 10 GB、两小时约 40 GB**（未压缩，全集群；`message` 一列就占全表 911 GB 里的 761 GB，
+  1740 字节/行）。分片之间不均，两小时的关键字检索单分片就能撞上 `--max-read-bytes` 的 20 GiB
+  护栏——线上 24 小时里 14 次 307 全是这么来的，护栏本身是对的，要让两小时以上的关键字检索
+  跑完只能把它调大（40 GiB 量级）或者接受「关键字检索限一小时左右」。这类查询的长尾成因没查出来——不是 Keeper（复制队列全 0）、不是后台合并
   （p90 与合并字节数相关系数 −0.12）、也不是读带宽限流。`OPDASH_QUERY_TIMEOUT` 因此设成 90s
   而不是默认 30s（见 `deploy/`）。
+* **带关键字时检索和直方图串行发**（2026-09-10 改）。两条查询的 WHERE 一模一样，而 `message`
+  没有索引、要扫完整个时间范围。并发发出去就是同一段数据扫两遍；错开之后第二条命中
+  ClickHouse 26.x 的 **query condition cache**（`use_query_condition_cache`，服务端默认开，
+  记的是「哪些 granule 不满足这个条件」）：线上实测第一条 **39.8 GB / 3.5 s**，紧接着同条件的
+  第二条 **0 GB / 18 ms**。顺序是「检索在前、直方图在后」——列表是人盯着的那块，不能为了
+  直方图让它变慢；关键字命中多的时候检索读够 200 行就停，那种情况下直方图自己扫，两种情况
+  加起来集群大约只扫一遍。
 * 「共 N 条」不单独跑 `count()`：直方图各桶之和就是总数（时间条件左闭右开、桶按同一原点切，每行都
   落在某个桶里），日志页给 `/logs/search` 传 `count=0` 关掉它，省下一条扫同样数据的查询。按 trace id
   查（没有直方图）时才回到 `count()`；关键字搜索那条路走 `exact_rows_before_limit=1`，一次扫描顺带出总数。
@@ -187,6 +252,20 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   拿候选 id，再 `WHERE trace_id IN {ids:Array(String)} GROUP BY trace_id` 聚合摘要。不用嵌套子查询，
   Distributed 表上 `distributed_product_mode=deny` 也没问题。「请求耗时」= 根 span 的耗时（根缺失时
   退回最早的 span）；「总跨度」= 最早 span 开始到最晚 span 结束，异步消费会让它比请求耗时长得多。
+* **链路详情不取属性列**（2026-09-10 改）。四个 JSON 列（`resource_attributes` / `span_attributes` /
+  `events.attributes` / `links.attributes`）是这条查询的**全部**成本，线上同一条查询实测：
+
+  | | 读量 | 耗时 |
+  |---|---|---|
+  | 带这四列（原来） | 0.259 GB | 1.8 s（同形状的 p99 41.9 s、最慢 43.3 s） |
+  | 不带（现在的瀑布图） | **0.002 GB** | **50 ms** |
+
+  原因不是这几列的数据多（这条 trace 里它们只有几十 KB），是**主键前缀只能圈到秒级**：
+  `(service_name, span_name, toDateTime(timestamp))`，一条 42 毫秒的 trace 会拖进 5 万行候选
+  （毫秒精度的话只有 108 行），JSON 列又是按 granule 整块读的——每个路径一条流，路径一多，
+  读一个 granule 的固定开销就压过了真正要的那几行。所以瀑布图只取轻列，属性等用户点开某个
+  span 再按 `/api/traces/{id}/spans/{span_id}` 单独取（0.011 GB / 0.9 s）。那个接口收
+  `service` / `name` / `ts` 三个主键前缀提示，页面上本来就有，带上就省掉再定位一次（0.11 GB → 0.011 GB）。
 * 链路详情也两次往返：先 `WHERE trace_id = ?` 只读 `span_id, service_name, span_name, timestamp` 定位，
   再按 `service_name IN ... AND span_name IN ... AND timestamp BETWEEN ...` 走排序键前缀取 JSON 属性、
   events / links 这些重列。`trace_id` 只有 bloom filter（GRANULARITY 4，2.5% 误报），一天一亿多 span 时
@@ -194,9 +273,69 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   到位地读完整 JSON 就是几个 GB、30 秒超时；拆开后误报块只读几十字节一行，重列由主键精确圈到。
   第二步不传 span id 列表：参数都在 URL 里，5000 个 id 会超过 64 KB 的 URI 上限；两步排序相同、
   时间区间卡在第一步的首尾毫秒，取同样多的行就是同一批 span。
+* 日志检索只取**显示得了的列**：字符串 / 数字 / 时间列，也就是 `/api/meta` 里给前端的那些维度。
+  线上的 `app_log` 物理上带着整套 span 列（`resource_attributes JSON`、`events.attributes Array(JSON)`
+  ……，logpipe 不写，全是默认值），照单全收只是白读白传：一小时窗口取 200 行 0.129 GB → 0.098 GB。
 * 属性过滤写成子列标识符 `` span_attributes.`http.route` ``：只读那一个子列（线上 10 分钟数据 12 MB、
   40 ms）。`getSubcolumn(col, {path:String})` 虽然能把路径当参数，但 MergeTree 上会把整个 JSON 列读出来
   （同一查询 5.9 GB、5 秒）。路径进 SQL 前按标识符规则校验（不含反引号 / 反斜杠 / 控制字符）。
+* **指标：累积量的速率是查询时相减出来的。** metricpipe 按 OTLP 原样存，counter 是进程启动以来的累计
+  值（`temporality = 'Cumulative'`）——当初选择不在采集端转 delta，是因为多副本路由下很难做对。所以
+  `agg=rate` / `increase` 的 SQL 是：桶内取最后一个累计值 → `lagInFrame` 拿上一个桶的 → 相减。
+  `cur < prev` 当成进程重启（计数器归零），按 Prometheus 的做法把当前值整个算成增量。`Delta` 的桶内
+  求和就完事，两种 temporality 在同一条 SQL 里用 `if(temp = 'Cumulative', ...)` 分开，不用先查一次表
+  才知道是哪种。速率除的是**两个点的真实间隔**而不是桶宽：上报周期 60s、步长 30s 时除桶宽会把速率
+  砍一半。
+* **相减必须按时间线分，而时间线包括 resource 属性。** 同一个服务的两个 pod 报的是两条独立的计数器，
+  混在一起相减会得到一串负数（然后被当成重启）。表上没有 series_id 列，只能现算
+  `cityHash64(service_name, scope_name, toString(resource_attributes), toString(attributes))`，代价是把两个
+  JSON 属性列整列读出来。查询已经锁死一个 `metric_name`，读的行数有限，认了；只做 `avg` / `last` 这类
+  不用相减的聚合时不算这一步。
+* 直方图分位数：把各时间线的 `bucket_counts` **先按时间线相减、再逐元素相加**（`sumForEach`），
+  最后在服务端从桶计数和 `explicit_bounds` 插值。分位数不能对多条时间线取平均——那是把 p95 又平均了
+  一次，没有意义。桶边界不一样的时间线合不到一起，`explicit_bounds` 因此进了分组键：真出现两套边界
+  就是两条线，而不是悄悄算错。
+* 时间线太多时只画最大的 N 条：聚合完之后 `dense_rank() OVER (ORDER BY total DESC)` 截断，`total` 是
+  `sum(abs(v)) OVER (PARTITION BY keys)`。换成两次往返（先查 top N 的键、再查它们的点）反而要多扫一遍表。
+  截断了响应里 `truncated = true`，页面提示加过滤条件。
+* 指标看板不是写死的面板列表，是**按语义约定翻译出来的**：面板定义在 `ui/src/lib/dashboards.ts`，
+  每个面板给一串候选指标名，取第一个这个服务真的在报的，一个都没有就整块不显示。线上同时跑着
+  两代 SDK，同一件事有两个名字（`http.server.request.duration` 秒 / `http.server.duration` 毫秒、
+  `jvm.*` / `process.runtime.jvm.*`），标签名也跟着变（`http.response.status_code` /
+  `http.status_code`），候选列表就是用来吃掉这个差异的；非 Java 的服务再退回 collector 的
+  spanmetrics（`calls` / `duration`）。实测 `ai-crm` 拼出 20 个面板、`eci`（老 SDK）16 个、
+  `job-center`（只有 HTTP + JVM）11 个。
+* 图怎么画跟着数据的性质走，和 Cloudflare 控制台一套观感：**计数 / 速率画堆叠柱**
+  （按状态码、按接口、按 GC 名堆起来，构成一眼看得出，和服务详情页的「请求量与错误」一致），
+  **水位和分位数画折线**，只有一条线时线下填一层 12% 的淡色。图例可以点，点一下把某条线摘掉
+  ——按接口分组时十几条挤在一起，只想看其中一两条。
+* **一块看板共用一根十字线**：鼠标停在任意一张图上，同屏所有图都在同一时刻画竖线（气泡只出现在
+  鼠标那张图上）。「GC 那一下和延迟尖峰是不是同一时刻」不用来回对 x 轴。
+* **图上横向拖一段就是缩小时间范围**（和日志页直方图同一个交互）：拖完整块看板按新范围重查，
+  顶上「最慢的链路 / 出错的链路 / 错误日志 / 服务概览」几个入口带的也是这一段——指标上看到一个
+  尖峰，两步就能跳到那一分钟的链路和日志。服务详情页那边也有回到指标看板的入口。
+* 图上**丢掉最后一个不完整的桶**：时间范围的右端就是「现在」，最后那一格往往才过了几秒，
+  速率和计数只统计了一小截。不丢的话每张图末尾都往下掉一截，图例的读数（最后一个值）也跟着
+  偏小——看图的人会以为量掉下去了。
+* 看板一行只排两列（一行两张宽图比三张窄图好读），面板数是奇数时最后一张跨满整行，不留半行
+  空白；图例固定两行高度，同一排的卡片才对得齐；图例上只写**有区分度**的那部分标签
+  （按接口看 P95 时每条线都带 `quantile=p95`，写出来占地方又没信息量）。
+* 看板的面板**滚进视口才发查询**：一屏二十个面板一起查，会把后端的查询名额
+  （`--max-concurrent-queries`，默认 16）一次占满，别人就得排队；集群也白扫了没人翻到的那些面板。
+  一个面板的查询很轻（单服务单指标一小时，直方图分位 0.015 GB / 0.3 s，gauge 0.001 GB / 0.05 s）。
+* 指标的累积量相减有个 26.x 的坑：`UInt64 - UInt64` 出来是 **Int64**，和另一个分支的 UInt64
+  拼不出公共类型，`if` 会给一个 `Variant(Int64, UInt64)`，外面的 `sumForEach` 直接报 43
+  （`Illegal type Variant(Array(UInt64), Array(Variant(Int64, UInt64)))`）。`toUInt64()` 要套在
+  **分支里面**（`if(c >= p, toUInt64(c - p), c)`）——套在 `if` 外面也不行，`toUInt64` 不吃 Variant。
+* 指标目录（`/api/metrics`）只扫**最近 6 小时**，哪怕页面选的是 30 天：它要读整段范围里的
+  `metric_name` / `service_name`，而「有哪些指标」看最近几小时就够了。真有只在凌晨报一次的指标，
+  把时间范围整个挪过去就看得见——响应里的 `from_ms` 是实际扫的窗口，页面上写着。
+* 指标表的排序键是 `(service_name, metric_name, toDateTime(timestamp))`，`metric_name` 上还有
+  bloom filter，所以指标页不像链路页那样强制先选服务：不给服务时靠索引跳 granule。
+* 指标的标签过滤和链路页一套写法：子列标识符 `` attributes.`http.route` ``，值一律 `toString(...)` 后比较
+  （同一个 key 在不同服务里可能是整数也可能是字符串，直接比会 `NO_COMMON_TYPE`）。
+* exemplar 先在源行上 `notEmpty(exemplars.trace_id)` 挡掉，再 `ARRAY JOIN` 展开：反过来是把每行的
+  空数组也展开一遍。按值从大到小取，慢的那几次排在最前面。
 * 服务概览：`quantilesTDigest` 而不是默认的 `quantiles`（后者是 8192 个样本的水塘抽样，尾部分位最不准）。
 * 直方图分桶：`intDiv(toUnixTimestamp64Milli(timestamp) - origin, width)`，原点是范围起点那天的本地零点。
   不用 `toStartOfInterval(..., INTERVAL n SECOND)`：它按 UTC 取整，6 小时一桶时边界落在北京时间 02 / 08 点。
@@ -264,10 +403,16 @@ GET /api/logs/facets          ?field=level|logger|host|<维度列>&limit
 GET /api/logs/context         ?host&file&ts&before&after
 GET /api/logs/export          同 search，&format=csv|jsonl
 GET /api/traces/search        ?from&to&service&span_name&kind&error_only&min_ms&max_ms&attr=k=v&rattr=k=v&sort=time|duration&limit&trace_id
-GET /api/traces/{trace_id}
+GET /api/traces/{trace_id}                       瀑布图用的轻列，不含属性
+GET /api/traces/{trace_id}/spans/{span_id}       ?at&service&name&ts   这一个 span 的属性 / events / links
 GET /api/traces/values        ?field=service|span_name&service&kind=entry|client|all
 GET /api/traces/attr_keys     ?service&scope=span|resource
 GET /api/traces/attr_values   ?key&service&scope
+GET /api/metrics              ?from&to&service          指标目录（只扫最近 6 小时，见下）
+GET /api/metrics/query        ?from&to&metric&service&agg&field&by&attr=k=v&rattr=k=v&q&step&limit
+GET /api/metrics/labels       ?metric&column=attributes|resource_attributes
+GET /api/metrics/label_values ?metric&key&column
+GET /api/metrics/exemplars    ?metric&service&attr&limit
 GET /api/services             ?from&to
 GET /api/services/{name}/operations   ?kind=entry|client
 GET /api/services/{name}/timeseries   ?span_name
@@ -278,4 +423,8 @@ GET /api/services/{name}/timeseries   ?span_name
 * 日志分页是 `OFFSET`，最多翻到第 10000 条（`--max-offset`）；再往后让用户缩小范围。keyset 分页需要一个
   行内唯一键，表里没有。
 * 上下文按 `host + file` 取，容器重启换了文件（`0.log` → `1.log`）就断了；有 `pod` 列时可以在日志页按 pod 筛。
-* 没有告警、没有指标（有 spanmetrics + Prometheus）、不写库、没有用户系统。
+* 指标页只画单个指标，没有多指标运算（`a / b` 求成功率这种）、没有存下来的面板、没有 PromQL。
+  真要表达式的话得先有一层解析，现在的 `agg + by + filter` 够看曲线。
+* 指数直方图（`ExponentialHistogram`）不算分位数：它的桶是 `base^i` 编码的，没有 `explicit_bounds`，
+  要另写一套换算。Summary 的分位数是采集端算好的，多条时间线合不起来，同样只看 count / sum。
+* 没有告警、不写库、没有用户系统。

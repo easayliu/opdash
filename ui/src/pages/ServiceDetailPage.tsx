@@ -7,6 +7,7 @@ import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
 import { Button, Card, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { ErrorRate } from '@/pages/ServicesPage'
+import { logsHref, metricsHref, tracesHref } from '@/lib/links'
 import { formatDurationMs, formatNumber } from '@/lib/time'
 import { useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
@@ -49,6 +50,8 @@ export function ServiceDetailPage() {
     return list
   }, [ops.data, sort])
   const logDim = meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container'
+  // 跳走时带上当前这段时间，几个页面看的是同一个窗口
+  const win = { fromMs: range.fromMs, toMs: range.toMs }
   // 没有请求的桶不画（断线），画成 0 会把延迟曲线拉到地板上
   const points = (ts.data?.points ?? []).map((p) => {
     const values: Record<string, number> = p.requests > 0 ? { p50_ms: p.p50_ms, p95_ms: p.p95_ms, p99_ms: p.p99_ms } : {}
@@ -82,15 +85,21 @@ export function ServiceDetailPage() {
           </span>
         )}
         <span className="flex w-full items-center gap-2 md:ml-auto md:w-auto">
-          <Link to={`/traces?service=${encodeURIComponent(service)}${op ? `&span_name=${encodeURIComponent(op)}` : ''}&kind=Server,Consumer&sort=duration`}>
+          <Link to={tracesHref({ service, spanName: op || undefined, kinds: 'Server,Consumer', sort: 'duration' }, win)}>
             <Button size="sm">最慢的链路</Button>
           </Link>
-          <Link to={`/traces?service=${encodeURIComponent(service)}${op ? `&span_name=${encodeURIComponent(op)}` : ''}&error_only=1`}>
+          <Link to={tracesHref({ service, spanName: op || undefined, errorOnly: true }, win)}>
             <Button size="sm">出错的链路</Button>
           </Link>
-          <Link to={`/logs?${logDim}=${encodeURIComponent(service)}&level=ERROR,WARN`}>
+          <Link to={logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win)}>
             <Button size="sm">错误日志</Button>
           </Link>
+          {/* 指标表可能没有（没部署 metricpipe），有才给入口 */}
+          {meta.data?.metrics && (
+            <Link to={metricsHref(service, win)} title="JVM、连接池、Kafka 这些链路里看不到的">
+              <Button size="sm">指标看板</Button>
+            </Link>
+          )}
         </span>
       </header>
       <div className="min-h-0 flex-1 overflow-auto p-3 md:p-4">

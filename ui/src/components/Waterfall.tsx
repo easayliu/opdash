@@ -3,7 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { AlertTriangleIcon, ChevronDownIcon, ChevronRightIcon, CopyIcon } from 'lucide-react'
 import type { AttrValue, Span } from '@/api/types'
-import { Badge, Button } from '@/components/ui'
+import { Badge, Button, ErrorBox, Spinner } from '@/components/ui'
 import type { ColorAssigner } from '@/lib/colors'
 import { formatDuration, formatTsMicro } from '@/lib/time'
 import { fillSqlParams, formatSql } from '@/lib/sql'
@@ -522,7 +522,25 @@ function KV({ entries }: { entries: [string, AttrValue][] }) {
 }
 
 /** 右侧的 span 详情面板。 */
-export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: Span; traceStartUs: number; onClose: () => void; onShowLogs: () => void }) {
+export function SpanPanel({
+  span,
+  traceStartUs,
+  onClose,
+  onShowLogs,
+  loading,
+  error,
+  metricsLink,
+}: {
+  span: Span
+  traceStartUs: number
+  onClose: () => void
+  onShowLogs: () => void
+  /** 属性还在单独查（详情那一趟不带这四个 JSON 列） */
+  loading?: boolean
+  error?: unknown
+  /** 跳到这个 span 所属服务、这一刻前后的指标看板；没部署 metricpipe 时为空 */
+  metricsLink?: string
+}) {
   const [tab, setTab] = useState<'attrs' | 'resource' | 'events' | 'links'>('attrs')
   const attrs = Object.entries(span.attributes)
   const resource = Object.entries(span.resource)
@@ -560,9 +578,18 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
           <button type="button" onClick={() => copyText(span.span_id)} title="复制 span id" className="hover:text-fg">
             <CopyIcon className="size-3" />
           </button>
-          <Button size="xs" variant="ghost" className="ml-auto" onClick={onShowLogs}>
-            只看这个 span 的日志
-          </Button>
+          <span className="ml-auto flex items-center gap-1">
+            {metricsLink && (
+              <Link to={metricsLink} title={`${span.service} 在这一刻前后的指标（GC、连接池、CPU……）`}>
+                <Button size="xs" variant="ghost">
+                  这个服务的指标
+                </Button>
+              </Link>
+            )}
+            <Button size="xs" variant="ghost" onClick={onShowLogs}>
+              只看这个 span 的日志
+            </Button>
+          </span>
         </div>
       </header>
       <div className="flex border-b border-border text-xs">
@@ -585,14 +612,21 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {tab === 'attrs' && (
+        {/* 属性是点开这个 span 才去查的，转一下比先渲染一屏空的好 */}
+        {loading && (
+          <div className="flex justify-center py-10">
+            <Spinner />
+          </div>
+        )}
+        {!loading && !!error && <ErrorBox error={error} />}
+        {!loading && tab === 'attrs' && (
           <>
             {filledSql && <FilledSql sql={filledSql} dbSystem={span.attributes['db.system']} />}
             <KV entries={attrs} />
           </>
         )}
-        {tab === 'resource' && <KV entries={resource} />}
-        {tab === 'events' &&
+        {!loading && tab === 'resource' && <KV entries={resource} />}
+        {!loading && tab === 'events' &&
           (span.events.length ? (
             span.events.map((e, i) => {
               const stack = e.attributes['exception.stacktrace']
@@ -613,7 +647,7 @@ export function SpanPanel({ span, traceStartUs, onClose, onShowLogs }: { span: S
           ) : (
             <div className="px-4 py-4 text-xs text-muted-fg">（无事件）</div>
           ))}
-        {tab === 'links' &&
+        {!loading && tab === 'links' &&
           (span.links.length ? (
             span.links.map((l, i) => (
               <div key={i} className="border-b border-border/60 px-4 py-3 text-xs">

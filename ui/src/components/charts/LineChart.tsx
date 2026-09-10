@@ -16,6 +16,14 @@ export interface LinePoint {
   values: Record<string, number>
 }
 
+/** 图上钉一个点：指标的 exemplar（点开跳 trace）。 */
+export interface ChartMarker {
+  t_ms: number
+  value: number
+  title?: string
+  onClick?: () => void
+}
+
 interface Props {
   fromMs: number
   toMs: number
@@ -26,26 +34,58 @@ interface Props {
   stale?: boolean
   format?: (v: number) => string
   className?: string
+  /** 线下面填一层淡色。Cloudflare 控制台的分析图都是填充的，单条线时填上更好读；
+   *  线一多互相盖，就别填了 */
+  area?: boolean
+  /** 拖一段时间 → 缩小范围。和日志页直方图同一个交互 */
+  onBrush?: (fromMs: number, toMs: number) => void
+  /** 别的图上鼠标停在哪个时刻：画一条同位置的竖线，不弹气泡（气泡只属于鼠标真正在的那张图） */
+  syncTs?: number | null
+  /** 自己被 hover 到哪个时刻，交给上层广播给同一块看板的其它图 */
+  onHoverTs?: (tMs: number | null) => void
+  /** 缺的桶直接连过去，不断线。指标是采样数据，上报周期比桶宽长时到处是空桶，断了就什么都看不见 */
+  connectGaps?: boolean
+  /** 每个真实数据点画一个小圆点：点稀疏时只有线段是看不见的（单点线段画不出东西） */
+  dots?: boolean
+  markers?: ChartMarker[]
 }
 
-const M = { left: 52, right: 8, top: 8, bottom: 22 }
+// 右边留够半个刻度标签的宽度：最后一格是 `23:10` 这种居中标签，只留 8px 会被切掉半个字
+const M = { left: 52, right: 24, top: 8, bottom: 22 }
 
 /** 多条折线 + 十字线读数（2px 线、所有系列一起读）。 */
-export function LineChart({ fromMs, toMs, widthMs, points, series, height = 160, stale, format = (v) => String(v), className }: Props) {
+export function LineChart({
+  fromMs,
+  toMs,
+  widthMs,
+  points,
+  series,
+  height = 160,
+  stale,
+  format = (v) => String(v),
+  className,
+  area,
+  onBrush,
+  syncTs,
+  onHoverTs,
+  connectGaps,
+  dots,
+  markers,
+}: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; point: LinePoint } | null>(null)
+  const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
   const W = Math.max(0, width - M.left - M.right)
   const H = height - M.top - M.bottom
   const span = Math.max(1, toMs - fromMs)
   const xOf = (t: number) => M.left + ((t - fromMs + widthMs / 2) / span) * W
+  const tOf = (x: number) => fromMs + ((x - M.left) / Math.max(1, W)) * span
   const max = useMemo(() => Math.max(0, ...points.flatMap((p) => series.map((s) => p.values[s.key] ?? 0))), [points, series])
   const yMax = niceMax(max)
   const yOf = (v: number) => M.top + H - (yMax > 0 ? (v / yMax) * H : 0)
   const ticks = useMemo(() => timeTicks(fromMs, toMs), [fromMs, toMs])
 
-  const onMove = (e: PointerEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const x = e.clientX - rect.left
+  const nearest = (x: number): LinePoint | null => {
     let best: LinePoint | null = null
     let bestD = Infinity
     for (const p of points) {
@@ -55,13 +95,51 @@ export function LineChart({ fromMs, toMs, widthMs, points, series, height = 160,
         best = p
       }
     }
-    setHover(best ? { x: xOf(best.t_ms), y: e.clientY - rect.top, point: best } : null)
+    return best
   }
+
+  const onMove = (e: PointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    if (brush) setBrush({ ...brush, x1: x })
+    const best = nearest(x)
+    setHover(best ? { x: xOf(best.t_ms), y: e.clientY - rect.top, point: best } : null)
+    onHoverTs?.(best ? best.t_ms : null)
+  }
+  const onLeave = () => {
+    setHover(null)
+    setBrush(null)
+    onHoverTs?.(null)
+  }
+  const onDown = (e: PointerEvent<SVGSVGElement>) => {
+    if (!onBrush) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    setBrush({ x0: e.clientX - rect.left, x1: e.clientX - rect.left })
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const onUp = () => {
+    if (brush && onBrush) {
+      const [a, b] = [Math.min(brush.x0, brush.x1), Math.max(brush.x0, brush.x1)]
+      // 拖得太短当成点击，不改范围
+      if (b - a > 4) onBrush(Math.max(fromMs, tOf(a)), Math.min(toMs, tOf(b)))
+    }
+    setBrush(null)
+  }
+  // 别的图在这个时刻上：画同位置的竖线（自己有 hover 时以自己为准）
+  const syncPoint = syncTs != null && !hover ? points.find((p) => p.t_ms === syncTs) : undefined
 
   return (
     <div ref={ref} className={cn('relative w-full select-none', stale && 'chart-stale', className)} style={{ height }}>
       {width > 0 && (
-        <svg width={width} height={height} className="block" onPointerMove={onMove} onPointerLeave={() => setHover(null)}>
+        <svg
+          width={width}
+          height={height}
+          className={cn('block touch-pan-y', onBrush && 'cursor-crosshair', brush && 'cursor-col-resize')}
+          onPointerMove={onMove}
+          onPointerLeave={onLeave}
+          onPointerDown={onDown}
+          onPointerUp={onUp}
+        >
           {niceTicks(yMax).map((v) => (
             <g key={v}>
               <line x1={M.left} x2={M.left + W} y1={yOf(v)} y2={yOf(v)} stroke="var(--grid)" strokeWidth={1} />
@@ -77,27 +155,83 @@ export function LineChart({ fromMs, toMs, widthMs, points, series, height = 160,
             </text>
           ))}
           {series.map((s) => {
-            // 没有数据的桶（请求数为 0）断开，不画成 0
-            const segs: string[] = []
-            let cur: string[] = []
+            // 没有数据的桶（请求数为 0）断开，不画成 0；connectGaps 时连过去。
+            // 一段 = 一串连续有值的点，线和填充都从同一串坐标生成
+            const segs: [number, number][][] = []
+            let cur: [number, number][] = []
             for (const p of points) {
               const v = p.values[s.key]
               if (v === undefined || Number.isNaN(v)) {
-                if (cur.length) segs.push(cur.join(' '))
+                if (connectGaps) continue
+                if (cur.length) segs.push(cur)
                 cur = []
                 continue
               }
-              cur.push(`${cur.length ? 'L' : 'M'}${xOf(p.t_ms).toFixed(1)},${yOf(v).toFixed(1)}`)
+              cur.push([xOf(p.t_ms), yOf(v)])
             }
-            if (cur.length) segs.push(cur.join(' '))
+            if (cur.length) segs.push(cur)
+            const line = (seg: [number, number][]) =>
+              seg.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
+            const baseline = yOf(0).toFixed(1)
             return (
               <g key={s.key}>
-                {segs.map((d, i) => (
-                  <path key={i} d={d} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+                {area &&
+                  segs
+                    // 一个点围不出面
+                    .filter((seg) => seg.length > 1)
+                    .map((seg, i) => (
+                      <path
+                        key={`a${i}`}
+                        d={`${line(seg)} L${seg[seg.length - 1][0].toFixed(1)},${baseline} L${seg[0][0].toFixed(1)},${baseline} Z`}
+                        fill={s.color}
+                        opacity={0.12}
+                        stroke="none"
+                      />
+                    ))}
+                {segs.map((seg, i) => (
+                  <path key={i} d={line(seg)} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
                 ))}
+                {dots && segs.flat().map(([x, y], i) => <circle key={i} cx={x} cy={y} r={2} fill={s.color} />)}
               </g>
             )
           })}
+          {/* exemplar：值可能远超曲线（p95 线上挂着一次 3 秒的请求），钉在画布内，不让它撑大纵轴 */}
+          {markers?.map((m, i) => (
+            <circle
+              key={i}
+              cx={xOf(m.t_ms)}
+              cy={Math.min(M.top + H, Math.max(M.top, yOf(m.value)))}
+              r={3.5}
+              fill="var(--card)"
+              stroke="var(--brand)"
+              strokeWidth={2}
+              className={m.onClick ? 'cursor-pointer' : undefined}
+              onClick={m.onClick}
+            >
+              {m.title && <title>{m.title}</title>}
+            </circle>
+          ))}
+          {syncPoint && (
+            <line
+              x1={xOf(syncPoint.t_ms)}
+              x2={xOf(syncPoint.t_ms)}
+              y1={M.top}
+              y2={M.top + H}
+              stroke="var(--muted-fg)"
+              strokeWidth={1}
+              opacity={0.35}
+            />
+          )}
+          {brush && Math.abs(brush.x1 - brush.x0) > 2 && (
+            <rect
+              x={Math.min(brush.x0, brush.x1)}
+              y={M.top}
+              width={Math.abs(brush.x1 - brush.x0)}
+              height={H}
+              fill="var(--accent)"
+              opacity={0.15}
+            />
+          )}
           {hover && (
             <g>
               <line x1={hover.x} x2={hover.x} y1={M.top} y2={M.top + H} stroke="var(--muted-fg)" strokeWidth={1} opacity={0.6} />
@@ -110,7 +244,7 @@ export function LineChart({ fromMs, toMs, widthMs, points, series, height = 160,
           )}
         </svg>
       )}
-      {hover && (
+      {hover && !brush && (
         <ChartTooltip
           x={hover.x}
           y={hover.y}

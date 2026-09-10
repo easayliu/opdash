@@ -536,6 +536,12 @@ pub fn facetable(table: &Table, field: &str) -> bool {
     !NEVER.contains(&field) && table.column(field).is_some_and(|c| c.kind == ColumnKind::String)
 }
 
+/// 这一列值不值得取回前端。JSON / Map / Array / 其它复杂类型一律不取：日志页显示不了，
+/// 而且 JSON 列是按 granule 整块读的，白读一遍。
+fn displayable(kind: ColumnKind) -> bool {
+    matches!(kind, ColumnKind::String | ColumnKind::Int | ColumnKind::Float | ColumnKind::DateTime)
+}
+
 pub struct LogQueries<'a> {
     pub database: &'a str,
     pub table: &'a Table,
@@ -546,7 +552,12 @@ impl LogQueries<'_> {
         format!("`{}`.`{}`", self.database, self.table.name)
     }
 
-    /// 固定列带别名，其余列原样。
+    /// 固定列带别名，其余**能显示的**列原样。
+    ///
+    /// 只带上字符串 / 数字 / 时间列——也就是 `/api/meta` 里当筛选维度给前端的那些。日志表在
+    /// 线上物理带着整套 span 列（`resource_attributes JSON`、`events.attributes Array(JSON)`
+    /// ……，logpipe 不往里写，全是默认值），页面上也没有地方显示它们，`SELECT *` 式地带上
+    /// 只是白读、白传：线上一小时窗口取 200 行实测 0.129 GB → 0.098 GB。
     fn select_columns(&self) -> Result<String> {
         let mut cols: Vec<String> = vec![
             "toUnixTimestamp64Milli(timestamp) AS ts_ms".into(),
@@ -560,7 +571,7 @@ impl LogQueries<'_> {
             "host".into(),
         ];
         for c in &self.table.columns {
-            if !LOG_FIXED_COLUMNS.contains(&c.name.as_str()) {
+            if !LOG_FIXED_COLUMNS.contains(&c.name.as_str()) && displayable(c.kind) {
                 cols.push(quote_ident(&c.name)?);
             }
         }
@@ -913,6 +924,32 @@ mod tests {
         };
         assert!(filter.token_terms().is_empty());
         assert!(q.search(&filter, Order::Desc, 10, 0).unwrap().sql().contains("match(message"));
+    }
+
+    #[test]
+    fn select_skips_columns_the_page_cannot_show() {
+        // 线上的日志表物理上带着整套 span 列（logpipe 不写，全是默认值）
+        let mut t = table();
+        for (name, ty) in [
+            ("span_attributes", "JSON"),
+            ("events.attributes", "Array(JSON)"),
+            ("labels", "Map(String, String)"),
+            ("duration_ns", "UInt64"),
+        ] {
+            t.columns.push(Column {
+                name: name.to_owned(),
+                ty: ty.to_owned(),
+                kind: ColumnKind::classify(ty),
+            });
+        }
+        let q = LogQueries { database: "logs", table: &t };
+        let filter = LogFilter { range: Some(range()), ..Default::default() };
+        let sql = q.search(&filter, Order::Desc, 10, 0).unwrap();
+        for skipped in ["span_attributes", "events.attributes", "labels"] {
+            assert!(!sql.sql().contains(skipped), "{skipped} 不该取: {}", sql.sql());
+        }
+        // 数字列还是取的：静态 fields 里可能有
+        assert!(sql.sql().contains("`duration_ns`"), "{}", sql.sql());
     }
 
     #[test]

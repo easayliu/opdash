@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { CopyIcon } from 'lucide-react'
-import { useMeta, useTraceDetail, useTraceLogs } from '@/api/queries'
+import { useMeta, useSpanAttrs, useTraceDetail, useTraceLogs } from '@/api/queries'
 import { LogTable, sortLogRows, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { SpanPanel, Waterfall, buildTree } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
+import { around, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { formatDuration, formatTsMicro } from '@/lib/time'
 import { useUrlState } from '@/lib/url-state'
 import { copyText } from '@/lib/utils'
@@ -29,6 +30,28 @@ export function TraceDetailPage() {
     return c
   }, [spans])
   const selectedSpan = spans.find((s) => s.span_id === selected) ?? null
+  // 属性 / events / links 是点开这个 span 才查的（详情那一趟不带这四个 JSON 列，见 useSpanAttrs）
+  const attrs = useSpanAttrs(
+    traceId,
+    detail.data?.attributes_lazy ? selected : null,
+    selectedSpan
+      ? { service: selectedSpan.service, name: selectedSpan.name, ts_ms: Math.floor(selectedSpan.start_us / 1000) }
+      : undefined,
+    params.get('at'),
+  )
+  const attrsFor = attrs.data?.span_id === selected ? attrs.data : undefined
+  const selectedSpanFull = useMemo(() => {
+    if (!selectedSpan) return null
+    if (!detail.data?.attributes_lazy) return selectedSpan
+    if (!attrsFor) return { ...selectedSpan, attributes: {}, resource: {}, events: [], links: [] }
+    return {
+      ...selectedSpan,
+      attributes: attrsFor.attributes,
+      resource: attrsFor.resource,
+      events: attrsFor.events,
+      links: attrsFor.links,
+    }
+  }, [selectedSpan, detail.data?.attributes_lazy, attrsFor])
   const root = tree.roots[0]?.span
   const errorSpans = useMemo(() => spans.filter((s) => s.status === 'Error').sort((a, b) => a.start_us - b.start_us), [spans])
   const errors = errorSpans.length
@@ -130,6 +153,23 @@ export function TraceDetailPage() {
             </div>
           </dl>
         )}
+        {/* 从这条链路跳到别的信号：时间窗以这条 trace 的开始时刻为中心前后放宽，
+            「这次为什么慢」常常要看那一刻服务的 GC / 连接池 */}
+        {root && (
+          <div className="flex flex-wrap items-center gap-2">
+            {meta.data?.metrics && (
+              <Link to={metricsHref(root.service, around(tree.startUs / 1000))} title={`${root.service} 在这前后半小时的指标`}>
+                <Button size="xs">服务指标</Button>
+              </Link>
+            )}
+            <Link to={serviceHref(root.service, around(tree.startUs / 1000))}>
+              <Button size="xs">服务概览</Button>
+            </Link>
+            <Link to={logsHref({ traceId })} title="这条链路的全部日志">
+              <Button size="xs">全部日志</Button>
+            </Link>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg md:ml-auto md:gap-x-4">
           {colors.entries().map(([name, color]) => (
             <span key={name} className="inline-flex items-center gap-1">
@@ -220,9 +260,14 @@ export function TraceDetailPage() {
             )}
           </section>
         </div>
-        {selectedSpan && (
+        {selectedSpanFull && (
           <SpanPanel
-            span={selectedSpan}
+            span={selectedSpanFull}
+            loading={attrs.isFetching && !attrsFor}
+            error={attrs.error}
+            metricsLink={
+              meta.data?.metrics ? metricsHref(selectedSpanFull.service, around(selectedSpanFull.start_us / 1000)) : undefined
+            }
             traceStartUs={tree.startUs}
             onClose={() => set({ span: null, span_logs: null }, { replace: true })}
             onShowLogs={() => {

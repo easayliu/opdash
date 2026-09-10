@@ -205,7 +205,8 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<Captured> {
     Some(Captured { target, headers, body: String::from_utf8_lossy(&body).to_string() })
 }
 
-/// system.columns 的标准回放：两张表都有，日志表带 k8s 元数据列和 cluster。
+/// system.columns 的标准回放：三张表都有，日志表带 k8s 元数据列和 cluster。
+/// 想模拟「没部署 metricpipe」用 [`columns_without`]。
 pub fn columns_fixture() -> String {
     let logs = [
         ("timestamp", "DateTime64(3, 'Asia/Shanghai')"),
@@ -249,6 +250,26 @@ pub fn columns_fixture() -> String {
         ("links.attributes", "Array(JSON)"),
         ("cluster", "LowCardinality(String)"),
     ];
+    // 指标表：metricpipe 的固定列（类型只有属性列和几个数值列被程序检查）
+    let metrics: Vec<(&str, &str)> = opdash::schema::METRIC_FIXED_COLUMNS
+        .iter()
+        .map(|name| {
+            let ty = match *name {
+                "timestamp" | "start_timestamp" => "DateTime64(9, 'Asia/Shanghai')",
+                "resource_attributes" | "attributes" => "JSON",
+                "value" | "sum" | "min" | "max" => "Float64",
+                "count" | "flags" => "UInt64",
+                "is_monotonic" => "UInt8",
+                "bucket_counts" => "Array(UInt64)",
+                "explicit_bounds" | "quantiles.quantile" | "quantiles.value"
+                | "exemplars.value" => "Array(Float64)",
+                "exemplars.timestamp" => "Array(DateTime64(9, 'Asia/Shanghai'))",
+                "exemplars.trace_id" | "exemplars.span_id" => "Array(String)",
+                _ => "LowCardinality(String)",
+            };
+            (*name, ty)
+        })
+        .collect();
     let mut out = String::new();
     for (name, ty) in logs {
         out.push_str(&format!(r#"{{"table":"app_log","name":"{name}","type":"{ty}"}}"#));
@@ -258,7 +279,20 @@ pub fn columns_fixture() -> String {
         out.push_str(&format!(r#"{{"table":"otel_trace","name":"{name}","type":"{ty}"}}"#));
         out.push('\n');
     }
+    for (name, ty) in metrics {
+        out.push_str(&format!(r#"{{"table":"otel_metric","name":"{name}","type":"{ty}"}}"#));
+        out.push('\n');
+    }
     out
+}
+
+/// 少一张表的 system.columns（`table` 是 `app_log` / `otel_trace` / `otel_metric`）。
+pub fn columns_without(table: &str) -> String {
+    columns_fixture()
+        .lines()
+        .filter(|l| !l.contains(&format!(r#""table":"{table}""#)))
+        .map(|l| format!("{l}\n"))
+        .collect()
 }
 
 pub fn version_fixture() -> &'static str {
@@ -301,6 +335,7 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
         &config.database,
         &config.log_table,
         &config.trace_table,
+        &config.metric_table,
     ));
     let auth = opdash::auth::Auth::from_config(&config);
     let state = AppState::new(config, client, schema);

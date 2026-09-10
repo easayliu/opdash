@@ -34,6 +34,11 @@ pub struct Config {
     #[arg(long, env = "OPDASH_TRACE_TABLE", default_value = "otel_trace")]
     pub trace_table: String,
 
+    /// metricpipe 写的指标表。这张表可以没有——没部署 metricpipe 时指标页自动隐藏，
+    /// 日志和链路照常
+    #[arg(long, env = "OPDASH_METRIC_TABLE", default_value = "otel_metric")]
+    pub metric_table: String,
+
     /// 直方图、按天聚合时对齐用的时区；应和两张表 timestamp 列的时区一致
     #[arg(long, env = "OPDASH_TIMEZONE", default_value = "Asia/Shanghai")]
     pub timezone: String,
@@ -193,6 +198,7 @@ impl Config {
             ("--database", &self.database),
             ("--log-table", &self.log_table),
             ("--trace-table", &self.trace_table),
+            ("--metric-table", &self.metric_table),
         ] {
             if !is_plain_identifier(name) {
                 return Err(format!("{flag} 只能包含字母、数字、下划线: {name:?}"));
@@ -216,6 +222,7 @@ mod tests {
         let cfg = Config::parse_from(["opdash"]);
         assert_eq!(cfg.bind.port(), 4880);
         assert_eq!(cfg.database, "logs");
+        assert_eq!(cfg.metric_table, "otel_metric");
         assert_eq!(cfg.query_timeout, Duration::from_secs(30));
         assert_eq!(cfg.max_range, Duration::from_secs(31 * 86400));
         assert!(cfg.basic_auth.is_none());

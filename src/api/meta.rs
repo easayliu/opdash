@@ -4,7 +4,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
 
 use super::AppState;
-use crate::schema::{LOG_FIXED_COLUMNS, TRACE_FIXED_COLUMNS, Table};
+use crate::schema::{LOG_FIXED_COLUMNS, METRIC_FIXED_COLUMNS, TRACE_FIXED_COLUMNS, Table};
 
 #[derive(Serialize)]
 pub struct Health {
@@ -42,6 +42,11 @@ pub struct Meta {
     pub server: Server,
     pub logs: TableMeta,
     pub traces: TableMeta,
+    /// 指标表；没部署 metricpipe 就是 null，前端据此不显示指标页
+    pub metrics: Option<TableMeta>,
+    /// 指标页没启用的原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics_note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -100,5 +105,7 @@ pub async fn meta(State(state): State<AppState>) -> crate::error::Result<Json<Me
         },
         logs: TableMeta::new(&schema.logs, LOG_FIXED_COLUMNS),
         traces: TableMeta::new(&schema.traces, TRACE_FIXED_COLUMNS),
+        metrics: schema.metrics.as_ref().map(|t| TableMeta::new(t, METRIC_FIXED_COLUMNS)),
+        metrics_note: schema.metrics_note.clone(),
     }))
 }

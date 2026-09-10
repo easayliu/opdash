@@ -56,18 +56,26 @@ async fn run() -> anyhow::Result<()> {
         &config.database,
         &config.log_table,
         &config.trace_table,
+        &config.metric_table,
     ));
     // 库没起来也照样启动：健康检查会报，后台会一直重试。这样部署顺序不用讲究先后。
     match schema.refresh().await {
-        Ok(s) => tracing::info!(
-            clickhouse = %config.clickhouse_url,
-            server = %s.server_version,
-            log_table = %format!("{}.{}", config.database, config.log_table),
-            log_columns = s.logs.columns.len(),
-            trace_table = %format!("{}.{}", config.database, config.trace_table),
-            trace_columns = s.traces.columns.len(),
-            "表结构已读取"
-        ),
+        Ok(s) => {
+            tracing::info!(
+                clickhouse = %config.clickhouse_url,
+                server = %s.server_version,
+                log_table = %format!("{}.{}", config.database, config.log_table),
+                log_columns = s.logs.columns.len(),
+                trace_table = %format!("{}.{}", config.database, config.trace_table),
+                trace_columns = s.traces.columns.len(),
+                metric_columns = s.metrics.as_ref().map_or(0, |t| t.columns.len()),
+                "表结构已读取"
+            );
+            // 指标表是可选的，没有就只是不显示指标页——说一句原因，免得以为是 bug
+            if let Some(note) = &s.metrics_note {
+                tracing::info!(reason = %note, "指标页未启用");
+            }
+        }
         Err(e) => tracing::warn!(error = %e, "启动时读不到表结构，稍后自动重试"),
     }
     Arc::clone(&schema).spawn_refresher(config.schema_refresh);

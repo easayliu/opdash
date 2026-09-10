@@ -84,6 +84,8 @@ export function formatTsMicro(us: number, opts: { date?: boolean } = {}): string
 /** 纳秒 → 人读的时长：`1.23ms` / `4.56s` / `2m 3s` */
 export function formatDuration(ns: number): string {
   if (!Number.isFinite(ns) || ns < 0) return '-'
+  // 正好是 0 就写 0：坐标轴最低那一格写成「0.0µs」既占地方又容易看成是个很小的值
+  if (ns === 0) return '0'
   const us = ns / 1000
   if (us < 1000) return `${us < 10 ? us.toFixed(1) : Math.round(us)}µs`
   const ms = us / 1000

@@ -62,6 +62,7 @@ async fn app(url: &str) -> (axum::Router, Client) {
         &config.database,
         &config.log_table,
         &config.trace_table,
+        &config.metric_table,
     ));
     schema.refresh().await.expect("读表结构");
     let state = AppState::new(config, client.clone(), schema);
@@ -197,8 +198,21 @@ async fn every_endpoint_answers() {
             assert_eq!(status, 200, "{detail}");
             let spans = detail["spans"].as_array().unwrap();
             assert!(!spans.is_empty());
-            // JSON 属性已拍平成带点的 key
-            assert!(spans[0]["attributes"].is_object());
+            // 瀑布图那一趟不带属性（四个 JSON 列是详情查询的全部成本）
+            assert_eq!(detail["attributes_lazy"], true, "{detail}");
+            assert_eq!(spans[0]["attributes"], serde_json::json!({}), "{}", spans[0]);
+            // 点开某个 span 才取它的属性
+            let span_id = spans[0]["span_id"].as_str().unwrap().to_owned();
+            let (status, attrs) =
+                get_json(&app, &format!("/api/traces/{trace_id}/spans/{span_id}")).await;
+            assert_eq!(status, 200, "{attrs}");
+            assert_eq!(attrs["span_id"], span_id);
+            assert!(attrs["attributes"].is_object(), "{attrs}");
+            assert!(attrs["resource"].is_object(), "{attrs}");
+            // 库里没有的 span 要报得清楚，不能 500
+            let (status, body) =
+                get_json(&app, &format!("/api/traces/{trace_id}/spans/ffffffffffffffff")).await;
+            assert_eq!(status, 400, "{body}");
             let (status, body) =
                 get_json(&app, &format!("/api/logs/search?trace_id={trace_id}&limit=5")).await;
             assert_eq!(status, 200, "{body}");
@@ -258,6 +272,108 @@ async fn every_endpoint_answers() {
         get_json(&app, &format!("/api/traces/search?from={}&to={now}", now - 7 * 3_600_000)).await;
     assert_eq!(status, 400, "{body}");
     let (status, body) = get_json(&app, "/api/traces/not-a-trace-id").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+/// 指标那套 SQL（窗口函数、`sumForEach`、Nested 上的 `ARRAY JOIN`）假库验不了，必须对着真库跑。
+/// 没部署 metricpipe 的环境自动跳过。
+#[tokio::test]
+async fn metric_endpoints_answer() {
+    let url = e2e_or_skip!();
+    let (app, _) = app(&url).await;
+    let now = now_ms();
+    let from = now - 30 * 60_000;
+
+    let (_, meta) = get_json(&app, "/api/meta").await;
+    if meta["metrics"].is_null() {
+        eprintln!("指标表不可用（{}），跳过", meta["metrics_note"]);
+        return;
+    }
+
+    let (status, catalog) = get_json(&app, &format!("/api/metrics?from={from}&to={now}")).await;
+    assert_eq!(status, 200, "{catalog}");
+    let Some(metric) = catalog["metrics"].as_array().and_then(|m| m.first()).cloned() else {
+        eprintln!("最近半小时没有指标数据，跳过");
+        return;
+    };
+    let name = metric["name"].as_str().unwrap().to_owned();
+    let ty = metric["type"].as_str().unwrap().to_owned();
+    let base = format!("/api/metrics/query?from={from}&to={now}&metric={}", urlenc(&name));
+
+    // 每种类型都按页面上的默认算法查一遍
+    let (agg, field) = match ty.as_str() {
+        "Histogram" => ("quantile", "value"),
+        "ExponentialHistogram" | "Summary" => ("rate", "count"),
+        "Sum" if metric["monotonic"].as_bool() == Some(true) => ("rate", "value"),
+        _ => ("avg", "value"),
+    };
+    let (status, body) = get_json(&app, &format!("{base}&agg={agg}&field={field}")).await;
+    assert_eq!(status, 200, "{ty} 的默认算法: {body}");
+    let buckets = body["t_ms"].as_array().unwrap().len();
+    assert!(buckets > 0 && buckets <= 61, "{buckets} 个桶");
+    for s in body["series"].as_array().unwrap() {
+        assert_eq!(s["values"].as_array().unwrap().len(), buckets, "每条线都铺在同一条时间轴上");
+    }
+
+    // 累积量相减：换个 agg 再来一遍，SQL 里那套窗口函数得能在集群上跑
+    for agg in ["rate", "increase", "avg", "last", "max", "mean"] {
+        let field = if ty.ends_with("Histogram") || ty == "Summary" {
+            if agg == "mean" { "sum" } else { "count" }
+        } else {
+            "value"
+        };
+        let (status, body) = get_json(&app, &format!("{base}&agg={agg}&field={field}")).await;
+        assert_eq!(status, 200, "agg={agg} field={field}: {body}");
+    }
+
+    // 标签：查出来的 key 要能直接拿去分组和过滤
+    let (status, labels) = get_json(
+        &app,
+        &format!("/api/metrics/labels?from={from}&to={now}&metric={}&limit=5", urlenc(&name)),
+    )
+    .await;
+    assert_eq!(status, 200, "{labels}");
+    let (status, body) =
+        get_json(&app, &format!("{base}&agg={agg}&field={field}&by=service_name")).await;
+    assert_eq!(status, 200, "{body}");
+    if let Some(key) = labels["names"][0]["name"].as_str().map(str::to_owned) {
+        let (status, body) =
+            get_json(&app, &format!("{base}&agg={agg}&field={field}&by={}", urlenc(&key))).await;
+        assert_eq!(status, 200, "按 {key} 分组: {body}");
+        let (status, values) = get_json(
+            &app,
+            &format!(
+                "/api/metrics/label_values?from={from}&to={now}&metric={}&key={}&limit=3",
+                urlenc(&name),
+                urlenc(&key)
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{values}");
+        if let Some(v) = values["names"][0]["name"].as_str() {
+            let (status, body) = get_json(
+                &app,
+                &format!("{base}&agg={agg}&field={field}&attr={}", urlenc(&format!("{key}={v}"))),
+            )
+            .await;
+            assert_eq!(status, 200, "按 {key}={v} 过滤: {body}");
+        }
+    }
+
+    // 直方图分位数：多个 q 一次出
+    if ty == "Histogram" {
+        let (status, body) = get_json(&app, &format!("{base}&agg=quantile&q=0.5,0.95,0.99")).await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    let (status, body) = get_json(
+        &app,
+        &format!("/api/metrics/exemplars?from={from}&to={now}&metric={}&limit=5", urlenc(&name)),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = get_json(&app, &format!("{base}&agg=bogus")).await;
     assert_eq!(status, 400, "{body}");
 }
 

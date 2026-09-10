@@ -26,13 +26,18 @@ interface Props {
   stale?: boolean
   /** 拖一段时间 → 缩小范围 */
   onBrush?: (fromMs: number, toMs: number) => void
+  /** 别的图上鼠标停在哪个时刻：画一条同位置的竖线（同一块看板的图共用一根十字线） */
+  syncTs?: number | null
+  onHoverTs?: (tMs: number | null) => void
+  /** 数值怎么显示（指标页要带单位）。不给就是纯数字 */
+  format?: (v: number) => string
   className?: string
 }
 
 const M = { left: 48, right: 8, top: 8, bottom: 22 }
 
 /** 按时间分桶的堆叠柱状图：日志直方图、请求量 / 错误数都用它。 */
-export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, className }: Props) {
+export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, syncTs, onHoverTs, format = formatCompact, className }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; bucket: BarBucket } | null>(null)
   const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
@@ -57,6 +62,7 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
     const idx = Math.floor((tOf(x) - fromMs) / widthMs)
     const bucket = buckets.find((b) => Math.floor((b.t_ms - fromMs) / widthMs) === idx)
     setHover(bucket ? { x, y, bucket } : null)
+    onHoverTs?.(bucket ? bucket.t_ms : null)
   }
   const onDown = (e: PointerEvent<SVGSVGElement>) => {
     if (!onBrush) return
@@ -87,6 +93,7 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
           onPointerLeave={() => {
             setHover(null)
             if (brush) setBrush(null)
+            onHoverTs?.(null)
           }}
           onPointerDown={onDown}
           onPointerUp={onUp}
@@ -95,7 +102,7 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
             <g key={v}>
               <line x1={M.left} x2={M.left + W} y1={yOf(v)} y2={yOf(v)} stroke="var(--grid)" strokeWidth={1} />
               <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={11} fill="var(--muted-fg)" className="tabular-nums">
-                {formatCompact(v)}
+                {format(v)}
               </text>
             </g>
           ))}
@@ -133,6 +140,17 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
               </g>
             )
           })}
+          {syncTs != null && !hover && (
+            <line
+              x1={xOf(syncTs) + slot / 2}
+              x2={xOf(syncTs) + slot / 2}
+              y1={M.top}
+              y2={M.top + H}
+              stroke="var(--muted-fg)"
+              strokeWidth={1}
+              opacity={0.35}
+            />
+          )}
           {brush && (
             <rect
               x={Math.min(brush.x0, brush.x1)}
@@ -153,10 +171,10 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
           width={width}
           title={`${formatTs(hover.bucket.t_ms, { ms: false })} 起 ${widthMs >= 60_000 ? `${Math.round(widthMs / 60_000)} 分钟` : `${Math.round(widthMs / 1000)} 秒`}`}
           rows={[
-            { label: '合计', value: formatCompact(series.reduce((s, k) => s + (hover.bucket.values[k.key] ?? 0), 0)) },
+            { label: '合计', value: format(series.reduce((s, k) => s + (hover.bucket.values[k.key] ?? 0), 0)) },
             ...series
               .filter((s) => (hover.bucket.values[s.key] ?? 0) > 0)
-              .map((s) => ({ color: s.color, label: s.label, value: formatCompact(hover.bucket.values[s.key] ?? 0) })),
+              .map((s) => ({ color: s.color, label: s.label, value: format(hover.bucket.values[s.key] ?? 0) })),
           ]}
         />
       )}

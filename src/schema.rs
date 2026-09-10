@@ -1,7 +1,11 @@
 //! 表结构：启动时读 `system.columns`，之后定期刷新。
 //!
-//! 两张表的固定列是程序知道的；可选列（k8s 元数据 `namespace` / `pod` / `container` / `stream`，
+//! 三张表的固定列是程序知道的；可选列（k8s 元数据 `namespace` / `pod` / `container` / `stream`，
 //! 以及采集端配置里 `fields` 加的 `cluster` / `env` / `app`……）随部署不同而不同，只能从库里读。
+//! 指标表（metricpipe 的 `otel_metric`）是**可选**的：没部署 metricpipe 的地方这张表不存在，
+//! 那就把它当没有（[`Schema::metrics`] 为 `None`、前端不显示指标页），日志和链路照常——
+//! 少一张表不该让整个 schema 读失败。
+//!
 //! 读到的列名同时也是**白名单**：前端传上来的筛选列名不在这里面的一律拒绝，SQL 里只拼白名单
 //! 里的名字，这样动态列也不用走字符串拼接的险路。
 
@@ -103,6 +107,10 @@ impl Table {
 pub struct Schema {
     pub logs: Table,
     pub traces: Table,
+    /// 指标表，没部署 metricpipe 时为 `None`
+    pub metrics: Option<Table>,
+    /// 指标表没启用的原因（表不存在 / 缺列 / 属性列不是 JSON），给 `/api/meta` 显示
+    pub metrics_note: Option<String>,
     pub server_version: String,
     pub server_timezone: String,
     #[serde(skip)]
@@ -115,6 +123,7 @@ pub struct SchemaCache {
     database: String,
     log_table: String,
     trace_table: String,
+    metric_table: String,
     current: RwLock<Option<Arc<Schema>>>,
     /// 上次读失败的时刻：连不上库时每个请求都去读一次没意义，隔几秒再试。
     last_failure: Mutex<Option<(Instant, String)>>,
@@ -138,12 +147,19 @@ struct ServerRow {
 }
 
 impl SchemaCache {
-    pub fn new(client: Client, database: &str, log_table: &str, trace_table: &str) -> Self {
+    pub fn new(
+        client: Client,
+        database: &str,
+        log_table: &str,
+        trace_table: &str,
+        metric_table: &str,
+    ) -> Self {
         Self {
             client,
             database: database.to_owned(),
             log_table: log_table.to_owned(),
             trace_table: trace_table.to_owned(),
+            metric_table: metric_table.to_owned(),
             current: RwLock::new(None),
             last_failure: Mutex::new(None),
         }
@@ -194,12 +210,14 @@ impl SchemaCache {
             .rows::<ColumnRow>(
                 Query::new(
                     "SELECT table, name, type FROM system.columns \
-                     WHERE database = {db:String} AND table IN ({logs:String}, {traces:String}) \
+                     WHERE database = {db:String} \
+                       AND table IN ({logs:String}, {traces:String}, {metrics:String}) \
                      ORDER BY table, position",
                 )
                 .param("db", &self.database)
                 .param("logs", &self.log_table)
-                .param("traces", &self.trace_table),
+                .param("traces", &self.trace_table)
+                .param("metrics", &self.metric_table),
             )
             .await?
             .rows;
@@ -212,7 +230,7 @@ impl SchemaCache {
             .next()
             .ok_or_else(|| Error::internal("version() 没有返回结果"))?;
 
-        let table = |name: &str| -> Result<Table> {
+        let read = |name: &str| -> Option<Table> {
             let cols: Vec<Column> = columns
                 .iter()
                 .filter(|c| c.table == name)
@@ -222,16 +240,32 @@ impl SchemaCache {
                     kind: ColumnKind::classify(&c.ty),
                 })
                 .collect();
-            if cols.is_empty() {
-                return Err(Error::Internal(format!(
+            (!cols.is_empty()).then(|| Table { name: name.to_owned(), columns: cols })
+        };
+        let table = |name: &str| -> Result<Table> {
+            read(name).ok_or_else(|| {
+                Error::Internal(format!(
                     "ClickHouse 里没有表 {}.{name}（或者没有读 system.columns 的权限）",
                     self.database
-                )));
-            }
-            Ok(Table { name: name.to_owned(), columns: cols })
+                ))
+            })
         };
         let logs = table(&self.log_table)?;
         let traces = table(&self.trace_table)?;
+        // 指标表可选：不存在、缺列、属性列不是 JSON，都只是「没有指标页」，不影响另外两张表
+        let (metrics, metrics_note) = match read(&self.metric_table) {
+            None => (
+                None,
+                Some(format!(
+                    "{}.{} 不存在（没部署 metricpipe 的话本来就没有这张表）",
+                    self.database, self.metric_table
+                )),
+            ),
+            Some(t) => match metric_table_problem(&t, &self.database) {
+                Some(note) => (None, Some(note)),
+                None => (Some(t), None),
+            },
+        };
 
         let missing_logs = logs.missing(LOG_FIXED_COLUMNS);
         if !missing_logs.is_empty() {
@@ -271,6 +305,8 @@ impl SchemaCache {
         Ok(Schema {
             logs,
             traces,
+            metrics,
+            metrics_note,
             server_version: server.version,
             server_timezone: server.timezone,
             loaded_at: Instant::now(),
@@ -289,6 +325,7 @@ impl SchemaCache {
                     Ok(s) => tracing::debug!(
                         log_columns = s.logs.columns.len(),
                         trace_columns = s.traces.columns.len(),
+                        metric_columns = s.metrics.as_ref().map_or(0, |t| t.columns.len()),
                         "schema refreshed"
                     ),
                     Err(e) => {
@@ -307,6 +344,28 @@ pub const ATTRIBUTE_COLUMNS: &[(&str, bool)] = &[
     ("events.attributes", true),
     ("links.attributes", true),
 ];
+
+/// 指标表不能用的原因，`None` = 能用。缺列 / 属性列不是 JSON 都只是禁用指标页。
+fn metric_table_problem(table: &Table, database: &str) -> Option<String> {
+    let missing = table.missing(METRIC_FIXED_COLUMNS);
+    if !missing.is_empty() {
+        return Some(format!(
+            "{database}.{} 缺列: {}（这些是 metricpipe 固定会写的列），指标页已停用",
+            table.name,
+            missing.join(", ")
+        ));
+    }
+    for name in ["resource_attributes", "attributes"] {
+        let col = table.column(name)?;
+        if col.kind != ColumnKind::Json {
+            return Some(format!(
+                "{database}.{} 的 {name} 列是 {}，opdash 只支持 JSON 属性列（ClickHouse 25.3+），指标页已停用",
+                table.name, col.ty
+            ));
+        }
+    }
+    None
+}
 
 /// logpipe 固定写的列（`LogEvent` 的字段）。
 pub const LOG_FIXED_COLUMNS: &[&str] =
@@ -338,9 +397,70 @@ pub const TRACE_FIXED_COLUMNS: &[&str] = &[
     "links.attributes",
 ];
 
+/// metricpipe 固定写的列（`MetricEvent` 的字段，exemplars / quantiles 按 Nested 平铺）。
+/// 五种指标类型共用一张表，用不上的列留默认值，所以每一列都是「一定在」的。
+pub const METRIC_FIXED_COLUMNS: &[&str] = &[
+    "timestamp",
+    "start_timestamp",
+    "metric_name",
+    "metric_type",
+    "metric_unit",
+    "metric_description",
+    "service_name",
+    "scope_name",
+    "scope_version",
+    "resource_attributes",
+    "attributes",
+    "value",
+    "temporality",
+    "is_monotonic",
+    "count",
+    "sum",
+    "min",
+    "max",
+    "bucket_counts",
+    "explicit_bounds",
+    "quantiles.quantile",
+    "quantiles.value",
+    "exemplars.timestamp",
+    "exemplars.value",
+    "exemplars.trace_id",
+    "exemplars.span_id",
+    "flags",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metric_table_must_be_complete_and_json() {
+        let cols = |extra: &[(&str, &str)]| -> Table {
+            let mut columns: Vec<Column> = METRIC_FIXED_COLUMNS
+                .iter()
+                .map(|n| Column {
+                    name: (*n).to_owned(),
+                    ty: "String".into(),
+                    kind: ColumnKind::String,
+                })
+                .collect();
+            for (name, ty) in extra {
+                if let Some(c) = columns.iter_mut().find(|c| &c.name == name) {
+                    c.ty = (*ty).to_owned();
+                    c.kind = ColumnKind::classify(ty);
+                }
+            }
+            Table { name: "otel_metric".into(), columns }
+        };
+        let json = [("resource_attributes", "JSON"), ("attributes", "JSON")];
+        assert_eq!(metric_table_problem(&cols(&json), "logs"), None);
+        // 属性列还是老的 Map：停用而不是报错
+        let stale = cols(&[("resource_attributes", "JSON"), ("attributes", "Map(String, String)")]);
+        assert!(metric_table_problem(&stale, "logs").unwrap().contains("attributes"));
+        let mut short = cols(&json);
+        short.columns.retain(|c| c.name != "explicit_bounds");
+        assert!(metric_table_problem(&short, "logs").unwrap().contains("explicit_bounds"));
+    }
 
     #[test]
     fn classifies_types() {
