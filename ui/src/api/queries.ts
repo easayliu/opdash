@@ -12,6 +12,7 @@ import type {
   LogSearchResponse,
   Meta,
   MetricCatalogResponse,
+  MetricEventsResponse,
   MetricExemplarsResponse,
   MetricNamesResponse,
   MetricQueryResponse,
@@ -270,6 +271,18 @@ export function useMetricExemplars(params: Params, enabled = true) {
   return useQuery({
     queryKey: ['metrics', 'exemplars', params],
     queryFn: ({ signal }) => apiGet<MetricExemplarsResponse>('/metrics/exemplars', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    retry: false,
+    enabled,
+  })
+}
+
+/** 进程重启 / pod 启动的时刻。旁路数据，失败不打扰 */
+export function useMetricEvents(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['metrics', 'events', params],
+    queryFn: ({ signal }) => apiGet<MetricEventsResponse>('/metrics/events', params, signal),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
     retry: false,

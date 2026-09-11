@@ -267,6 +267,12 @@ async fn every_endpoint_answers() {
     }
     let (status, body) = get_json(&app, &format!("/api/services?from={from}&to={now}")).await;
     assert_eq!(status, 200, "{body}");
+    // 总览带上一周期对比和迷你趋势
+    assert!(body["prev_from_ms"].as_i64().unwrap() < body["from_ms"].as_i64().unwrap());
+    if let Some(first) = body["services"].as_array().and_then(|a| a.first()) {
+        assert!(first["spark"]["requests"].is_array(), "{first}");
+        assert!(first.get("prev").is_some(), "{first}");
+    }
     // 不选服务、范围超过 6 小时 → 400
     let (status, body) =
         get_json(&app, &format!("/api/traces/search?from={}&to={now}", now - 7 * 3_600_000)).await;
@@ -375,6 +381,22 @@ async fn metric_endpoints_answer() {
 
     let (status, body) = get_json(&app, &format!("{base}&agg=bogus")).await;
     assert_eq!(status, 400, "{body}");
+
+    // 重启 / pod 启动：窗口函数 + resource 属性子列，假库验不了
+    let (status, body) = get_json(
+        &app,
+        &format!(
+            "/api/metrics/events?from={}&to={now}&metric={}",
+            now - 24 * 3_600_000,
+            urlenc(&name)
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["events"].is_array(), "{body}");
+    for e in body["events"].as_array().unwrap() {
+        assert!(matches!(e["kind"].as_str(), Some("restart" | "start")), "{e}");
+    }
 }
 
 fn urlenc(s: &str) -> String {

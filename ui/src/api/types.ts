@@ -222,6 +222,14 @@ export interface KeysResponse {
   stats: Stats
 }
 
+export interface PrevStat {
+  requests: number
+  errors: number
+  error_rate: number
+  rps: number
+  p95_ms: number
+}
+
 export interface ServiceStat {
   service: string
   requests: number
@@ -232,11 +240,20 @@ export interface ServiceStat {
   p95_ms: number
   p99_ms: number
   max_ms: number
+  /** 上一个同样长的时间窗；那段时间没这个服务就是 null */
+  prev: PrevStat | null
+  /** 迷你趋势，桶宽见 OverviewResponse.spark_width_ms；prev_requests 是对比窗口同一格的，画成灰影 */
+  spark: { requests: number[]; errors: number[]; prev_requests: number[] }
 }
 
 export interface OverviewResponse {
   from_ms: number
   to_ms: number
+  /** 对比窗口怎么取：prev 上一段 / day 昨天同时段 / week 上周同时段 */
+  compare: 'prev' | 'day' | 'week'
+  prev_from_ms: number
+  prev_to_ms: number
+  spark_width_ms: number
   services: ServiceStat[]
   stats: Stats
 }
@@ -350,5 +367,21 @@ export interface MetricExemplar {
 export interface MetricExemplarsResponse {
   metric: string
   exemplars: MetricExemplar[]
+  stats: Stats
+}
+
+/** 进程重启 / pod 启动，标在图上 */
+export interface MetricEvent {
+  t_ms: number
+  /** restart = 累积 counter 掉回去了（原地重启）；start = pod 在窗口里第一次出现（新起 / 发布） */
+  kind: 'restart' | 'start'
+  pod: string
+  /** 全站批量查时按这个分到服务上 */
+  service: string
+}
+
+export interface MetricEventsResponse {
+  metric: string
+  events: MetricEvent[]
   stats: Stats
 }

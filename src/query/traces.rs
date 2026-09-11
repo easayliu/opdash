@@ -775,6 +775,36 @@ impl TraceQueries<'_> {
         Ok(Self::finish(b, sql))
     }
 
+    /// 服务总览卡片上的迷你趋势：所有服务一起，按桶数请求量和错误数。一条查询出全部服务，
+    /// 比每张卡各查一次省得多；桶数少（几十个），行数 = 服务数 × 桶数，很小。
+    pub fn service_sparklines(
+        &self,
+        range: &TimeRange,
+        dims: &[(String, Vec<String>)],
+        bucket: &Bucket,
+    ) -> Result<Query> {
+        let mut b = Bindings::new();
+        let time = b.time_predicate("timestamp", range);
+        let kinds = b.bind("Array(String)", ENTRY_KINDS);
+        let mut where_sql = format!("{time}\n  AND span_kind IN {kinds}");
+        for (column, values) in dims {
+            where_sql.push_str(&format!(
+                "\n  AND {} IN {}",
+                quote_ident(column)?,
+                b.bind("Array(String)", values)
+            ));
+        }
+        let origin = b.bind("Int64", bucket.origin_ms);
+        let width = b.bind("Int64", bucket.width_ms);
+        let sql = format!(
+            "SELECT service_name, intDiv(toUnixTimestamp64Milli(timestamp) - {origin}, {width}) AS bucket,\n  \
+             count() AS requests, countIf(status_code = 'Error') AS errors\n\
+             FROM {from}\nWHERE {where_sql}\nGROUP BY service_name, bucket\nORDER BY service_name, bucket",
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
     /// 某个服务按 span_name（接口 / 下游调用）的指标。`kinds` 决定看入口还是对外调用。
     pub fn operations(&self, range: &TimeRange, service: &str, kinds: &[&str]) -> Result<Query> {
         let mut b = Bindings::new();
@@ -879,6 +909,17 @@ fn attr_column(raw: &str) -> Result<&'static str> {
         "resource" | "resource_attributes" => Ok("resource_attributes"),
         other => Err(Error::bad_request(format!("scope 只能是 span 或 resource，不是 {other:?}"))),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SparkRow {
+    pub service_name: String,
+    #[serde(deserialize_with = "num::de")]
+    pub bucket: i64,
+    #[serde(deserialize_with = "num::de")]
+    pub requests: u64,
+    #[serde(deserialize_with = "num::de")]
+    pub errors: u64,
 }
 
 #[derive(Debug, Deserialize)]

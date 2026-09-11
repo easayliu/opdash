@@ -27,10 +27,12 @@ export interface PanelVariant {
   percent?: boolean
   /**
    * 画成什么。`bars` = 堆叠柱（Cloudflare 控制台的流量图就是这样，服务详情页的
-   * 「请求量与错误」也是），计数 / 速率类用它，按状态码、按接口堆起来一眼看得出构成；
-   * 不给就是折线，水位（gauge）和分位数用。
+   * 「请求量与错误」也是），计数 / 速率类用它，按状态码堆起来一眼看得出构成；
+   * `top` = Top N 表格：按某个标签分组、每行一根占比条，**点一行就把整页按它过滤**——
+   * 十几个接口 / topic / 目标地址用表比十二色堆叠柱好读得多，也是 CF 分析页的做法
+   * （图在上、Top 表在下、点表过滤）；不给就是折线，水位（gauge）和分位数用。
    */
-  kind?: 'bars' | 'line'
+  kind?: 'bars' | 'line' | 'top'
 }
 
 export interface PanelSpec {
@@ -77,11 +79,12 @@ const HTTP_SERVER: SectionSpec = {
     },
     {
       key: 'http_route_rate',
-      title: '按接口的请求量',
+      title: 'Top 接口（请求量）',
+      hint: '点一行，整页只看这个接口',
       variants: [
-        { metric: 'http.server.request.duration', agg: 'rate', field: 'count', by: ['http.route'], kind: 'bars' },
-        { metric: 'http.server.duration', agg: 'rate', field: 'count', by: ['http.route'], kind: 'bars' },
-        { metric: 'duration', agg: 'rate', field: 'count', by: ['span.name'], attr: ['span.kind=SPAN_KIND_SERVER'], kind: 'bars' },
+        { metric: 'http.server.request.duration', agg: 'rate', field: 'count', by: ['http.route'], kind: 'top' },
+        { metric: 'http.server.duration', agg: 'rate', field: 'count', by: ['http.route'], kind: 'top' },
+        { metric: 'duration', agg: 'rate', field: 'count', by: ['span.name'], attr: ['span.kind=SPAN_KIND_SERVER'], kind: 'top' },
       ],
     },
     {
@@ -109,9 +112,10 @@ const HTTP_CLIENT: SectionSpec = {
   panels: [
     {
       key: 'http_client_rate',
-      title: '调用量（按目标）',
+      title: 'Top 下游（调用量）',
+      hint: '点一行，整页只看打给这个地址的调用',
       variants: [
-        { metric: 'http.client.request.duration', agg: 'rate', field: 'count', by: ['server.address'], kind: 'bars' },
+        { metric: 'http.client.request.duration', agg: 'rate', field: 'count', by: ['server.address'], kind: 'top' },
         { metric: 'http.client.duration', agg: 'rate', field: 'count', kind: 'bars' },
         { metric: 'http.client.request_count', agg: 'rate', kind: 'bars' },
       ],
@@ -224,8 +228,9 @@ const KAFKA: SectionSpec = {
     },
     {
       key: 'kafka_consume',
-      title: '消费速率（按 topic）',
-      variants: [{ metric: 'kafka.consumer.records_consumed_rate', agg: 'avg', by: ['topic'] }],
+      title: 'Top topic（消费速率）',
+      hint: '点一行，整页只看这个 topic',
+      variants: [{ metric: 'kafka.consumer.records_consumed_rate', agg: 'avg', by: ['topic'], kind: 'top' }],
     },
     {
       key: 'kafka_fetch',
