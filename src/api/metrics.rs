@@ -16,8 +16,8 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::metrics::{
-    Agg, CatalogRow, ExemplarRow, Field, GroupKey, HistogramRow, MAX_SERIES, MetricFilter,
-    MetricQueries, NameCountRow, SeriesRow, quantile_from_histogram,
+    Agg, CatalogRow, EventRow, ExemplarRow, Field, GroupKey, HistogramRow, MAX_SERIES,
+    MetricFilter, MetricQueries, NameCountRow, SeriesRow, quantile_from_histogram,
 };
 use crate::query::traces::AttrFilter;
 use crate::query::{Bucket, TimeRange, parse_tz};
@@ -42,7 +42,13 @@ pub fn routes() -> Router<AppState> {
         .route("/api/metrics/label_values", get(label_values))
         .route("/api/metrics/query", get(query))
         .route("/api/metrics/exemplars", get(exemplars))
+        .route("/api/metrics/events", get(events))
 }
+
+/// pod 启动的判定边距：首个样本比窗口起点晚这么多才算「新起的」，窗口一开始就在的老 pod
+/// 首个样本会贴着起点。两分钟 > 任何合理的上报周期。
+const START_MARGIN_MS: i64 = 2 * 60_000;
+const MAX_EVENTS: u32 = 200;
 
 /// 指标表在不在。不在就把原因原样告诉前端（表不存在 / 缺列 / 属性列不是 JSON）。
 async fn metrics_table(state: &AppState) -> Result<std::sync::Arc<crate::schema::Schema>> {
@@ -499,4 +505,51 @@ mod tests {
         assert_eq!(series[0].name, "service_name=b");
         assert_eq!(series[1].name, "service_name=c");
     }
+}
+
+#[derive(Serialize)]
+pub struct Event {
+    pub t_ms: i64,
+    /// `restart` = 累积 counter 掉回去了（原地重启）；`start` = 这个 pod 在窗口里第一次出现（新起 / 发布）
+    pub kind: &'static str,
+    pub pod: String,
+    /// 不带 `service` 参数查全站时靠这个分到各个服务上
+    pub service: String,
+}
+
+#[derive(Serialize)]
+pub struct EventsResponse {
+    pub metric: String,
+    pub events: Vec<Event>,
+    pub stats: Stats,
+}
+
+/// 进程重启 / pod 启动的时刻，标在这个服务所有图上；不带 `service` 就是全站的，服务总览页用。「14:02 延迟尖峰」和「14:01 重启」
+/// 一眼对上，省掉排查里最常见的一步。`metric` 要给一个累积 counter（前端从目录里挑，
+/// `jvm.cpu.time` 最合适）；`field` 默认 `value`，直方图给 `count`。
+async fn events(State(state): State<AppState>, p: Params) -> Result<Json<EventsResponse>> {
+    let schema = metrics_table(&state).await?;
+    let table = schema.metrics.as_ref().expect("metrics_table 已检查");
+    let f = filter(range(&state, &p)?, &p)?;
+    let field = Field::parse(p.get("field"))?;
+    let q = queries(&state, table);
+    let (restarts, starts) = tokio::try_join!(
+        state.client.rows::<EventRow>(q.restarts(&f, field, MAX_EVENTS)?),
+        state.client.rows::<EventRow>(q.pod_starts(&f, START_MARGIN_MS, MAX_EVENTS)?),
+    )?;
+    let mut stats = restarts.stats;
+    stats.absorb(&starts.stats);
+    let mut events: Vec<Event> = restarts
+        .rows
+        .into_iter()
+        .map(|r| Event { t_ms: r.t_ms, kind: "restart", pod: r.pod, service: r.service_name })
+        .chain(starts.rows.into_iter().map(|r| Event {
+            t_ms: r.t_ms,
+            kind: "start",
+            pod: r.pod,
+            service: r.service_name,
+        }))
+        .collect();
+    events.sort_by_key(|e| e.t_ms);
+    Ok(Json(EventsResponse { metric: f.metric, events, stats }))
 }

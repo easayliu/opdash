@@ -2,15 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { PlusIcon, SearchIcon, XIcon } from 'lucide-react'
 import type { Params } from '@/api/client'
-import { useMeta, useMetricCatalog, useMetricExemplars, useMetricLabelValues, useMetricLabels, useMetricQuery } from '@/api/queries'
+import { useMeta, useMetricCatalog, useMetricEvents, useMetricExemplars, useMetricLabelValues, useMetricLabels, useMetricQuery } from '@/api/queries'
 import type { MetricAgg, MetricField, MetricInfo, MetricQueryResponse } from '@/api/types'
-import { LineChart, type ChartMarker, type LineSeries } from '@/components/charts/LineChart'
+import { LineChart, type ChartEvent, type ChartMarker, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
 import { Badge, Button, Card, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
-import { ColorAssigner } from '@/lib/colors'
+import { ColorAssigner, SERIES_SLOTS } from '@/lib/colors'
 import { coveredMetricNames, isErrorLabel, resolveDashboard, type ResolvedPanel } from '@/lib/dashboards'
-import { logsHref, serviceHref, traceHref, tracesHref } from '@/lib/links'
+import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
+import { logsHref, msFactor, seriesContext, serviceHref, traceHref, tracesHref } from '@/lib/links'
 import { formatBytes, formatDuration, formatDurationMs, formatTs } from '@/lib/time'
 import { useInView } from '@/lib/in-view'
 import { useIsMobile } from '@/lib/media'
@@ -222,15 +223,59 @@ export function MetricsPage() {
  * 拿到的就是这个服务真的在报的那些指标名，据此决定显示哪些面板——没有的东西不占地方。
  */
 function MetricDashboard({ service, rangeParams, allServices }: { service: string; rangeParams: Params; allServices: string[] }) {
-  const { params, set } = useUrlState()
+  const { params, set, setParams } = useUrlState()
   const { setRange } = useTimeRange()
   const step = params.get('step') ?? ''
+  // 整页的标签过滤：点 Top 表里的一行加上，所有图（连顶上的数字）一起按它重查。
+  // 和「全部指标」共用 URL 里的 attr，切页签时条件不丢
+  const pageAttrs = params.getAll('attr')
+  const setAttrs = useCallback(
+    (next: string[]) =>
+      setParams((prev) => {
+        const p = new URLSearchParams(prev)
+        p.delete('attr')
+        for (const a of next) p.append('attr', a)
+        return p
+      }),
+    [setParams],
+  )
+  const addFilter = (item: string) => {
+    if (!pageAttrs.includes(item)) setAttrs([...pageAttrs, item])
+  }
   // 一块看板上所有图共用一根十字线：鼠标停在某个时刻，二十张图一起在同一时刻画竖线，
   // 「GC 那一下和延迟尖峰是不是同一时刻」这种问题不用来回对 x 轴
   const [hoverTs, setHoverTs] = useState<number | null>(null)
   const catalog = useMetricCatalog({ ...rangeParams, service }, !!service)
   const metrics = useMemo(() => catalog.data?.metrics ?? [], [catalog.data])
   const sections = useMemo(() => resolveDashboard(metrics), [metrics])
+  // 重启 / 发布标记：要一个累积 counter 来看「掉回去」。jvm.cpu.time 每个进程一条线、没标签，
+  // 最干净；没有的话退到别的 counter（直方图用 count 列）
+  const eventSource = useMemo(() => {
+    const names = new Set(metrics.map((m) => m.name))
+    for (const [metric, field] of [
+      ['jvm.cpu.time', 'value'],
+      ['process.runtime.go.gc.count', 'value'],
+      ['jvm.class.loaded', 'value'],
+      ['http.server.request.duration', 'count'],
+      ['http.server.duration', 'count'],
+      ['calls', 'value'],
+    ] as const) {
+      if (names.has(metric)) return { metric, field }
+    }
+    return null
+  }, [metrics])
+  const eventsQ = useMetricEvents(
+    { ...rangeParams, service, metric: eventSource?.metric, field: eventSource?.field },
+    !!service && !!eventSource,
+  )
+  const events: ChartEvent[] = useMemo(
+    () =>
+      (eventsQ.data?.events ?? []).map((e) => ({
+        t_ms: e.t_ms,
+        label: `${formatTs(e.t_ms, { ms: false })} ${e.kind === 'restart' ? '进程重启' : 'pod 启动'}${e.pod ? ` · ${e.pod}` : ''}`,
+      })),
+    [eventsQ.data],
+  )
   const uncovered = useMemo(() => {
     const covered = coveredMetricNames()
     return metrics.filter((m) => !covered.has(m.name)).length
@@ -270,11 +315,49 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto p-3 md:p-4">
-      <CrossLinks service={service} rangeParams={rangeParams} />
-      <Overview service={service} rangeParams={rangeParams} sections={sections} step={step} />
+    <div className="min-h-0 flex-1 overflow-auto p-3 pt-0 md:p-4 md:pt-0">
+      <SectionNav sections={sections} />
+      <CrossLinks service={service} rangeParams={rangeParams} attrs={pageAttrs} />
+      {pageAttrs.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="text-2xs text-muted-fg">整页只看</span>
+          {pageAttrs.map((a) => (
+            <span key={a} className="mono inline-flex h-7 items-center gap-1.5 rounded-md bg-accent-soft px-2 text-xs text-accent">
+              {a}
+              <button type="button" onClick={() => setAttrs(pageAttrs.filter((x) => x !== a))} title="去掉这个条件">
+                <XIcon className="size-3.5" />
+              </button>
+            </span>
+          ))}
+          <button type="button" className="text-2xs text-muted-fg hover:text-fg" onClick={() => setAttrs([])}>
+            清空
+          </button>
+        </div>
+      )}
+      {events.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block h-3 w-0 border-l border-dashed border-warn" />
+            这段时间
+            {eventsQ.data!.events.filter((e) => e.kind === 'restart').length > 0 && (
+              <b className="font-semibold text-warn">{eventsQ.data!.events.filter((e) => e.kind === 'restart').length} 次进程重启</b>
+            )}
+            {eventsQ.data!.events.filter((e) => e.kind === 'start').length > 0 && (
+              <b className="font-semibold text-fg">{eventsQ.data!.events.filter((e) => e.kind === 'start').length} 个 pod 新起</b>
+            )}
+            ，图上的虚线就是那一刻
+          </span>
+          {eventsQ.data!.events.slice(0, 6).map((e) => (
+            <span key={`${e.kind}${e.t_ms}${e.pod}`} className="mono" title={e.pod}>
+              {formatTs(e.t_ms, { ms: false, date: false })} {e.kind === 'restart' ? '重启' : '新起'} {e.pod.replace(/^.*?-(?=[0-9a-f]{6,}-)/, '…-')}
+            </span>
+          ))}
+          {eventsQ.data!.events.length > 6 && <span>还有 {eventsQ.data!.events.length - 6} 次</span>}
+        </div>
+      )}
+      <Overview service={service} rangeParams={rangeParams} sections={sections} step={step} pageAttrs={pageAttrs} />
       {sections.map((section) => (
-        <section key={section.key} className="mb-5 border-t border-border pt-3 last:mb-0">
+        <section key={section.key} id={`sec-${section.key}`} data-section className="mb-5 scroll-mt-12 border-t border-border pt-3 last:mb-0">
           <h2 className="mb-2.5 flex items-baseline gap-2 text-sm font-semibold">
             {section.title}
             {section.hint && <span className="text-2xs font-normal text-muted-fg">{section.hint}</span>}
@@ -293,6 +376,9 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
                 hoverTs={hoverTs}
                 onHoverTs={setHoverTs}
                 onBrush={(f, t) => setRange({ fromMs: Math.round(f), toMs: Math.round(t), relative: null })}
+                pageAttrs={pageAttrs}
+                onFilter={addFilter}
+                events={events}
               />
             ))}
           </div>
@@ -315,20 +401,23 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
  * 从指标跳到另外两个信号。带的是**当前这个时间窗**（在图上拖选之后就是拖出来的那一段），
  * 三个页面共用一套 `from` / `to` 参数，跳过去看到的就是同一段时间。
  */
-function CrossLinks({ service, rangeParams }: { service: string; rangeParams: Params }) {
+function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; rangeParams: Params; attrs?: string[] }) {
   const meta = useMeta()
   // 日志表上服务这一维叫什么，按 /api/meta 给的维度列来（老表没有 service_name 就退回 container）
   const logDim = meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container'
   const win = { fromMs: Number(rangeParams.from), toMs: Number(rangeParams.to) }
   const links: { to: string; label: string; title: string }[] = [
-    { to: tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win), label: '最慢的链路', title: '这段时间里这个服务最慢的请求' },
-    { to: tracesHref({ service, errorOnly: true }, win), label: '出错的链路', title: '这段时间里出错的请求' },
+    { to: tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer', attrs }, win), label: '最慢的链路', title: '这段时间里这个服务最慢的请求' },
+    { to: tracesHref({ service, errorOnly: true, attrs }, win), label: '出错的链路', title: '这段时间里出错的请求' },
     { to: logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win), label: '错误日志', title: '这段时间这个服务的 ERROR / WARN 日志' },
     { to: serviceHref(service, win), label: '服务概览', title: '按链路算出来的请求量 / 错误率 / 分位数' },
   ]
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2">
-      <span className="text-2xs text-muted-fg">在图上横向拖一段可以缩小时间范围，然后跳到</span>
+      <span className="text-2xs text-muted-fg">
+        图上<b className="font-semibold text-fg">点一个点</b>能带着那一格的时间和那条线的标签跳过去；
+        横向拖一段是缩小时间范围。整段跳：
+      </span>
       {links.map((l) => (
         <Link key={l.label} to={l.to} title={l.title}>
           <Button size="xs">{l.label}</Button>
@@ -338,26 +427,66 @@ function CrossLinks({ service, rangeParams }: { service: string; rangeParams: Pa
   )
 }
 
+/**
+ * 分区目录：二十张图要滚很久，顶上粘一条细目录，当前滚到哪一节高亮，点了直接滚过去
+ * （Cloudflare 每个产品页左侧的粘性子导航，这里横过来放）。
+ */
+function SectionNav({ sections }: { sections: ReturnType<typeof resolveDashboard> }) {
+  const [active, setActive] = useState<string | null>(null)
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return
+    const els = sections.map((s) => document.getElementById(`sec-${s.key}`)).filter((e): e is HTMLElement => !!e)
+    // 谁的顶部离视口上沿最近、且在视口里，就算当前分区
+    const io = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
+        if (visible[0]) setActive(visible[0].target.id.replace(/^sec-/, ''))
+      },
+      { rootMargin: '-56px 0px -60% 0px' },
+    )
+    els.forEach((e) => io.observe(e))
+    return () => io.disconnect()
+  }, [sections])
+  if (sections.length < 2) return <div className="h-3 md:h-4" />
+  return (
+    <nav className="sticky top-0 z-10 -mx-3 mb-3 flex gap-1 overflow-x-auto border-b border-border bg-bg px-3 py-2 md:-mx-4 md:px-4">
+      {sections.map((s) => (
+        <button
+          key={s.key}
+          type="button"
+          onClick={() => document.getElementById(`sec-${s.key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+          className={cn(
+            'shrink-0 rounded-md px-2.5 py-1 text-xs text-muted-fg hover:bg-muted hover:text-fg',
+            (active ?? sections[0].key) === s.key && 'bg-accent-soft text-accent',
+          )}
+        >
+          {s.title}
+          <span className="ml-1 text-2xs opacity-70">{s.panels.length}</span>
+        </button>
+      ))}
+    </nav>
+  )
+}
+
 /** 顶部三个数：请求量、错误率、P95。用的是下面 HTTP 面板同一条查询，不额外发请求。 */
 function Overview({
   service,
   rangeParams,
   sections,
   step,
+  pageAttrs,
 }: {
   service: string
   rangeParams: Params
   sections: ReturnType<typeof resolveDashboard>
   step: string
+  pageAttrs: string[]
 }) {
   const http = sections.find((s) => s.key === 'http_server')
   const ratePanel = http?.panels.find((p) => p.key === 'http_server_rate')
   const latencyPanel = http?.panels.find((p) => p.key === 'http_server_latency')
-  const rate = useMetricQuery(
-    panelParams(ratePanel, rangeParams, service, step),
-    !!ratePanel,
-  )
-  const latency = useMetricQuery(panelParams(latencyPanel, rangeParams, service, step), !!latencyPanel)
+  const rate = useMetricQuery(panelParams(ratePanel, rangeParams, service, step, pageAttrs), !!ratePanel)
+  const latency = useMetricQuery(panelParams(latencyPanel, rangeParams, service, step, pageAttrs), !!latencyPanel)
   if (!ratePanel && !latencyPanel) return null
 
   // 每条时间线在窗口内的平均值就是它的平均速率，各条加起来是总量
@@ -375,7 +504,7 @@ function Overview({
         <Stat
           label="错误率"
           value={total > 0 ? `${(100 * (errors / total)).toFixed(2)}%` : '-'}
-          tone={total > 0 && errors / total >= 0.01 ? 'danger' : undefined}
+          tone={total > 0 && errors / total >= ERROR_RATE_BAD ? 'danger' : total > 0 && errors / total >= ERROR_RATE_WARN ? 'warn' : undefined}
           loading={rate.isPending}
         />
       )}
@@ -385,26 +514,36 @@ function Overview({
   )
 }
 
-function Stat({ label, value, tone, loading }: { label: string; value: string; tone?: 'danger'; loading?: boolean }) {
+function Stat({ label, value, tone, loading }: { label: string; value: string; tone?: 'danger' | 'warn'; loading?: boolean }) {
   return (
-    <div className="rounded-lg border border-border bg-card px-3.5 py-2.5">
+    <div className={cn('rounded-lg border bg-card px-3.5 py-2.5', tone === 'danger' ? 'border-danger/50' : tone === 'warn' ? 'border-warn/50' : 'border-border')}>
       <div className="truncate text-2xs text-muted-fg">{label}</div>
-      <div className={cn('truncate text-xl font-semibold tabular-nums', tone === 'danger' && 'text-danger')}>
+      <div className={cn('truncate text-xl font-semibold tabular-nums', tone === 'danger' && 'text-danger', tone === 'warn' && 'text-warn')}>
         {loading ? <Spinner className="size-4" /> : value}
       </div>
     </div>
   )
 }
 
-function panelParams(panel: ResolvedPanel | undefined, rangeParams: Params, service: string, step: string): Params {
+function panelParams(
+  panel: ResolvedPanel | undefined,
+  rangeParams: Params,
+  service: string,
+  step: string,
+  /** 整页的标签过滤（点 Top 表加上的），每张图都带 */
+  pageAttrs: string[] = [],
+): Params {
   if (!panel) return {}
   const v = panel.variant
   return queryParams(rangeParams, v.metric, [service], v.agg, v.field ?? 'value', {
     by: v.by,
-    attr: v.attr,
+    attr: [...(v.attr ?? []), ...pageAttrs],
     q: v.q,
     step,
-    limit: 12,
+    // 调色板只有 8 个能分辨的颜色。堆叠柱可以多要几条，尾巴折成「其它」还是诚实的
+    // （见 useChartData）；折线不行——几条延迟曲线加起来没有意义，所以干脆只要前 8 条，
+    // 多出来的在图例里说一声，要全看去「全部指标」
+    limit: v.kind === 'top' ? 10 : v.kind === 'bars' ? 12 : SERIES_SLOTS,
   })
 }
 
@@ -417,6 +556,9 @@ function DashboardPanel({
   hoverTs,
   onHoverTs,
   onBrush,
+  pageAttrs = [],
+  onFilter,
+  events,
 }: {
   panel: ResolvedPanel
   service: string
@@ -428,15 +570,27 @@ function DashboardPanel({
   hoverTs?: number | null
   onHoverTs?: (t: number | null) => void
   onBrush?: (fromMs: number, toMs: number) => void
+  /** 整页的标签过滤 */
+  pageAttrs?: string[]
+  /** Top 表点一行 → 加一条整页过滤 */
+  onFilter?: (item: string) => void
+  /** 重启 / 发布，标成虚线 */
+  events?: ChartEvent[]
 }) {
   const { set } = useUrlState()
   const isMobile = useIsMobile()
   const v = panel.variant
   // 滚进视口才查，见 useInView
   const [ref, inView] = useInView<HTMLDivElement>()
-  const data = useMetricQuery(panelParams(panel, rangeParams, service, step), inView)
+  const data = useMetricQuery(panelParams(panel, rangeParams, service, step, pageAttrs), inView)
   const format = valueFormatter(panel.info, v.agg, v.field ?? 'value', v.percent)
-  const { series, points, lastValues, sparse, hasPoints } = useChartData(data.data, v.percent)
+  const { rows, series, points, lastValues, sparse, hasPoints } = useChartData(data.data, {
+    percent: v.percent,
+    // 堆叠柱才折尾巴：把几条延迟曲线加起来没有意义
+    fold: v.kind === 'bars',
+  })
+  // 点图上的某个点 → 弹一个小层，把「这一个桶 + 这一条线」翻译成链路 / 日志的筛选条件
+  const [drill, setDrill] = useState<{ tMs: number; seriesKey?: string; x: number; y: number } | null>(null)
   // 点图例可以把某条线摘掉：按接口分组时十几条挤在一起，只想看其中一两条
   const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set())
   const shownSeries = series.filter((x) => !hidden.has(x.label))
@@ -484,8 +638,11 @@ function DashboardPanel({
         // 一条线都没有，或者有线但整段全是空洞（比如这段时间一次 GC 都没发生）
         <div className="px-4 py-8 text-center text-xs text-muted-fg">这段时间没有数据点</div>
       ) : (
-        <div className="flex flex-1 flex-col px-2 pt-2 pb-1">
-          {v.kind === 'bars' ? (
+        // relative：点选下钻的弹层按图上的坐标绝对定位
+        <div className="relative flex flex-1 flex-col px-2 pt-2 pb-1">
+          {v.kind === 'top' ? (
+            <TopTable rows={rows} colors={series} format={format} onPick={onFilter} filtered={pageAttrs} />
+          ) : v.kind === 'bars' ? (
             // 计数 / 速率画堆叠柱：按状态码、按接口堆起来，构成一眼看得出（和服务详情页一致）
             <StackedBars
               fromMs={data.data?.from_ms ?? Number(rangeParams.from)}
@@ -499,6 +656,8 @@ function DashboardPanel({
               syncTs={hoverTs}
               onHoverTs={onHoverTs}
               onBrush={onBrush}
+              onPointClick={setDrill}
+              events={events}
             />
           ) : (
             <LineChart
@@ -516,17 +675,35 @@ function DashboardPanel({
               syncTs={hoverTs}
               onHoverTs={onHoverTs}
               onBrush={onBrush}
+              onPointClick={setDrill}
+              events={events}
             />
           )}
+          {v.kind !== 'top' && (
           <PanelLegend
             series={series}
-            rows={data.data?.series ?? []}
+            rows={rows}
             values={lastValues}
             format={format}
             hidden={hidden}
             onToggle={toggle}
             bars={v.kind === 'bars'}
+            more={data.data?.truncated ? '时间线不止这些，只画了量最大的几条；点标题去「全部指标」里拆' : undefined}
           />
+          )}
+          {drill && data.data && (
+            <DrillPopover
+              at={drill}
+              data={data.data}
+              rows={rows}
+              info={panel.info}
+              agg={v.agg}
+              service={service}
+              format={format}
+              pageAttrs={pageAttrs}
+              onClose={() => setDrill(null)}
+            />
+          )}
         </div>
       )}
     </Card>
@@ -534,8 +711,176 @@ function DashboardPanel({
 }
 
 /**
- * 面板底下的小图例：名字 + 最后一个值。**高度固定两行**——同一排的卡片靠这个才对得齐，
- * 不然一张图例三行、旁边一行，两张卡片的图表底边就错开了。多出来的收成「+N」。
+ * Top N 表：每行一个标签值、它的量、占全部的比例条。**点一行 = 整页按它过滤**（加一个 chip），
+ * 已经在过滤条件里的那行标成选中。这是 Cloudflare 分析页的核心交互：图看趋势，表看构成，
+ * 点表收窄，所有图跟着变。
+ */
+function TopTable({
+  rows,
+  colors,
+  format,
+  onPick,
+  filtered,
+}: {
+  rows: MetricQueryResponse['series']
+  colors: LineSeries[]
+  format: (v: number) => string
+  onPick?: (item: string) => void
+  filtered: string[]
+}) {
+  // 用窗口内的平均值排，比「最后一个值」稳
+  const list = rows
+    .map((r, i) => ({ r, i, v: r.avg ?? 0 }))
+    .filter((x) => x.r.labels.length)
+    .sort((a, b) => b.v - a.v)
+  const total = list.reduce((n, x) => n + x.v, 0)
+  if (!list.length) return <div className="px-2 py-8 text-center text-xs text-muted-fg">这段时间没有数据点</div>
+  return (
+    <table className="w-full table-fixed border-collapse text-xs">
+      <tbody>
+        {list.map(({ r, i, v }) => {
+          const label = r.labels[0]
+          const item = `${label.key}=${label.value}`
+          const active = filtered.includes(item)
+          const share = total > 0 ? v / total : 0
+          return (
+            <tr
+              key={r.name}
+              className={cn('row-hover border-b border-border/60 last:border-b-0', onPick && 'cursor-pointer', active && 'row-selected')}
+              onClick={() => onPick?.(item)}
+              title={onPick ? `${item}\n点一下整页只看它` : item}
+            >
+              <td className="w-1/2 truncate py-1.5 pl-1.5 pr-2">
+                <span className="mr-2 inline-block size-2 rounded-sm align-middle" style={{ background: colors[i]?.color }} />
+                <span className="mono">{label.value || '-'}</span>
+              </td>
+              <td className="py-1.5 pr-2">
+                <div className="h-2 w-full rounded-sm bg-muted">
+                  <div className="h-2 rounded-sm bg-accent/70" style={{ width: `${Math.max(2, share * 100)}%` }} />
+                </div>
+              </td>
+              <td className="w-16 py-1.5 pr-1 text-right tabular-nums text-muted-fg">{(share * 100).toFixed(share >= 0.1 ? 0 : 1)}%</td>
+              <td className="w-20 py-1.5 pr-1.5 text-right font-medium tabular-nums">{format(v)}</td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
+/**
+ * 点了图上某个点之后弹的小层：把「这一个桶 + 这一条线」翻译成另外两个信号的筛选条件。
+ *
+ * 这才是联动有用的地方——只带服务和时间，等于到了新页面还得自己再筛一遍；而这里知道你点的是
+ * **哪一分钟**、**哪个接口 / 状态码 / pod**、以及**那个点的值**（延迟面板上就是「只看比它还慢的」）。
+ */
+function DrillPopover({
+  at,
+  data,
+  rows,
+  info,
+  agg,
+  service,
+  format,
+  pageAttrs,
+  onClose,
+}: {
+  at: { tMs: number; seriesKey?: string; x: number; y: number }
+  data: MetricQueryResponse
+  /** 图上实际画的那些线（可能把尾巴折成了「其它」），序号要和图对得上 */
+  rows: MetricQueryResponse['series']
+  info: MetricInfo
+  agg: MetricAgg
+  service: string
+  format: (v: number) => string
+  /** 整页的标签过滤，跳过去也带着 */
+  pageAttrs?: string[]
+  onClose: () => void
+}) {
+  const meta = useMeta()
+  const logDim = meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container'
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const row = at.seriesKey !== undefined ? rows[Number(at.seriesKey)] : undefined
+  const idx = data.t_ms.indexOf(at.tMs)
+  const value = row && idx >= 0 ? row.values[idx] : null
+  // 整页过滤是 `k=v` 字串，拆成标签和这条线自己的标签一起翻译
+  const pageLabels = (pageAttrs ?? []).map((a) => {
+    const i = a.indexOf('=')
+    return i < 0 ? { key: a, value: '' } : { key: a.slice(0, i), value: a.slice(i + 1) }
+  })
+  const ctx = seriesContext([...pageLabels, ...(row?.labels ?? [])])
+  // 桶的时间窗：点的是这一格，不是整个页面的时间范围
+  const win = { fromMs: at.tMs, toMs: at.tMs + data.width_ms }
+  const svc = ctx.service ?? service
+  // 延迟类的面板：把这个点的值当成「至少这么慢」带过去
+  const factor = msFactor(info.unit)
+  const minMs = factor != null && value != null && ['quantile', 'mean', 'max', 'avg'].includes(agg) ? value * factor : null
+
+  const links: { to: string; label: string; title?: string }[] = [
+    {
+      to: tracesHref({ service: svc, attrs: ctx.traceAttrs, spanName: ctx.spanName, errorOnly: ctx.errorOnly, sort: 'duration' }, win),
+      label: '这一格的链路',
+      title: '按耗时排，最慢的在最前面',
+    },
+  ]
+  if (minMs != null && minMs > 0) {
+    links.push({
+      to: tracesHref({ service: svc, attrs: ctx.traceAttrs, spanName: ctx.spanName, minMs, sort: 'duration' }, win),
+      label: `≥ ${format(value as number)} 的链路`,
+      title: '只看比这个点还慢的请求',
+    })
+  }
+  links.push({
+    to: logsHref({ dim: logDim, service: svc, dims: ctx.logDims, levels: 'ERROR,WARN' }, win),
+    label: '这一格的错误日志',
+  })
+  links.push({ to: logsHref({ dim: logDim, service: svc, dims: ctx.logDims }, win), label: '全部日志' })
+
+  const width = data.width_ms >= 60_000 ? `${Math.round(data.width_ms / 60_000)} 分钟` : `${Math.round(data.width_ms / 1000)} 秒`
+  return (
+    <>
+      {/* 点别处关掉 */}
+      <div className="fixed inset-0 z-30" onClick={onClose} />
+      <div
+        className="absolute z-40 w-64 rounded-lg border border-border bg-card p-2.5 shadow-lg"
+        style={{ left: Math.max(4, Math.min(at.x - 128, 9999)), top: at.y + 12 }}
+      >
+        <div className="mb-1.5 text-2xs text-muted-fg">
+          {formatTs(at.tMs, { ms: false })} 起 {width}
+          {value != null && <span className="ml-1 font-semibold text-fg">{format(value)}</span>}
+        </div>
+        {ctx.label && (
+          <div className="mono mb-2 truncate text-2xs text-accent" title={ctx.label}>
+            {ctx.label}
+          </div>
+        )}
+        <div className="flex flex-col gap-1">
+          {links.map((l) => (
+            <Link key={l.label} to={l.to} title={l.title} onClick={onClose} className="rounded-md px-2 py-1 text-xs hover:bg-muted">
+              {l.label}
+            </Link>
+          ))}
+        </div>
+        {!ctx.useful && ctx.label === '' && (
+          <div className="mt-1.5 text-2xs text-muted-fg">这个面板没有能带过去的标签，只按服务和这一格的时间筛</div>
+        )}
+      </div>
+    </>
+  )
+}
+
+/**
+ * 面板底下的小图例：名字 + 最后一个值。
+ *
+ * 默认**高度固定两行**——同一排的卡片靠这个才对得齐，不然一张图例三行、旁边一行，两张卡片的
+ * 图表底边就错开了。装不下的收成「+N 条」，但那是个**按钮**：点开就把剩下的全列出来（这一张
+ * 卡片变高，对齐让位给「看得见」）。图上画了却没名字的线是不行的。
  */
 const LEGEND_MAX = 4
 
@@ -547,6 +892,7 @@ function PanelLegend({
   hidden,
   onToggle,
   bars,
+  more,
 }: {
   series: LineSeries[]
   rows: MetricQueryResponse['series']
@@ -555,13 +901,16 @@ function PanelLegend({
   format: (v: number) => string
   /** 这个面板画的是柱状图（色块用方块） */
   bars?: boolean
+  /** 还有没画出来的线，说一句 */
+  more?: string
   /** 被点掉的线（按图例名字），点一下摘掉 / 加回来 */
   hidden?: ReadonlySet<string>
   onToggle?: (label: string) => void
 }) {
   const labels = useMemo(() => legendLabels(rows), [rows])
+  const [expanded, setExpanded] = useState(false)
   if (!rows.length) return null
-  const shown = rows.slice(0, LEGEND_MAX)
+  const shown = expanded ? rows : rows.slice(0, LEGEND_MAX)
   return (
     <div className="mt-auto flex min-h-8 flex-wrap content-start gap-x-3 gap-y-0.5 px-1 pt-1.5 pb-1 text-2xs text-muted-fg">
       {shown.map((s, i) => {
@@ -585,7 +934,21 @@ function PanelLegend({
           </button>
         )
       })}
-      {rows.length > shown.length && <span title={rows.slice(LEGEND_MAX).map((s) => s.name).join('\n')}>+{rows.length - shown.length} 条</span>}
+      {more && (
+        <span className="text-muted-fg/80" title={more}>
+          还有更多
+        </span>
+      )}
+      {rows.length > LEGEND_MAX && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="hover:text-fg"
+          title={expanded ? '收起' : rows.slice(LEGEND_MAX).map((s) => s.name).join('\n')}
+        >
+          {expanded ? '收起' : `+${rows.length - LEGEND_MAX} 条`}
+        </button>
+      )}
     </div>
   )
 }
@@ -603,28 +966,63 @@ function legendLabels(rows: MetricQueryResponse['series']): string[] {
   const varying = keys.filter((k) => new Set(rows.map((r) => r.labels.find((l) => l.key === k)?.value)).size > 1)
   const use = varying.length ? varying : keys
   return rows.map((r) => {
+    // 折出来的「其它 N 条」没有标签，用它自己的名字
+    if (!r.labels.length) return r.name
     const parts = use.map((k) => r.labels.find((l) => l.key === k)?.value || '-')
     return parts.join(' / ') || r.name
   })
 }
 
 /**
- * 后端返回的「一条共用时间轴 + 每条线一个数组」→ LineChart 要的形状。
+ * 后端返回的「一条共用时间轴 + 每条线一个数组」→ 图表要的形状。
  *
- * 会**丢掉最后一个不完整的桶**：时间范围的右端就是「现在」，最后那一格往往才过了几秒，
- * 速率和计数都只统计了一小截。不丢的话每张图末尾都往下掉一截，图例读数（最后一个值）
- * 也跟着偏小——看图的人会以为量掉下去了。丢掉之后图例读的是最后一个完整桶。
+ * 两件事：
+ *
+ * 1. **丢掉最后一个不完整的桶**。时间范围的右端就是「现在」，最后那一格往往才过了几秒，
+ *    速率和计数都只统计了一小截。不丢的话每张图末尾都往下掉一截，图例读数（最后一个值）
+ *    也跟着偏小——看图的人会以为量掉下去了。丢掉之后图例读的是最后一个完整桶。
+ * 2. **第 9 条往后折成「其它」**（只对堆叠柱，`fold`）。调色板只有 8 个能分辨的颜色，第 9 条
+ *    起全是同一个灰（`--chart-other`），画出来分不清是谁；堆叠柱本来就是在看构成，把尾巴
+ *    加总成一条灰色的「其它」既诚实又好读。折线不能这么折——把几条延迟曲线加起来没有意义，
+ *    那边靠图例展开来认。
  */
-function useChartData(data: MetricQueryResponse | undefined, percent = false) {
+function useChartData(data: MetricQueryResponse | undefined, { percent = false, fold = false } = {}) {
   return useMemo(() => {
-    const rows = data?.series ?? []
+    const all = data?.series ?? []
     const colors = new ColorAssigner()
-    const series: LineSeries[] = rows.map((s, i) => ({ key: String(i), label: s.name, color: colors.color(s.name) }))
     const width = data?.width_ms ?? 0
     const to = data?.to_ms ?? 0
-    const all = data?.t_ms ?? []
-    const count = all.length && width > 0 && all[all.length - 1] + width > to ? all.length - 1 : all.length
-    const points = all.slice(0, count).map((t, i) => {
+    const ts = data?.t_ms ?? []
+    const count = ts.length && width > 0 && ts[ts.length - 1] + width > to ? ts.length - 1 : ts.length
+
+    // 折尾巴：后端已经按量从大到小排好，前 8 条各占一个颜色，剩下的加总成一条
+    let rows = all
+    if (fold && all.length > SERIES_SLOTS) {
+      const tail = all.slice(SERIES_SLOTS)
+      const values = ts.map((_, i) => {
+        let sum: number | null = null
+        for (const r of tail) {
+          const v = r.values[i]
+          if (v !== null && v !== undefined) sum = (sum ?? 0) + v
+        }
+        return sum
+      })
+      const present = values.filter((v): v is number => v !== null)
+      rows = [
+        ...all.slice(0, SERIES_SLOTS),
+        {
+          labels: [],
+          name: `其它 ${tail.length} 条`,
+          values,
+          min: present.length ? Math.min(...present) : null,
+          max: present.length ? Math.max(...present) : null,
+          avg: present.length ? present.reduce((a, b) => a + b, 0) / present.length : null,
+          last: present.length ? present[present.length - 1] : null,
+        },
+      ]
+    }
+    const series: LineSeries[] = rows.map((s, i) => ({ key: String(i), label: s.name, color: colors.color(s.name) }))
+    const points = ts.slice(0, count).map((t, i) => {
       const values: Record<string, number> = {}
       for (const [si, s] of rows.entries()) {
         const v = s.values[i]
@@ -642,8 +1040,8 @@ function useChartData(data: MetricQueryResponse | undefined, percent = false) {
     })
     // 上报周期比步长长时点很稀，只画线段是看不见的（单点线段画不出东西），补上圆点
     const filled = points.filter((p) => Object.keys(p.values).length > 0).length
-    return { series, points, lastValues, sparse: filled < 40, hasPoints: filled > 0, percent }
-  }, [data, percent])
+    return { rows, series, points, lastValues, sparse: filled < 40, hasPoints: filled > 0, percent }
+  }, [data, percent, fold])
 }
 
 /* ------------------------------------------------------------------ 全部指标 */
@@ -705,8 +1103,9 @@ function MetricExplorer({
   )
   const exemplars = useMetricExemplars(exemplarParams, !!metric && showExemplars)
 
-  const rows = data.data?.series ?? []
-  const { series, points, sparse } = useChartData(data.data)  // 同样丢掉最后一个不完整的桶
+  const [drill, setDrill] = useState<{ tMs: number; seriesKey?: string; x: number; y: number } | null>(null)
+  // 折线不折尾巴（加起来没意义），所以这里的 rows 就是后端返回的那些
+  const { rows, series, points, sparse } = useChartData(data.data)
   const format = valueFormatter(info, choice.agg, choice.field)
   const markers: ChartMarker[] = (exemplars.data?.exemplars ?? []).map((e) => ({
     t_ms: e.t_ms,
@@ -839,7 +1238,7 @@ function MetricExplorer({
                 {data.isError ? (
                   <ErrorBox error={data.error} onRetry={() => data.refetch()} />
                 ) : (
-                  <div className="px-2 pt-3 pb-1 md:px-3">
+                  <div className="relative px-2 pt-3 pb-1 md:px-3">
                     <LineChart
                       fromMs={data.data?.from_ms ?? range.fromMs}
                       toMs={data.data?.to_ms ?? range.toMs}
@@ -853,7 +1252,20 @@ function MetricExplorer({
                       dots={sparse}
                       markers={markers}
                       onBrush={(f, t) => setRange({ fromMs: Math.round(f), toMs: Math.round(t), relative: null })}
+                      onPointClick={setDrill}
                     />
+                    {drill && data.data && info && (
+                      <DrillPopover
+                        at={drill}
+                        data={data.data}
+                        rows={rows}
+                        info={info}
+                        agg={choice.agg}
+                        service={services[0] ?? ''}
+                        format={format}
+                        onClose={() => setDrill(null)}
+                      />
+                    )}
                   </div>
                 )}
                 {data.data?.truncated && (

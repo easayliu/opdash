@@ -15,11 +15,12 @@ import { ServicesPage } from '@/pages/ServicesPage'
 import { ServiceDetailPage } from '@/pages/ServiceDetailPage'
 import { MetricsPage } from '@/pages/MetricsPage'
 
+// 服务总览排第一、也是首页：打开先看「谁不对」，再去翻它的日志 / 链路 / 指标
 const NAV = [
+  { to: '/services', label: '服务', icon: ActivityIcon },
   { to: '/logs', label: '日志', icon: ScrollTextIcon },
   { to: '/traces', label: '链路', icon: GitBranchIcon },
   { to: '/metrics', label: '指标', icon: ChartLineIcon, needs: 'metrics' as const },
-  { to: '/services', label: '服务', icon: ActivityIcon },
 ]
 
 /** 顶栏的直达框：粘一个 trace id 直接开链路；不是 id 就当关键字去搜日志。 */
@@ -58,14 +59,14 @@ function AppRoutes() {
   if (redirect) return <Navigate to={redirect} replace />
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/logs" replace />} />
+      <Route path="/" element={<Navigate to="/services" replace />} />
       <Route path="/logs" element={<LogsPage />} />
       <Route path="/traces" element={<TracesPage />} />
       <Route path="/traces/:traceId" element={<TraceDetailPage />} />
       <Route path="/metrics" element={<MetricsPage />} />
       <Route path="/services" element={<ServicesPage />} />
       <Route path="/services/:name" element={<ServiceDetailPage />} />
-      <Route path="*" element={<Navigate to="/logs" replace />} />
+      <Route path="*" element={<Navigate to="/services" replace />} />
     </Routes>
   )
 }
@@ -81,7 +82,7 @@ export default function App() {
       {/* 手机上导航页签换到第二行，第一行只留 logo 和时间 / 主题 / 用户 */}
       <header className="z-20 shrink-0 border-b border-border bg-card">
         <div className="flex flex-wrap items-stretch gap-x-4 px-3 md:h-14 md:flex-nowrap md:px-4">
-          <NavLink to="/logs" className="flex h-12 items-center gap-2 pr-2 md:h-auto md:pr-4">
+          <NavLink to="/services" className="flex h-12 items-center gap-2 pr-2 md:h-auto md:pr-4">
             <span className="flex size-7 items-center justify-center rounded-md bg-brand text-white">
               <ActivityIcon className="size-4" />
             </span>

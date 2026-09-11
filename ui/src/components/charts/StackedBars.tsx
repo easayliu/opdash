@@ -5,6 +5,12 @@ import { formatCompact, niceMax, niceTicks, timeTicks } from './axis'
 import { formatTick, formatTs } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
+/** 图上标的事件（进程重启 / pod 启动 / 发布）：一条虚线竖线 */
+export interface ChartEvent {
+  t_ms: number
+  label: string
+}
+
 export interface BarSeries {
   key: string
   label: string
@@ -26,6 +32,10 @@ interface Props {
   stale?: boolean
   /** 拖一段时间 → 缩小范围 */
   onBrush?: (fromMs: number, toMs: number) => void
+  /** 标在图上的事件（重启 / 发布），画成虚线竖线 */
+  events?: ChartEvent[]
+  /** 点某根柱：给出这个桶的时刻、点中的那一段（堆叠里的哪条线）和位置 */
+  onPointClick?: (at: { tMs: number; seriesKey?: string; x: number; y: number }) => void
   /** 别的图上鼠标停在哪个时刻：画一条同位置的竖线（同一块看板的图共用一根十字线） */
   syncTs?: number | null
   onHoverTs?: (tMs: number | null) => void
@@ -37,7 +47,7 @@ interface Props {
 const M = { left: 48, right: 8, top: 8, bottom: 22 }
 
 /** 按时间分桶的堆叠柱状图：日志直方图、请求量 / 错误数都用它。 */
-export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, syncTs, onHoverTs, format = formatCompact, className }: Props) {
+export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, onPointClick, events, syncTs, onHoverTs, format = formatCompact, className }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; bucket: BarBucket } | null>(null)
   const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
@@ -71,10 +81,27 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
     setBrush({ x0: x, x1: x })
     e.currentTarget.setPointerCapture(e.pointerId)
   }
-  const onUp = () => {
-    if (brush && onBrush) {
+  const onUp = (e: PointerEvent<SVGSVGElement>) => {
+    const dragged = brush && Math.abs(brush.x1 - brush.x0) > 4
+    if (brush && onBrush && dragged) {
       const [a, b] = [Math.min(brush.x0, brush.x1), Math.max(brush.x0, brush.x1)]
-      if (b - a > 4) onBrush(Math.max(fromMs, tOf(a)), Math.min(toMs, tOf(b)))
+      onBrush(Math.max(fromMs, tOf(a)), Math.min(toMs, tOf(b)))
+    }
+    // 没拖动就是点击：落在堆叠的哪一段上，那一段就是用户想说的那条线
+    if (!dragged && onPointClick && hover) {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const y = e.clientY - rect.top
+      let acc = 0
+      let key: string | undefined
+      for (const s of series) {
+        const v = hover.bucket.values[s.key] ?? 0
+        if (v <= 0) continue
+        const top = yOf(acc + v)
+        const bottom = yOf(acc)
+        if (y >= top && y <= bottom) key = s.key
+        acc += v
+      }
+      onPointClick({ tMs: hover.bucket.t_ms, seriesKey: key, x: xOf(hover.bucket.t_ms) + slot / 2, y })
     }
     setBrush(null)
   }
@@ -88,7 +115,7 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
         <svg
           width={width}
           height={height}
-          className={cn('block touch-pan-y', onBrush && 'cursor-crosshair')}
+          className={cn('block touch-pan-y', (onBrush || onPointClick) && 'cursor-crosshair')}
           onPointerMove={onMove}
           onPointerLeave={() => {
             setHover(null)
@@ -151,6 +178,15 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
               opacity={0.35}
             />
           )}
+          {events
+            ?.filter((e) => e.t_ms >= fromMs && e.t_ms <= toMs)
+            .map((e, i) => (
+              <g key={`ev${i}`}>
+                <line x1={xOf(e.t_ms)} x2={xOf(e.t_ms)} y1={M.top} y2={M.top + H} stroke="var(--warn)" strokeWidth={1} strokeDasharray="3 3" />
+                <path d={`M${xOf(e.t_ms) - 4},${M.top} h8 l-4 6 z`} fill="var(--warn)" />
+                <title>{e.label}</title>
+              </g>
+            ))}
           {brush && (
             <rect
               x={Math.min(brush.x0, brush.x1)}

@@ -282,6 +282,14 @@ pub struct NameCountRow {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct EventRow {
+    #[serde(deserialize_with = "num::de")]
+    pub t_ms: i64,
+    pub pod: String,
+    pub service_name: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ExemplarRow {
     #[serde(deserialize_with = "num::de")]
     pub t_ms: i64,
@@ -543,6 +551,46 @@ impl MetricQueries<'_> {
         )
     }
 
+    /// 进程重启：某条时间线上累积 counter **掉回去了**（`cur < prev`），只有进程重新起来
+    /// 才会这样。用 `jvm.cpu.time` 这类没有标签、每个进程一条线的 counter 最干净；按
+    /// `(service, pod)` 分区，pod 名取 resource 属性 `k8s.pod.name`，没有就是空串。
+    ///
+    /// 只能抓**原地重启**（容器 crash 后同名 pod 再起）。滚动发布是新 pod 从 0 开始，
+    /// 老 pod 直接消失，哪条线都没有「下降」——那一半交给 [`Self::pod_starts`]。
+    pub fn restarts(&self, filter: &MetricFilter, field: Field, limit: u32) -> Result<Query> {
+        let mut b = Bindings::new();
+        let where_sql = filter.where_sql(&mut b)?;
+        let limit = b.bind("UInt32", limit);
+        let pod = attr_path("resource_attributes", "k8s.pod.name")?;
+        let sql = format!(
+            "SELECT t_ms, pod, service_name\nFROM (\n  \
+             SELECT toUnixTimestamp64Milli(timestamp) AS t_ms, toString({pod}) AS pod, service_name, {f} AS v,\n    \
+             lagInFrame({f}) OVER (PARTITION BY service_name, toString({pod}) ORDER BY timestamp ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS prev\n  \
+             FROM {from}\n  WHERE {where_sql}\n)\nWHERE prev > 0 AND v < prev\nORDER BY t_ms\nLIMIT {limit}",
+            f = field.expr(),
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
+    /// pod 启动：时间窗里**第一次出现**的 pod（首个样本比窗口起点晚 `margin_ms` 以上——
+    /// 窗口一开始就在的老 pod 首个样本会贴着起点，用这个边距把它们挡掉）。滚动发布就是
+    /// 一批新 pod 名在同一分钟冒出来。
+    pub fn pod_starts(&self, filter: &MetricFilter, margin_ms: i64, limit: u32) -> Result<Query> {
+        let mut b = Bindings::new();
+        let where_sql = filter.where_sql(&mut b)?;
+        let cutoff = b.bind("Int64", filter.range.from_ms + margin_ms);
+        let limit = b.bind("UInt32", limit);
+        let pod = attr_path("resource_attributes", "k8s.pod.name")?;
+        let sql = format!(
+            "SELECT toUnixTimestamp64Milli(min(timestamp)) AS t_ms, pod, service_name\nFROM (\n  \
+             SELECT timestamp, toString({pod}) AS pod, service_name\n  FROM {from}\n  WHERE {where_sql}\n)\n\
+             WHERE pod != ''\nGROUP BY service_name, pod\nHAVING t_ms > {cutoff}\nORDER BY t_ms\nLIMIT {limit}",
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
     /// exemplar：指标上挂的 trace id，用来从一个尖峰直接跳到那次请求。按值从大到小取，
     /// 慢的那几次总是排在前面。
     pub fn exemplars(&self, filter: &MetricFilter, limit: u32) -> Result<Query> {
@@ -769,6 +817,30 @@ mod tests {
         assert_eq!(quantile_from_histogram(&[0.0, 0.0, 0.0, 5.0], &bounds, 0.9), Some(50.0));
         assert_eq!(quantile_from_histogram(&[], &bounds, 0.5), None);
         assert_eq!(quantile_from_histogram(&[1.0], &[], 0.5), None);
+    }
+
+    #[test]
+    fn restarts_and_pod_starts_partition_by_pod() {
+        let t = table();
+        let q = queries(&t);
+        let r = q.restarts(&filter(), Field::Value, 200).unwrap();
+        let text = r.sql();
+        // 按 (service, pod) 分区找下降，不然两个 pod 的计数器会互相「归零」
+        assert!(
+            text.contains(
+                "PARTITION BY service_name, toString(resource_attributes.`k8s.pod.name`)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("WHERE prev > 0 AND v < prev"), "{text}");
+        let p = q.pod_starts(&filter(), 120_000, 200).unwrap();
+        assert!(
+            p.sql().contains("GROUP BY service_name, pod\nHAVING t_ms > {p3:Int64}"),
+            "{}",
+            p.sql()
+        );
+        // 边距 = 窗口起点 + 2 分钟
+        assert_eq!(p.params()[3].1, (1_788_000_000_000i64 + 120_000).to_string());
     }
 
     #[test]

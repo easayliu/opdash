@@ -17,6 +17,12 @@ export interface LinePoint {
 }
 
 /** 图上钉一个点：指标的 exemplar（点开跳 trace）。 */
+/** 图上标的事件（进程重启 / pod 启动 / 发布）：一条虚线竖线 */
+export interface ChartEvent {
+  t_ms: number
+  label: string
+}
+
 export interface ChartMarker {
   t_ms: number
   value: number
@@ -39,6 +45,10 @@ interface Props {
   area?: boolean
   /** 拖一段时间 → 缩小范围。和日志页直方图同一个交互 */
   onBrush?: (fromMs: number, toMs: number) => void
+  /** 标在图上的事件（重启 / 发布），画成虚线竖线 */
+  events?: ChartEvent[]
+  /** 点某个点：给出这个桶的时刻、离得最近的那条线，以及点在图上的位置（弹层定位用） */
+  onPointClick?: (at: { tMs: number; seriesKey?: string; x: number; y: number }) => void
   /** 别的图上鼠标停在哪个时刻：画一条同位置的竖线，不弹气泡（气泡只属于鼠标真正在的那张图） */
   syncTs?: number | null
   /** 自己被 hover 到哪个时刻，交给上层广播给同一块看板的其它图 */
@@ -65,7 +75,9 @@ export function LineChart({
   format = (v) => String(v),
   className,
   area,
+  events,
   onBrush,
+  onPointClick,
   syncTs,
   onHoverTs,
   connectGaps,
@@ -117,11 +129,32 @@ export function LineChart({
     setBrush({ x0: e.clientX - rect.left, x1: e.clientX - rect.left })
     e.currentTarget.setPointerCapture(e.pointerId)
   }
-  const onUp = () => {
-    if (brush && onBrush) {
+  const onUp = (e: PointerEvent<SVGSVGElement>) => {
+    const dragged = brush && Math.abs(brush.x1 - brush.x0) > 4
+    if (brush && onBrush && dragged) {
       const [a, b] = [Math.min(brush.x0, brush.x1), Math.max(brush.x0, brush.x1)]
-      // 拖得太短当成点击，不改范围
-      if (b - a > 4) onBrush(Math.max(fromMs, tOf(a)), Math.min(toMs, tOf(b)))
+      onBrush(Math.max(fromMs, tOf(a)), Math.min(toMs, tOf(b)))
+    }
+    // 没拖动就是点击：定位到最近的点、以及纵向离鼠标最近的那条线
+    if (!dragged && onPointClick) {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const p = nearest(x)
+      if (p) {
+        let key: string | undefined
+        let best = Infinity
+        for (const s of series) {
+          const v = p.values[s.key]
+          if (v === undefined) continue
+          const d = Math.abs(yOf(v) - y)
+          if (d < best) {
+            best = d
+            key = s.key
+          }
+        }
+        onPointClick({ tMs: p.t_ms, seriesKey: key, x: xOf(p.t_ms), y })
+      }
     }
     setBrush(null)
   }
@@ -134,7 +167,7 @@ export function LineChart({
         <svg
           width={width}
           height={height}
-          className={cn('block touch-pan-y', onBrush && 'cursor-crosshair', brush && 'cursor-col-resize')}
+          className={cn('block touch-pan-y', (onBrush || onPointClick) && 'cursor-crosshair', brush && 'cursor-col-resize')}
           onPointerMove={onMove}
           onPointerLeave={onLeave}
           onPointerDown={onDown}
@@ -195,6 +228,15 @@ export function LineChart({
               </g>
             )
           })}
+          {events
+            ?.filter((e) => e.t_ms >= fromMs && e.t_ms <= toMs)
+            .map((e, i) => (
+              <g key={`ev${i}`}>
+                <line x1={xOf(e.t_ms)} x2={xOf(e.t_ms)} y1={M.top} y2={M.top + H} stroke="var(--warn)" strokeWidth={1} strokeDasharray="3 3" />
+                <path d={`M${xOf(e.t_ms) - 4},${M.top} h8 l-4 6 z`} fill="var(--warn)" />
+                <title>{e.label}</title>
+              </g>
+            ))}
           {/* exemplar：值可能远超曲线（p95 线上挂着一次 3 秒的请求），钉在画布内，不让它撑大纵轴 */}
           {markers?.map((m, i) => (
             <circle
