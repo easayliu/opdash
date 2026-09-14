@@ -161,6 +161,50 @@ pub const UNSCOPED_MAX_RANGE_MS: i64 = 6 * 3_600_000;
 /// （最冷的服务整窗 6 小时也只有 3.5 万行）。按耗时排不能用：最慢的那条可能在窗口任何位置。
 pub const PROBE_WINDOWS_MS: &[i64] = &[60_000, 15 * 60_000];
 
+/// 候选查询的两种取法。差别在于**去重放在哪**，而这决定了 ClickHouse 能不能用惰性物化。
+///
+/// 带 `LIMIT 1 BY trace_id` 时执行计划是老老实实的 `Sorting`，`trace_id`（32 个字符）得为窗口里
+/// 每一行都物化出来再排；去掉之后计划变成 `Limit (preliminary LIMIT)` + `LazilyReadFromMergeTree`
+/// ——只读排序列找出前 n 行的位置，`trace_id` 只为这 n 行读。线上 1 小时高峰窗实测（中位 / 5 次）：
+///
+/// | | 读量 | CPU | 墙钟 |
+/// |---|---|---|---|
+/// | `LIMIT 1 BY trace_id LIMIT 50` | 285 MiB | 1310 ms | 927 ms |
+/// | `LIMIT 500` + 应用层去重 | **189 MiB** | **723 ms** | **136 ms** |
+///
+/// 代价是多取的行里可能凑不够 `limit` 个不同的 trace。**按耗时排很划算**：最慢的 span 来自不同
+/// 链路，实测四个窗口取 500 行能去重出 83 / 114 / 148 / 179 个。**按时间排则不行**：最新的
+/// span 扎堆（同一条忙碌链路一毫秒内能写好几个 span），同样取 500 行只剩 46 个——不够 50。
+/// 所以按时间排继续用 `PerTrace`，反正它已经靠 [`PROBE_WINDOWS_MS`] 把窗口缩到 1 分钟了。
+#[derive(Debug, Clone, Copy)]
+pub enum Candidates {
+    /// `LIMIT 1 BY trace_id LIMIT n`：库里去重，正好 n 条不同的 trace。
+    PerTrace(u32),
+    /// `LIMIT n`：不去重，取够多的行让调用方自己去重（见 [`dedup_by_trace`]）。
+    Rows(u32),
+}
+
+/// 按耗时排时多取几倍的行来抵消重复。10 倍是实测选的：取 `50 × 10` 行在四个窗口上分别去重出
+/// 83 / 114 / 148 / 179 个 trace，都够 50 有余；真不够（一条链路占满了最慢的那几百个 span）
+/// 就退回 [`Candidates::PerTrace`]。
+pub const CANDIDATE_OVERFETCH: u32 = 10;
+
+/// 按出现顺序去重，最多留 `limit` 条。行本来就是按 `ORDER BY` 排好的，所以留下的第一条
+/// 就是这个 trace 排得最靠前的那个 span——和 `LIMIT 1 BY trace_id` 的语义一致。
+pub fn dedup_by_trace(rows: Vec<CandidateRow>, limit: u32) -> Vec<CandidateRow> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(limit as usize);
+    for row in rows {
+        if out.len() as u32 >= limit {
+            break;
+        }
+        if seen.insert(row.trace_id.clone()) {
+            out.push(row);
+        }
+    }
+    out
+}
+
 /// 摘要查询在候选时间跨度之外前后各放宽多少：一条 trace 的其它 span（尤其异步消费的）
 /// 落在匹配到的那个 span 前后。见 [`TraceQueries::summaries`]。
 pub const SUMMARY_WIDEN_MS: i64 = 10 * 60_000;
@@ -509,17 +553,26 @@ impl TraceQueries<'_> {
 
     /// 第一步：满足条件的 trace id，每个 trace 只算一次（`LIMIT 1 BY`），按最新 / 最慢的那个
     /// 匹配 span 排。
-    pub fn candidates(&self, filter: &TraceFilter, sort: TraceSort, limit: u32) -> Result<Query> {
+    pub fn candidates(
+        &self,
+        filter: &TraceFilter,
+        sort: TraceSort,
+        take: Candidates,
+    ) -> Result<Query> {
         filter.validate()?;
         let mut b = Bindings::new();
         let where_sql = filter.where_sql(&mut b)?;
-        let limit = b.bind("UInt32", limit);
+        let (dedup_sql, n) = match take {
+            Candidates::PerTrace(n) => ("\nLIMIT 1 BY trace_id", n),
+            Candidates::Rows(n) => ("", n),
+        };
+        let limit = b.bind("UInt32", n);
         let order = match sort {
             TraceSort::Time => "timestamp DESC",
             TraceSort::Duration => "duration_ns DESC, timestamp DESC",
         };
         let sql = format!(
-            "SELECT trace_id, toUnixTimestamp64Milli(timestamp) AS ts_ms\nFROM {from}\nWHERE {where_sql}\nORDER BY {order}\nLIMIT 1 BY trace_id\nLIMIT {limit}",
+            "SELECT trace_id, toUnixTimestamp64Milli(timestamp) AS ts_ms\nFROM {from}\nWHERE {where_sql}\nORDER BY {order}{dedup_sql}\nLIMIT {limit}",
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
@@ -543,10 +596,17 @@ impl TraceQueries<'_> {
             return Err(Error::bad_request("没有 trace id"));
         }
         let mut b = Bindings::new();
-        let mut clauses = vec![format!("trace_id IN {}", b.bind("Array(String)", ids))];
-        if let Some(range) = range {
-            clauses.push(b.time_predicate("timestamp", &range.widen(SUMMARY_WIDEN_MS)));
-        }
+        // `trace_id IN` 放 PREWHERE：自动 PREWHERE 不挑这一条（大数组 + String 列不符合它的启发
+        // 式），留在 WHERE 里 ClickHouse 会把聚合要用的八列全读出来再过滤。挪过去之后每行只读
+        // `trace_id`，其余列只为命中的行读——线上 1 小时高峰窗实测（中位 / 5 次）
+        // **1257 MiB / 2524 ms CPU → 1042 MiB / 1899 ms CPU**；窗口已经收窄过的那条也有
+        // 465 → 410 MiB。1042 MiB ÷ 3000 万行 = 34.7 字节，正好一个 `trace_id`，也就是到底了。
+        let prewhere = format!("trace_id IN {}", b.bind("Array(String)", ids));
+        let where_sql = range
+            .map(|r| {
+                format!("\nWHERE {}", b.time_predicate("timestamp", &r.widen(SUMMARY_WIDEN_MS)))
+            })
+            .unwrap_or_default();
         // 写入重试会造成重复行，计数按 span_id 去重
         let sql = format!(
             "SELECT trace_id,\n  toUnixTimestamp64Micro(min(timestamp)) AS start_us,\n  \
@@ -557,9 +617,8 @@ impl TraceQueries<'_> {
              maxIf(duration_ns, parent_span_id = '') AS root_duration_ns,\n  countIf(parent_span_id = '') AS root_count,\n  \
              argMin(service_name, timestamp) AS first_service,\n  argMin(span_name, timestamp) AS first_name,\n  \
              argMin(duration_ns, timestamp) AS first_duration_ns,\n  arraySort(groupUniqArray(service_name)) AS services\n\
-             FROM {from}\nWHERE {where_sql}\nGROUP BY trace_id",
+             FROM {from}\nPREWHERE {prewhere}{where_sql}\nGROUP BY trace_id",
             from = self.table_ref(),
-            where_sql = clauses.join("\n  AND "),
         );
         Ok(Self::finish(b, sql))
     }
@@ -1146,7 +1205,7 @@ mod tests {
             dims: vec![("cluster".into(), vec!["bj-prod".into()])],
             ..Default::default()
         };
-        let query = q.candidates(&filter, TraceSort::Duration, 50).unwrap();
+        let query = q.candidates(&filter, TraceSort::Duration, Candidates::PerTrace(50)).unwrap();
         let sql = query.sql();
         // 候选顺带把时间戳带回来，摘要查询靠它收窄时间谓词
         assert!(
@@ -1178,7 +1237,7 @@ mod tests {
             attrs: vec![AttrFilter { key: "a`b".into(), value: None }],
             ..Default::default()
         };
-        assert!(q.candidates(&bad, TraceSort::Time, 10).is_err());
+        assert!(q.candidates(&bad, TraceSort::Time, Candidates::PerTrace(10)).is_err());
         assert!(attr_path("span_attributes", "a\\b").is_err());
         assert_eq!(
             attr_path("span_attributes", " http.route ").unwrap(),
@@ -1186,13 +1245,45 @@ mod tests {
         );
 
         let s = q.summaries(&["a".into(), "b".into()], Some(&range())).unwrap();
-        assert!(s.sql().contains("trace_id IN {p0:Array(String)}"), "{}", s.sql());
+        // trace_id 走 PREWHERE，时间谓词留在 WHERE
+        assert!(s.sql().contains("PREWHERE trace_id IN {p0:Array(String)}"), "{}", s.sql());
+        assert!(s.sql().contains("\nWHERE timestamp >="), "{}", s.sql());
         assert!(s.sql().contains("uniqExact(span_id) AS span_count"));
         assert_eq!(s.params()[0].1, "['a','b']");
         // 放宽了 10 分钟
         assert_eq!(s.params()[1].1, (1_000_000 - 600_000).to_string());
         assert_eq!(s.params()[2].1, (2_000_000 + 600_000).to_string());
         assert!(q.summaries(&[], None).is_err());
+    }
+
+    #[test]
+    fn dedup_keeps_the_first_row_of_each_trace() {
+        let row = |id: &str, ts_ms| CandidateRow { trace_id: id.into(), ts_ms };
+        // 行已经按 ORDER BY 排好，同一条 trace 留排最前的那个 span
+        let got = dedup_by_trace(vec![row("a", 3), row("a", 1), row("b", 2), row("c", 9)], 2);
+        assert_eq!(
+            got.iter().map(|r| (r.trace_id.as_str(), r.ts_ms)).collect::<Vec<_>>(),
+            vec![("a", 3), ("b", 2)]
+        );
+        assert!(dedup_by_trace(Vec::new(), 5).is_empty());
+    }
+
+    #[test]
+    fn candidates_can_skip_limit_by_so_clickhouse_reads_lazily() {
+        let table = table();
+        let q = TraceQueries { database: "logs", table: &table };
+        let filter = TraceFilter { range: Some(range()), ..Default::default() };
+        let per = q.candidates(&filter, TraceSort::Duration, Candidates::PerTrace(50)).unwrap();
+        assert!(per.sql().ends_with("LIMIT 1 BY trace_id\nLIMIT {p2:UInt32}"), "{}", per.sql());
+        assert_eq!(per.params()[2].1, "50");
+        let rows = q.candidates(&filter, TraceSort::Duration, Candidates::Rows(500)).unwrap();
+        assert!(!rows.sql().contains("LIMIT 1 BY"), "{}", rows.sql());
+        assert!(
+            rows.sql().ends_with("ORDER BY duration_ns DESC, timestamp DESC\nLIMIT {p2:UInt32}"),
+            "{}",
+            rows.sql()
+        );
+        assert_eq!(rows.params()[2].1, "500");
     }
 
     #[test]
@@ -1213,11 +1304,14 @@ mod tests {
         let q = TraceQueries { database: "logs", table: &table };
         let wide = TimeRange { from_ms: 0, to_ms: 7 * 3_600_000 };
         let filter = TraceFilter { range: Some(wide), ..Default::default() };
-        assert!(q.candidates(&filter, TraceSort::Time, 10).is_err());
+        assert!(q.candidates(&filter, TraceSort::Time, Candidates::PerTrace(10)).is_err());
         let scoped =
             TraceFilter { range: Some(wide), service: Some("x".into()), ..Default::default() };
-        assert!(q.candidates(&scoped, TraceSort::Time, 10).is_ok());
-        assert!(q.candidates(&TraceFilter::default(), TraceSort::Time, 10).is_err());
+        assert!(q.candidates(&scoped, TraceSort::Time, Candidates::PerTrace(10)).is_ok());
+        assert!(
+            q.candidates(&TraceFilter::default(), TraceSort::Time, Candidates::PerTrace(10))
+                .is_err()
+        );
     }
 
     #[test]

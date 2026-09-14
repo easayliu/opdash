@@ -93,7 +93,7 @@ async fn probing_widens_until_it_finds_enough_then_falls_back_to_the_whole_windo
 }
 
 #[tokio::test]
-async fn slowest_first_never_probes() {
+async fn slowest_first_never_probes_and_dedups_in_process() {
     let fake = FakeClickhouse::start().await;
     let app = app_with_schema(&fake, &[]).await;
     fake.respond(candidates(50, NOW_MS - 1000)).respond(summary(&format!("{:032x}", 0)));
@@ -105,6 +105,76 @@ async fn slowest_first_never_probes() {
     assert_eq!(sql.len(), 2, "按耗时排不能提前停: {sql:?}");
     // 一上来就是整窗：最慢的那条可能在窗口任何位置
     assert_eq!(param(&fake, 0, 0).parse::<i64>().unwrap(), NOW_MS - HOUR_MS);
+    // 不让库去重，多取 10 倍的行，自己去重——这样 ClickHouse 才能用惰性物化
+    assert!(!sql[0].contains("LIMIT 1 BY"), "{}", sql[0]);
+    // p0/p1 是时间、p2 是 span_kind（按耗时排默认只看入口 span），limit 排 p3
+    assert_eq!(param(&fake, 0, 3), "500", "50 × CANDIDATE_OVERFETCH");
+}
+
+#[tokio::test]
+async fn slowest_first_keeps_the_first_row_of_each_trace() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+    let a = format!("{:032x}", 0);
+    let b = format!("{:032x}", 1);
+    // 同一条链路的两个慢 span 排在最前，去重后 a 只留第一行，顺序是 a、b
+    let rows = candidate(&a, NOW_MS - 1000)
+        + &candidate(&a, NOW_MS - 2000)
+        + &candidate(&b, NOW_MS - 3000);
+    fake.respond(rows).respond(summary(&b) + &summary(&a));
+
+    let (status, body) = get_json(&app, &search_url("&sort=duration")).await;
+    assert_eq!(status, 200, "{body}");
+
+    let sql = sql(&fake);
+    // 只取到 3 行（< 500），说明匹配的 span 就这些，不用再退回库里去重
+    assert_eq!(sql.len(), 2, "没取满就别再查一遍: {sql:?}");
+    let ids: Vec<&str> = body["traces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["trace_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![a.as_str(), b.as_str()], "顺序按最慢的那个 span 走");
+    // 摘要的时间谓词锚在 a 的第一行（最慢那个 span）和 b 上，不是 a 的第二行
+    assert_eq!(param(&fake, 1, 1).parse::<i64>().unwrap(), NOW_MS - 3000 - 10 * MINUTE_MS);
+    assert_eq!(param(&fake, 1, 2).parse::<i64>().unwrap(), NOW_MS - 1000 + 1 + 10 * MINUTE_MS);
+}
+
+#[tokio::test]
+async fn slowest_first_falls_back_when_one_trace_hogs_the_slow_spans() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+    let hog = format!("{:032x}", 7);
+    // 取满了 500 行，但全是同一条链路 → 去重只剩 1 条，不够 50
+    let rows: String = (0..500).map(|i| candidate(&hog, NOW_MS - 1000 - i)).collect();
+    fake.respond(rows)
+        .respond(candidates(50, NOW_MS - 1000))
+        .respond(summary(&format!("{:032x}", 0)));
+
+    let (status, body) = get_json(&app, &search_url("&sort=duration")).await;
+    assert_eq!(status, 200, "{body}");
+
+    let sql = sql(&fake);
+    assert_eq!(sql.len(), 3, "多取 + 退回库里去重 + 摘要: {sql:?}");
+    assert!(!sql[0].contains("LIMIT 1 BY"), "{}", sql[0]);
+    assert!(sql[1].contains("LIMIT 1 BY trace_id"), "退回的那条要让库去重: {}", sql[1]);
+    assert_eq!(param(&fake, 1, 3), "50");
+}
+
+#[tokio::test]
+async fn summaries_filter_trace_id_in_prewhere() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+    fake.respond(candidates(50, NOW_MS - 1000)).respond(summary(&format!("{:032x}", 0)));
+
+    let (status, body) = get_json(&app, &search_url("")).await;
+    assert_eq!(status, 200, "{body}");
+
+    // 自动 PREWHERE 不挑 `trace_id IN`，留在 WHERE 里会把聚合用的八列全读出来再过滤
+    let sql = sql(&fake);
+    assert!(sql[1].contains("PREWHERE trace_id IN {p0:Array(String)}"), "{}", sql[1]);
+    assert!(sql[1].contains("\nWHERE timestamp >="), "时间谓词还是留在 WHERE: {}", sql[1]);
 }
 
 #[tokio::test]

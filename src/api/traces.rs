@@ -14,10 +14,10 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
-    AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, HeatmapRow, KeyRow, LocatedSpan,
-    PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink, SpanRow, SummaryRow,
-    TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow, candidate_range, normalize_kind,
-    normalize_span_id, normalize_trace_id,
+    AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, ENTRY_KINDS,
+    HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink,
+    SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow,
+    candidate_range, dedup_by_trace, normalize_kind, normalize_span_id, normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -184,25 +184,55 @@ async fn candidates(
     limit: u32,
 ) -> Result<(Vec<CandidateRow>, Stats)> {
     let mut stats = Stats::default();
-    if sort == TraceSort::Time
-        && let Some(full) = filter.range
-    {
-        for window in PROBE_WINDOWS_MS {
-            // 搜索窗本身就比探测窗窄，直接查整窗，别白搭一次往返
-            if full.span_ms() <= *window {
-                break;
-            }
-            let mut probe = filter.clone();
-            probe.range = Some(TimeRange { from_ms: full.to_ms - window, to_ms: full.to_ms });
-            let hit =
-                state.client.rows::<CandidateRow>(queries.candidates(&probe, sort, limit)?).await?;
-            stats.absorb(&hit.stats);
-            if hit.rows.len() as u32 >= limit {
-                return Ok((hit.rows, stats));
+    match sort {
+        // 最新在前：先探窗口尾部的一小段
+        TraceSort::Time => {
+            if let Some(full) = filter.range {
+                for window in PROBE_WINDOWS_MS {
+                    // 搜索窗本身就比探测窗窄，直接查整窗，别白搭一次往返
+                    if full.span_ms() <= *window {
+                        break;
+                    }
+                    let mut probe = filter.clone();
+                    probe.range =
+                        Some(TimeRange { from_ms: full.to_ms - window, to_ms: full.to_ms });
+                    let hit = state
+                        .client
+                        .rows::<CandidateRow>(queries.candidates(
+                            &probe,
+                            sort,
+                            Candidates::PerTrace(limit),
+                        )?)
+                        .await?;
+                    stats.absorb(&hit.stats);
+                    if hit.rows.len() as u32 >= limit {
+                        return Ok((hit.rows, stats));
+                    }
+                }
             }
         }
+        // 最慢在前：探测用不了（最慢的那条可能在窗口任何位置），改成多取几倍的行、
+        // 自己去重，换 ClickHouse 的惰性物化，见 Candidates
+        TraceSort::Duration => {
+            let over = limit.saturating_mul(CANDIDATE_OVERFETCH);
+            let wide = state
+                .client
+                .rows::<CandidateRow>(queries.candidates(filter, sort, Candidates::Rows(over))?)
+                .await?;
+            stats.absorb(&wide.stats);
+            let truncated = wide.rows.len() as u32 >= over;
+            let rows = dedup_by_trace(wide.rows, limit);
+            // 够了就收工；没取满 `over` 行说明匹配的 span 本来就这么多，去重结果已经是全部
+            if rows.len() as u32 >= limit || !truncated {
+                return Ok((rows, stats));
+            }
+            // 多取的行里不同的 trace 不够（一条链路占满了最慢的那几百个 span），退回库里去重
+        }
     }
-    let all = state.client.rows::<CandidateRow>(queries.candidates(filter, sort, limit)?).await?;
+    let all = state
+        .client
+        .rows::<CandidateRow>(queries.candidates(filter, sort, Candidates::PerTrace(limit))?)
+        .await?;
     stats.absorb(&all.stats);
     Ok((all.rows, stats))
 }
