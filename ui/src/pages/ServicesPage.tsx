@@ -167,7 +167,8 @@ export function ServicesPage() {
   const isMobile = useIsMobile()
   const compare = (COMPARE.find((c) => c.value === params.get('cmp'))?.value ?? 'day') as Compare
   const order = (ORDERS.find((o) => o.value === params.get('sort'))?.value ?? 'health') as Order
-  const view = params.get('view') === 'table' ? 'table' : 'cards'
+  // 表格 9 列手机塞不下，窄屏一律卡片
+  const view = !isMobile && params.get('view') === 'table' ? 'table' : 'cards'
   const onlyBad = params.get('bad') === '1'
   const [needle, setNeedle] = useState('')
   const [tableSort, setTableSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'requests', desc: true })
@@ -244,7 +245,7 @@ export function ServicesPage() {
               ))}
             </Select>
           )}
-          <span className="flex h-8 items-center rounded-md border border-input p-0.5">
+          <span className="hidden h-8 items-center rounded-md border border-input p-0.5 md:flex">
             {(['cards', 'table'] as const).map((v) => (
               <button
                 key={v}
@@ -279,7 +280,7 @@ export function ServicesPage() {
                 <h2 className="mb-2 flex items-baseline gap-2 text-sm font-semibold">
                   需要看一眼
                   <span className="text-2xs font-normal text-muted-fg">
-                    {bad.length} 个 · 错误率 ≥ 1%，或 P95 比{cmpShort}高 1.5 倍以上（两边都至少 300 次请求才比）
+                    {bad.length} 个<span className="hidden sm:inline"> · 错误率 ≥ 1%，或 P95 比{cmpShort}高 1.5 倍以上（两边都至少 300 次请求才比）</span>
                   </span>
                 </h2>
                 <div className={cn('grid gap-3 sm:grid-cols-2 xl:grid-cols-3', q.isFetching && 'opacity-70')}>
@@ -432,22 +433,24 @@ function Summary({ data, all, restarts, cmpShort }: { data: OverviewResponse; al
 /** 异常服务的大卡：数字 + 主因 + 重启 + 趋势 */
 function BigCard({ s, health, win, prev, events, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; prev: Window; events: MetricEvent[]; logDim: string; hasMetrics: boolean }) {
   const latencyOk = meaningfulLatency(s.p95_ms)
+  const isMobile = useIsMobile()
   return (
-    <Link to={serviceHref(s.service, win)} className={cn('group row-hover block rounded-lg border bg-card p-3.5', health.level === 'bad' ? 'border-danger/50' : 'border-warn/50')}>
+    <Link to={serviceHref(s.service, win)} className={cn('group row-hover flex flex-col rounded-lg border bg-card p-3.5', health.level === 'bad' ? 'border-danger/50' : 'border-warn/50')}>
       <div className="flex items-center gap-2">
         <HealthDot level={health.level} reasons={health.reasons} />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold" title={s.service}>
           {s.service || '(空)'}
         </span>
         <Restarts events={events} />
-        <QuickLinks service={s.service} win={win} logDim={logDim} hasMetrics={hasMetrics} className="opacity-0 group-hover:opacity-100" />
+        {!isMobile && <QuickLinks service={s.service} win={win} logDim={logDim} hasMetrics={hasMetrics} className="opacity-0 group-hover:opacity-100" />}
         <span className="text-2xs text-muted-fg tabular-nums">{formatNumber(s.requests)} 次</span>
       </div>
       <div className={cn('mt-1 truncate text-2xs', health.level === 'bad' ? 'text-danger' : 'text-warn')} title={health.reasons.join('；')}>
         {health.reasons.join('；')}
       </div>
       {health.reasons.some((r) => r.startsWith('P95')) && <Contributor service={s.service} win={win} prev={prev} />}
-      <div className="mt-3 grid grid-cols-3 gap-2">
+      {/* 原因区可能是一行也可能两行（带主因），指标和火花图贴底对齐，同一行的卡片才对得齐 */}
+      <div className="mt-auto grid grid-cols-3 gap-2 pt-3">
         <Stat label="请求量" value={fmtRps(s.rps)} delta={change(s.rps, s.prev?.rps)} upIs="neutral" />
         <Stat label="错误率" value={pct(s.error_rate)} delta={change(s.error_rate, s.prev?.error_rate)} upIs="bad" />
         <Stat label="P95" value={latencyOk ? formatDurationMs(s.p95_ms) : '—'} delta={latencyOk ? change(s.p95_ms, s.prev?.p95_ms) : null} upIs="bad" muted={!latencyOk} />
