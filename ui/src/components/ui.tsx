@@ -1,7 +1,23 @@
 /** 几个够用的基础控件。内部工具，不上组件库，样式全靠 Tailwind。 */
-import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from 'react'
-import { Loader2Icon } from 'lucide-react'
+import {
+  forwardRef,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type SelectHTMLAttributes,
+} from 'react'
+import { ChevronDownIcon, Loader2Icon, SearchIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
+
+/** 下拉一次最多画多少行：服务 / 接口的候选能到几百，全画出来白费力气，让人接着敲 */
+const MAX_COMBO_ROWS = 200
+/** 菜单最宽多少 px（值可能很长，比触发按钮宽），也用来判断要不要往左展开 */
+const COMBO_MENU_W = 420
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: 'default' | 'primary' | 'ghost' | 'danger'
@@ -177,5 +193,187 @@ export function Card({
       )}
       {children}
     </section>
+  )
+}
+
+export interface ComboOption {
+  value: string
+  /** 不给就显示 value 本身 */
+  label?: string
+  /** 跟在标签后面的灰字，比如条数 */
+  note?: string
+}
+
+/**
+ * 带搜索的下拉。选项上百的地方（服务、pod、接口、指标名）用它，原生 `<select>` 只能靠首字母跳，
+ * 找一个名字要滚半天。选项只有几个的（排序、步长、对比区间）继续用 `Select`。
+ */
+export function Combobox({
+  value,
+  options,
+  onChange,
+  placeholder = '全部',
+  searchPlaceholder = '输入筛选…',
+  emptyText = '没有匹配项',
+  className,
+  title,
+  disabled,
+  loading,
+  mono,
+  clearable = true,
+}: {
+  value: string
+  options: ComboOption[]
+  onChange: (v: string) => void
+  /** 空值那一项的文案，也是没选时按钮上的字 */
+  placeholder?: string
+  searchPlaceholder?: string
+  emptyText?: string
+  className?: string
+  title?: string
+  disabled?: boolean
+  loading?: boolean
+  /** 选项是等宽内容（指标名、属性值这类） */
+  mono?: boolean
+  clearable?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const [cursor, setCursor] = useState(0)
+  const [alignRight, setAlignRight] = useState(false)
+  const box = useRef<HTMLDivElement>(null)
+  const listBox = useRef<HTMLDivElement>(null)
+  const input = useRef<HTMLInputElement>(null)
+
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase()
+    const hit = needle ? options.filter((o) => (o.label ?? o.value).toLowerCase().includes(needle) || o.value.toLowerCase().includes(needle)) : options
+    // 空值那一项（「全部服务」之类）始终排在最前，且不参与筛选
+    return clearable ? [{ value: '', label: placeholder }, ...hit] : hit
+  }, [options, q, clearable, placeholder])
+  const capped = shown.slice(0, MAX_COMBO_ROWS)
+  const current = options.find((o) => o.value === value)
+
+  useEffect(() => {
+    if (!open) return
+    input.current?.focus()
+    const onClick = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [open])
+
+  // 键盘上下移动时把高亮那行带进视口；刚打开时也要滚到当前选中那行
+  useEffect(() => {
+    if (open) listBox.current?.children[cursor]?.scrollIntoView({ block: 'nearest' })
+  }, [cursor, open])
+
+  const openMenu = () => {
+    if (disabled) return
+    const rect = box.current?.getBoundingClientRect()
+    // 靠右的下拉（页头那几个）往左展开，不然超出屏幕
+    setAlignRight(!!rect && rect.left + COMBO_MENU_W > window.innerWidth)
+    setQ('')
+    // 清了搜索词，高亮直接按未筛选的列表算（clearable 的话前面还多一行「全部」）
+    const idx = options.findIndex((o) => o.value === value) + (clearable ? 1 : 0)
+    setCursor(idx > 0 && idx < MAX_COMBO_ROWS ? idx : 0)
+    setOpen(true)
+  }
+  const commit = (v: string) => {
+    onChange(v)
+    setOpen(false)
+  }
+  const onKey = (e: ReactKeyboardEvent) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (!open) return openMenu()
+      setCursor((c) => (capped.length ? (c + (e.key === 'ArrowDown' ? 1 : capped.length - 1)) % capped.length : 0))
+    } else if (e.key === 'Enter') {
+      // 筛选栏都在 <form> 里，回车不能让它提交
+      e.preventDefault()
+      if (!open) openMenu()
+      else if (capped[cursor]) commit(capped[cursor].value)
+    } else if (e.key === 'Escape') {
+      if (open) e.stopPropagation()
+      setOpen(false)
+    }
+  }
+
+  return (
+    <div ref={box} className={cn('relative', className)}>
+      <button
+        type="button"
+        disabled={disabled}
+        title={title}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => (open ? setOpen(false) : openMenu())}
+        onKeyDown={onKey}
+        className={cn(
+          'flex h-9 w-full items-center gap-1.5 rounded-md border border-input bg-card px-2.5 text-left text-sm text-fg outline-none focus:border-brand focus:ring-2 focus:ring-brand/25 disabled:cursor-not-allowed disabled:opacity-50',
+          value && 'border-accent text-accent',
+        )}
+      >
+        <span className={cn('min-w-0 flex-1 truncate', mono && value && 'mono', !value && 'text-fg')}>
+          {value ? (current?.label ?? value) : placeholder}
+          {loading && '…'}
+        </span>
+        <ChevronDownIcon className="size-4 shrink-0 text-muted-fg" />
+      </button>
+      {open && (
+        <div
+          className={cn(
+            'absolute top-full z-30 mt-1 w-max min-w-full rounded-md border border-border bg-card shadow-lg',
+            alignRight ? 'right-0' : 'left-0',
+          )}
+          style={{ maxWidth: `min(90vw, ${COMBO_MENU_W}px)` }}
+        >
+          <div className="border-b border-border p-1.5">
+            <div className="relative">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
+              <Input
+                ref={input}
+                value={q}
+                onChange={(e) => {
+                  setQ(e.target.value)
+                  setCursor(0)
+                }}
+                onKeyDown={onKey}
+                placeholder={searchPlaceholder}
+                className="h-8 pl-8 text-xs"
+                aria-label="筛选选项"
+              />
+            </div>
+          </div>
+          <div ref={listBox} role="listbox" className="max-h-72 overflow-auto py-1">
+            {capped.map((o, i) => (
+              <button
+                key={o.value || '__all__'}
+                type="button"
+                role="option"
+                aria-selected={o.value === value}
+                onMouseEnter={() => setCursor(i)}
+                onClick={() => commit(o.value)}
+                className={cn(
+                  'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs',
+                  i === cursor && 'bg-accent-soft',
+                  o.value === value && 'font-semibold text-accent',
+                )}
+              >
+                <span className={cn('min-w-0 flex-1 truncate', mono && o.value && 'mono')}>{o.label ?? o.value ?? ''}</span>
+                {o.note && <span className="shrink-0 text-2xs text-muted-fg">{o.note}</span>}
+              </button>
+            ))}
+            {capped.length === 0 && <div className="px-3 py-6 text-center text-xs text-muted-fg">{loading ? '加载中…' : emptyText}</div>}
+          </div>
+          {shown.length > capped.length && (
+            <div className="border-t border-border px-2.5 py-1.5 text-2xs text-muted-fg">
+              还有 {shown.length - capped.length} 项没列出来，继续输入缩小范围
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }

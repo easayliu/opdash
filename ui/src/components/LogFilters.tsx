@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { FilterIcon, HelpCircleIcon, SlidersHorizontalIcon, XIcon } from 'lucide-react'
 import { useLogFacets } from '@/api/queries'
-import { Button, Input, Kbd, Select } from '@/components/ui'
+import { Button, Combobox, Input, Kbd } from '@/components/ui'
 import type { Params } from '@/api/client'
 import { cn } from '@/lib/utils'
 
@@ -198,15 +198,18 @@ function DimSelect({ dim, value, rangeParams, onChange }: { dim: string; value: 
   const facets = useLogFacets(dim, rangeParams)
   const values = facets.data?.values ?? []
   const options = value && !values.some((v) => v.value === value) ? [{ value, count: 0 }, ...values] : values
+  const label = DIM_LABEL[dim] ?? dim
   return (
-    <Select value={value} onChange={(e) => onChange(e.target.value)} className={cn(HALF_ON_MOBILE, 'md:w-44', value && 'border-accent text-accent')} title={dim}>
-      <option value="">{DIM_LABEL[dim] ?? dim}{facets.isPending ? '…' : ''}</option>
-      {options.map((v) => (
-        <option key={v.value} value={v.value}>
-          {v.value || '(空)'}
-          {v.count ? ` (${v.count.toLocaleString('zh-CN')})` : ''}
-        </option>
-      ))}
-    </Select>
+    <Combobox
+      value={value}
+      onChange={onChange}
+      options={options.map((v) => ({ value: v.value, label: v.value || '(空)', note: v.count ? v.count.toLocaleString('zh-CN') : undefined }))}
+      placeholder={label}
+      searchPlaceholder={`筛 ${label}…`}
+      emptyText={`没有匹配的${label}`}
+      loading={facets.isPending}
+      title={dim}
+      className={cn(HALF_ON_MOBILE, 'md:w-44')}
+    />
   )
 }

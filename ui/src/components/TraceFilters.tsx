@@ -2,8 +2,14 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { FilterIcon, PlusIcon, XIcon } from 'lucide-react'
 import type { Params } from '@/api/client'
 import { useAttrKeys, useAttrValues, useTraceValues } from '@/api/queries'
-import { Button, Input, Select } from '@/components/ui'
+import { Button, Combobox, Input, Select, type ComboOption } from '@/components/ui'
 import { cn } from '@/lib/utils'
+
+/** facet 接口返回的 `{value, count}` → 下拉选项，条数放右边当灰字 */
+const toOption = (v: { value: string; count: number }): ComboOption => ({
+  value: v.value,
+  note: v.count ? v.count.toLocaleString('zh-CN') : undefined,
+})
 
 export const KINDS = ['Server', 'Client', 'Internal', 'Producer', 'Consumer']
 
@@ -45,20 +51,17 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
   return (
     <form onSubmit={submit} className="flex flex-col gap-2.5 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
       <div className="flex flex-wrap items-center gap-2">
-        <Select
+        <Combobox
           value={state.service}
-          onChange={(e) => onChange({ ...state, service: e.target.value, span_name: '' })}
-          className={cn('min-w-0 flex-1 md:max-w-72 md:flex-none', state.service && 'border-accent text-accent')}
+          onChange={(v) => onChange({ ...state, service: v, span_name: '' })}
+          options={serviceOptions.map(toOption)}
+          placeholder="全部服务"
+          searchPlaceholder="筛服务名…"
+          emptyText="没有匹配的服务"
+          loading={services.isPending}
+          className="min-w-0 flex-1 md:w-72 md:flex-none"
           title="服务（service.name）"
-        >
-          <option value="">全部服务{services.isPending ? '…' : ''}</option>
-          {serviceOptions.map((v) => (
-            <option key={v.value} value={v.value}>
-              {v.value}
-              {v.count ? ` (${v.count.toLocaleString('zh-CN')})` : ''}
-            </option>
-          ))}
-        </Select>
+        />
         <Button
           size="md"
           active={mobileOpen || conditionCount > 0}
@@ -73,21 +76,19 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
         <Button type="submit" variant="primary" className="px-3.5 md:hidden">
           查询
         </Button>
-        <Select
+        <Combobox
           value={state.span_name}
-          onChange={(e) => onChange({ ...state, span_name: e.target.value })}
-          className={cn('w-full md:w-auto md:max-w-96', !mobileOpen && 'hidden md:block', state.span_name && 'border-accent text-accent')}
+          onChange={(v) => onChange({ ...state, span_name: v })}
+          options={opOptions.map(toOption)}
+          placeholder={state.service ? '全部操作' : '操作（先选服务）'}
+          searchPlaceholder="筛接口 / 操作…"
+          emptyText="没有匹配的操作"
+          loading={ops.isPending}
+          mono
           disabled={!state.service}
+          className={cn('w-full md:w-96', !mobileOpen && 'hidden md:block')}
           title={state.service ? '接口 / 操作（span_name）' : '先选服务'}
-        >
-          <option value="">{state.service ? `全部操作${ops.isPending ? '…' : ''}` : '操作（先选服务）'}</option>
-          {opOptions.map((v) => (
-            <option key={v.value} value={v.value}>
-              {v.value}
-              {v.count ? ` (${v.count.toLocaleString('zh-CN')})` : ''}
-            </option>
-          ))}
-        </Select>
+        />
         <div className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')} title="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
           {KINDS.map((k) => (
             <button
