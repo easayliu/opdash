@@ -7,7 +7,7 @@ import type { MetricAgg, MetricField, MetricInfo, MetricQueryResponse } from '@/
 import { LineChart, type ChartEvent, type ChartMarker, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Card, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
+import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
 import { ColorAssigner, SERIES_SLOTS } from '@/lib/colors'
 import { coveredMetricNames, isErrorLabel, resolveDashboard, type ResolvedPanel } from '@/lib/dashboards'
 import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
@@ -190,19 +190,16 @@ export function MetricsPage() {
               ))}
             </Select>
           )}
-          <Select
+          <Combobox
             value={service}
-            onChange={(e) => set({ service: e.target.value || null, metric: null })}
-            className={cn('min-w-40', service && 'border-accent text-accent')}
+            onChange={(v) => set({ service: v || null, metric: null })}
+            options={allServices.map((s) => ({ value: s }))}
+            placeholder={view === 'board' ? '选择服务' : '全部服务'}
+            searchPlaceholder="筛服务名…"
+            emptyText="没有匹配的服务"
+            className="w-44"
             title="看哪个服务的指标"
-          >
-            <option value="">{view === 'board' ? '选择服务' : '全部服务'}</option>
-            {allServices.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </Select>
+          />
           {catalog.isFetching && <Spinner className="size-3.5" />}
         </span>
       </header>
@@ -1142,14 +1139,17 @@ function MetricExplorer({
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">
       {isMobile ? (
         <div className="border-b border-border bg-card px-3 py-2.5">
-          <Select value={metric} onChange={(e) => pick(e.target.value)} className="w-full">
-            <option value="">选择指标{loading ? '…' : `（${shown.length}）`}</option>
-            {shown.map((m) => (
-              <option key={`${m.name}:${m.type}`} value={m.name}>
-                {m.name}
-              </option>
-            ))}
-          </Select>
+          <Combobox
+            value={metric}
+            onChange={pick}
+            options={shown.map((m) => ({ value: m.name, note: m.type }))}
+            placeholder={`选择指标${loading ? '' : `（${shown.length}）`}`}
+            searchPlaceholder="搜指标名…"
+            emptyText="没有匹配的指标"
+            loading={loading}
+            mono
+            className="w-full"
+          />
         </div>
       ) : (
         <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-card lg:w-80">
