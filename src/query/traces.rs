@@ -146,6 +146,34 @@ impl TraceSort {
 /// 没选服务时允许的最大时间跨度。再大只能裁剪到天分区，扫的是全集群所有服务的 span。
 pub const UNSCOPED_MAX_RANGE_MS: i64 = 6 * 3_600_000;
 
+/// 「最新在前」的候选查询先从时间窗尾部探这几段，凑够 limit 条就不用扫整个窗口。
+///
+/// `timestamp` 不是排序键前缀（排序键是 `(service_name, span_name, toDateTime(timestamp))`），
+/// `ORDER BY timestamp DESC` 没法像日志页那样倒着读、读够就停——线上 `EXPLAIN` 里是
+/// `Sorting (Sorting for ORDER BY)`，时间窗内每行的 `trace_id + timestamp` 都得读出来重排。
+/// 但最新的 50 条挤在窗口末尾，先查最后一小段就够：线上实测（8000+ span/s）1 分钟窗 124 万行
+/// 就凑满 50 条，整窗 1 小时是 3043 万行。
+///
+/// 为什么最小一级是 1 分钟而不是 5 秒：时间是第三级排序键，每个 `(service_name, span_name)`
+/// 组合都得捞一段 granule，5 秒窗实测也要读 103 万行，再小没有收益。
+///
+/// 探空的代价是多一次往返（约 150 ms），而探空的查询多半锁了服务、走排序键前缀本来就便宜
+/// （最冷的服务整窗 6 小时也只有 3.5 万行）。按耗时排不能用：最慢的那条可能在窗口任何位置。
+pub const PROBE_WINDOWS_MS: &[i64] = &[60_000, 15 * 60_000];
+
+/// 摘要查询在候选时间跨度之外前后各放宽多少：一条 trace 的其它 span（尤其异步消费的）
+/// 落在匹配到的那个 span 前后。见 [`TraceQueries::summaries`]。
+pub const SUMMARY_WIDEN_MS: i64 = 10 * 60_000;
+
+/// 候选落在哪一段时间里。摘要查询按它裁剪，而不是按整个搜索窗——差别可以是三个数量级
+/// （线上实测 16 毫秒 vs 1 小时）。空列表返回 `None`（调用方这时也不会去查摘要）。
+pub fn candidate_range(rows: &[CandidateRow]) -> Option<TimeRange> {
+    let from_ms = rows.iter().map(|r| r.ts_ms).min()?;
+    let to_ms = rows.iter().map(|r| r.ts_ms).max()?;
+    // 时间谓词是左闭右开，最晚那个 span 自己也得落在里面
+    Some(TimeRange { from_ms: from_ms.max(0), to_ms: to_ms.max(0) + 1 })
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TraceFilter {
     pub range: Option<TimeRange>,
@@ -218,9 +246,14 @@ impl TraceFilter {
     }
 }
 
+/// 候选 trace 以及它那个「排第一」的匹配 span 的时间戳：按时间排时是最新的那个 span，
+/// 按耗时排时是最慢的那个。摘要查询靠它把时间谓词收窄到候选真正所在的那一小段，
+/// 见 [`TraceQueries::summaries`]。
 #[derive(Debug, Deserialize)]
 pub struct CandidateRow {
     pub trace_id: String,
+    #[serde(deserialize_with = "num::de")]
+    pub ts_ms: i64,
 }
 
 /// 详情第一步定位到的一个 span：在哪个排序键区间、哪一毫秒。
@@ -486,14 +519,25 @@ impl TraceQueries<'_> {
             TraceSort::Duration => "duration_ns DESC, timestamp DESC",
         };
         let sql = format!(
-            "SELECT trace_id\nFROM {from}\nWHERE {where_sql}\nORDER BY {order}\nLIMIT 1 BY trace_id\nLIMIT {limit}",
+            "SELECT trace_id, toUnixTimestamp64Milli(timestamp) AS ts_ms\nFROM {from}\nWHERE {where_sql}\nORDER BY {order}\nLIMIT 1 BY trace_id\nLIMIT {limit}",
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
     }
 
-    /// 第二步：这些 trace 各自的摘要。`range` 给了就前后各放宽 10 分钟裁剪分区（同一条 trace 的
-    /// 其它 span 可能跨出筛选范围），只按 id 查时不限时间，走 bloom filter。
+    /// 第二步：这些 trace 各自的摘要。`range` 给了就前后各放宽 [`SUMMARY_WIDEN_MS`] 裁剪分区
+    /// （同一条 trace 的其它 span 可能跨出筛选范围），只按 id 查时不限时间，走 bloom filter。
+    ///
+    /// **`range` 要传候选自己的时间跨度，不是整个搜索窗**（见 [`candidate_range`]）。`trace_id`
+    /// 上只有 bloom filter（GRANULARITY 4，2.5% 误报），50 个 id 一起 OR，一个索引块活下来的概率
+    /// 是 `1 - 0.975^50 ≈ 72%`——线上 `EXPLAIN indexes=1` 实测 8513/11480，跟期望值对得上。
+    /// 也就是说这一步基本挡不住块，**唯一的杠杆是把主键能圈到的时间窗做小**。而「最新的 50 条」
+    /// 挤在一起：线上实测这 50 条候选的时间跨度只有 16 毫秒，搜索窗却是 1 小时。锚到候选之后
+    /// 主键剩 3408 个 granule（原来 11480），同一条查询 **2603 万行 / 1111 MiB / 1377 ms →
+    /// 783 万行 / 362 MiB / 449 ms**。
+    ///
+    /// 放宽量仍然是 10 分钟：实测再收到 ±1 分钟就会丢 span（一条链路的「总跨度」从 301 秒
+    /// 变成 0.13 秒），±10 分钟的聚合结果和现在的实现逐字段一致。
     pub fn summaries(&self, ids: &[String], range: Option<&TimeRange>) -> Result<Query> {
         if ids.is_empty() {
             return Err(Error::bad_request("没有 trace id"));
@@ -501,7 +545,7 @@ impl TraceQueries<'_> {
         let mut b = Bindings::new();
         let mut clauses = vec![format!("trace_id IN {}", b.bind("Array(String)", ids))];
         if let Some(range) = range {
-            clauses.push(b.time_predicate("timestamp", &range.widen(10 * 60_000)));
+            clauses.push(b.time_predicate("timestamp", &range.widen(SUMMARY_WIDEN_MS)));
         }
         // 写入重试会造成重复行，计数按 span_id 去重
         let sql = format!(
@@ -1104,6 +1148,11 @@ mod tests {
         };
         let query = q.candidates(&filter, TraceSort::Duration, 50).unwrap();
         let sql = query.sql();
+        // 候选顺带把时间戳带回来，摘要查询靠它收窄时间谓词
+        assert!(
+            sql.starts_with("SELECT trace_id, toUnixTimestamp64Milli(timestamp) AS ts_ms"),
+            "{sql}"
+        );
         assert!(sql.contains("service_name = {p2:String}"), "{sql}");
         assert!(sql.contains("span_name = {p3:String}"), "{sql}");
         assert!(sql.contains("span_kind IN {p4:Array(String)}"), "{sql}");
@@ -1144,6 +1193,18 @@ mod tests {
         assert_eq!(s.params()[1].1, (1_000_000 - 600_000).to_string());
         assert_eq!(s.params()[2].1, (2_000_000 + 600_000).to_string());
         assert!(q.summaries(&[], None).is_err());
+    }
+
+    #[test]
+    fn candidate_range_covers_the_newest_candidate() {
+        let row = |ts_ms| CandidateRow { trace_id: "a".into(), ts_ms };
+        assert!(candidate_range(&[]).is_none());
+        let r = candidate_range(&[row(2_000), row(1_000), row(1_500)]).unwrap();
+        assert_eq!(r.from_ms, 1_000);
+        // 时间谓词左闭右开，最晚那个 span 自己也得落在范围里
+        assert_eq!(r.to_ms, 2_001);
+        // 负时间戳不该把范围拖到 0 以前（widen 之后还要当参数发出去）
+        assert_eq!(candidate_range(&[row(-5)]).unwrap().from_ms, 0);
     }
 
     #[test]

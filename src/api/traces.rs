@@ -14,9 +14,10 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
-    AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, HeatmapRow, KeyRow, LocatedSpan, Span,
-    SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary,
-    ValueRow, normalize_kind, normalize_span_id, normalize_trace_id,
+    AttrFilter, CLIENT_KINDS, CandidateRow, ENTRY_KINDS, HeatmapRow, KeyRow, LocatedSpan,
+    PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink, SpanRow, SummaryRow,
+    TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow, candidate_range, normalize_kind,
+    normalize_span_id, normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -134,27 +135,23 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
     let limit = p.get_limit("limit", 50, state.config.max_rows.min(500))?;
 
     // 直接给了 trace id：跳过检索，只查这一条的摘要（不限时间，走 bloom filter）
-    let (ids, range, mut stats) = if let Some(raw) = p.get("trace_id") {
-        (vec![normalize_trace_id(raw)?], None, Stats::default())
+    let (ids, narrow, full, mut stats) = if let Some(raw) = p.get("trace_id") {
+        (vec![normalize_trace_id(raw)?], None, None, Stats::default())
     } else {
         let filter = build_filter(&state, &schema, &p, sort == TraceSort::Duration)?;
-        let candidates =
-            state.client.rows::<CandidateRow>(queries.candidates(&filter, sort, limit)?).await?;
-        (
-            candidates.rows.into_iter().map(|r| r.trace_id).collect::<Vec<_>>(),
-            filter.range,
-            candidates.stats,
-        )
+        let (rows, stats) = candidates(&state, &queries, &filter, sort, limit).await?;
+        // 摘要先按候选自己的时间跨度查，不是按整个搜索窗，见 TraceQueries::summaries
+        let narrow = candidate_range(&rows);
+        (rows.into_iter().map(|r| r.trace_id).collect::<Vec<_>>(), narrow, filter.range, stats)
     };
     if ids.is_empty() {
         return Ok(Json(SearchResponse { traces: Vec::new(), limit, sort, stats }));
     }
-    let summaries =
-        state.client.rows::<SummaryRow>(queries.summaries(&ids, range.as_ref())?).await?;
-    stats.absorb(&summaries.stats);
+    let (rows, summary_stats) = summaries(&state, &queries, &ids, narrow, full).await?;
+    stats.absorb(&summary_stats);
     // 保持候选查询的顺序（按时间 / 按耗时）
     let mut by_id: std::collections::HashMap<String, TraceSummary> =
-        summaries.rows.into_iter().map(|r| (r.trace_id.clone(), TraceSummary::from(r))).collect();
+        rows.into_iter().map(|r| (r.trace_id.clone(), TraceSummary::from(r))).collect();
     let traces: Vec<TraceSummary> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
     // 候选查询刚看到的 trace 在聚合查询里找不到：正常不该发生（同一张表、时间范围还放宽了 10 分钟），
     // 真出现多半是分片 / 副本一时不一致，把 id 记下来好对着库查
@@ -172,6 +169,91 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
         );
     }
     Ok(Json(SearchResponse { traces, limit, sort, stats }))
+}
+
+/// 候选 trace。按时间排时先从时间窗尾部探一小段，凑够 `limit` 条就收工——`timestamp` 不是
+/// 排序键前缀，扫整个窗口是这条查询的全部成本，见 [`PROBE_WINDOWS_MS`]。
+///
+/// 提前停不会漏：探测窗之外的 trace，它所有匹配 span 都比窗口起点旧，排名必然在这 `limit` 条
+/// 之后。同一毫秒内的并列本来就无序（现在的实现自己跑两遍也会换一条），探不探测都一样。
+async fn candidates(
+    state: &AppState,
+    queries: &TraceQueries<'_>,
+    filter: &TraceFilter,
+    sort: TraceSort,
+    limit: u32,
+) -> Result<(Vec<CandidateRow>, Stats)> {
+    let mut stats = Stats::default();
+    if sort == TraceSort::Time
+        && let Some(full) = filter.range
+    {
+        for window in PROBE_WINDOWS_MS {
+            // 搜索窗本身就比探测窗窄，直接查整窗，别白搭一次往返
+            if full.span_ms() <= *window {
+                break;
+            }
+            let mut probe = filter.clone();
+            probe.range = Some(TimeRange { from_ms: full.to_ms - window, to_ms: full.to_ms });
+            let hit =
+                state.client.rows::<CandidateRow>(queries.candidates(&probe, sort, limit)?).await?;
+            stats.absorb(&hit.stats);
+            if hit.rows.len() as u32 >= limit {
+                return Ok((hit.rows, stats));
+            }
+        }
+    }
+    let all = state.client.rows::<CandidateRow>(queries.candidates(filter, sort, limit)?).await?;
+    stats.absorb(&all.stats);
+    Ok((all.rows, stats))
+}
+
+/// 这些 trace 的摘要。先按候选自己的时间跨度查——便宜得多——再把**窗口里没找到根 span**
+/// 的那几条按完整搜索窗补一次。
+///
+/// 为什么要补：收窄窗口会切掉跑得久的链路（MQ 消费那种一跑几十分钟的）。线上实测采样 10.7 万条
+/// 链路，跨度超过 10 分钟的只有 0.02%，但它们 span 多，被「最新的 50 条」抽中的概率也高，
+/// 一页里能有 0~4 条。`root_count = 0` 正好认得出来：完整的链路一定有一个 `parent_span_id = ''`
+/// 的根 span，找不到就说明前面被切了。
+///
+/// 补捞不贵：`trace_id` 的 bloom filter 是 2.5% 误报，50 个 id 一起 OR 有 72% 的块活下来，
+/// 换成几条 id 就回到个位数百分比。四个时间窗上实测，**摘要结果与只查完整窗口逐字段一致
+/// （0/50 有出入），扫描量少 2.4~3.5 倍**；最坏的一个窗口（50 条里 16 条本来就没有根 span）
+/// 是打平，不会更差。
+async fn summaries(
+    state: &AppState,
+    queries: &TraceQueries<'_>,
+    ids: &[String],
+    narrow: Option<TimeRange>,
+    full: Option<TimeRange>,
+) -> Result<(Vec<SummaryRow>, Stats)> {
+    // 搜索窗本来就没比候选跨度宽多少（放宽 10 分钟之后更是如此）就别收窄了，省得白补一次
+    let narrow = narrow.filter(|n| match full {
+        Some(f) => n.widen(SUMMARY_WIDEN_MS).span_ms() * 2 <= f.widen(SUMMARY_WIDEN_MS).span_ms(),
+        None => false,
+    });
+    let mut stats = Stats::default();
+    let first = state
+        .client
+        .rows::<SummaryRow>(queries.summaries(ids, narrow.as_ref().or(full.as_ref()))?)
+        .await?;
+    stats.absorb(&first.stats);
+    let mut rows = first.rows;
+    let (Some(_), Some(full)) = (narrow, full) else { return Ok((rows, stats)) };
+    let cut: Vec<String> =
+        rows.iter().filter(|r| r.root_count == 0).map(|r| r.trace_id.clone()).collect();
+    if cut.is_empty() {
+        return Ok((rows, stats));
+    }
+    let again = state.client.rows::<SummaryRow>(queries.summaries(&cut, Some(&full))?).await?;
+    stats.absorb(&again.stats);
+    let mut fixed: std::collections::HashMap<String, SummaryRow> =
+        again.rows.into_iter().map(|r| (r.trace_id.clone(), r)).collect();
+    for row in &mut rows {
+        if let Some(whole) = fixed.remove(&row.trace_id) {
+            *row = whole;
+        }
+    }
+    Ok((rows, stats))
 }
 
 /// 热力图每个数量级分几档。4 档 = 1 / 1.8 / 3.2 / 5.6 倍的边界。
