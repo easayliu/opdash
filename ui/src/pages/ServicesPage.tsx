@@ -6,6 +6,7 @@ import type { MetricEvent, OverviewResponse, ServiceStat } from '@/api/types'
 import { Sparkline } from '@/components/charts/Sparkline'
 import { StatsLine } from '@/components/StatsLine'
 import { Button, Card, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
+import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Compare } from '@/lib/compare'
 import { change, changeTone, formatChange, healthRank, meaningfulLatency, pct, serviceHealth, type Health } from '@/lib/health'
 import { logsHref, metricsHref, serviceHref, tracesHref, type Window } from '@/lib/links'
 import { formatDurationMs, formatNumber, formatTs } from '@/lib/time'
@@ -26,14 +27,6 @@ const COLUMNS: { key: SortKey; label: string; align?: 'right'; title?: string }[
   { key: 'p99_ms', label: 'P99', align: 'right' },
   { key: 'max_ms', label: '最大', align: 'right' },
 ]
-
-/** 对比基线。默认昨天同时段：和上一小时比的话，白天永远在涨、晚上永远在跌 */
-const COMPARE = [
-  { value: 'day', label: '和昨天同时段比', short: '昨天同时段' },
-  { value: 'week', label: '和上周同时段比', short: '上周同时段' },
-  { value: 'prev', label: '和上一周期比', short: '上一周期' },
-] as const
-type Compare = (typeof COMPARE)[number]['value']
 
 /** 卡片排序 */
 const ORDERS = [
@@ -67,7 +60,7 @@ function HealthDot({ level, reasons }: { level: Health; reasons: string[] }) {
 }
 
 /** 变化那一小段：`+12%` 红绿灰 */
-function Delta({ delta, upIs, className }: { delta: number | null; upIs: 'bad' | 'neutral'; className?: string }) {
+export function Delta({ delta, upIs, className }: { delta: number | null; upIs: 'bad' | 'neutral'; className?: string }) {
   const tone = changeTone(delta, upIs)
   return (
     <span className={cn('shrink-0 text-2xs tabular-nums', tone === 'danger' && 'text-danger', tone === 'ok' && 'text-ok', tone === 'muted' && 'text-muted-fg', className)}>
@@ -114,25 +107,25 @@ function QuickLinks({ service, win, logDim, hasMetrics, className }: { service: 
 }
 
 /**
- * 异常服务卡上多的一行：**P95 是哪个接口拖的**。只对被判成异常的服务查（一般就几个），
- * 当前窗和对比窗各查一次入口接口表，挑请求数够多里 P95 最高的那个。
+ * 异常服务卡上多的一行：**是哪个接口的事**。只对被判成异常的服务查（一般就几个），接口表
+ * 一次返回两个窗口，挑法和详情页的变化榜共用（见 lib/compare.ts）：错误爆了就说错误，慢了
+ * 就说慢了。一个接口都没越过阈值（劣化摊薄在几百个接口上）才退回去说当前 P95 最高的那个。
  */
-function Contributor({ service, win, prev }: { service: string; win: Window; prev: Window }) {
-  const cur = useOperations(service, { from: win.fromMs, to: win.toMs, kind: 'entry' })
-  const before = useOperations(service, { from: prev.fromMs, to: prev.toMs, kind: 'entry' })
-  const pick = useMemo(() => {
-    const ops = (cur.data?.operations ?? []).filter((o) => o.requests >= 30)
-    if (!ops.length) return null
-    const top = [...ops].sort((a, b) => b.p95_ms - a.p95_ms)[0]
-    const old = before.data?.operations.find((o) => o.span_name === top.span_name && o.kind === top.kind)
-    return { top, old }
-  }, [cur.data, before.data])
-  if (!pick) return null
-  const { top, old } = pick
+function Contributor({ service, win, compare }: { service: string; win: Window; compare: Compare }) {
+  const q = useOperations(service, { from: win.fromMs, to: win.toMs, kind: 'entry', compare })
+  const line = useMemo(() => {
+    const ops = q.data?.operations ?? []
+    const mover = topMovers(ops, 1)[0]
+    if (mover) return { name: mover.op.span_name, text: mover.detail, requests: mover.op.requests }
+    const top = ops.filter((o) => o.requests >= 30).sort((a, b) => b.p95_ms - a.p95_ms)[0]
+    if (!top) return null
+    const from = top.prev ? `${formatDurationMs(top.prev.p95_ms)} → ` : ''
+    return { name: top.span_name, text: `P95 ${from}${formatDurationMs(top.p95_ms)}`, requests: top.requests }
+  }, [q.data])
+  if (!line) return null
   return (
-    <div className="mt-1 truncate text-2xs text-muted-fg" title={`${top.span_name}（${formatNumber(top.requests)} 次）`}>
-      主要是 <span className="mono text-fg">{top.span_name}</span>：P95 {old ? `${formatDurationMs(old.p95_ms)} → ` : ''}
-      <span className="font-semibold text-fg">{formatDurationMs(top.p95_ms)}</span>
+    <div className="mt-1 truncate text-2xs text-muted-fg" title={`${line.name}（${formatNumber(line.requests)} 次）`}>
+      主要是 <span className="mono text-fg">{line.name}</span>：<span className="font-medium text-fg">{line.text}</span>
     </div>
   )
 }
@@ -165,7 +158,7 @@ export function ServicesPage() {
   const meta = useMeta()
   const navigate = useNavigate()
   const isMobile = useIsMobile()
-  const compare = (COMPARE.find((c) => c.value === params.get('cmp'))?.value ?? 'day') as Compare
+  const compare = parseCompare(params.get('cmp'))
   const order = (ORDERS.find((o) => o.value === params.get('sort'))?.value ?? 'health') as Order
   // 表格 9 列手机塞不下，窄屏一律卡片
   const view = !isMobile && params.get('view') === 'table' ? 'table' : 'cards'
@@ -177,7 +170,6 @@ export function ServicesPage() {
   const hasMetrics = !!meta.data?.metrics
 
   const q = useServices({ from: range.fromMs, to: range.toMs, compare })
-  const prevWin: Window = { fromMs: q.data?.prev_from_ms ?? range.fromMs, toMs: q.data?.prev_to_ms ?? range.toMs }
   // 全站的重启 / 新 pod，一次查完按服务分
   const events = useMetricEvents({ from: range.fromMs, to: range.toMs, metric: 'jvm.cpu.time' }, hasMetrics)
   const eventsByService = useMemo(() => {
@@ -212,7 +204,7 @@ export function ServicesPage() {
     })
     return list
   }, [shown, tableSort])
-  const cmpShort = COMPARE.find((c) => c.value === compare)!.short
+  const cmpShort = compareShort(compare)
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -229,7 +221,7 @@ export function ServicesPage() {
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
             <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="搜服务" className="h-8 w-36 pl-8 text-xs" aria-label="搜服务" />
           </span>
-          <Select value={compare} onChange={(e) => set({ cmp: e.target.value === 'day' ? null : e.target.value })} className="h-8 text-xs" title="所有变化和哪一段时间比">
+          <Select value={compare} onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })} className="h-8 text-xs" title="所有变化和哪一段时间比">
             {COMPARE.map((c) => (
               <option key={c.value} value={c.value}>
                 {c.label}
@@ -285,7 +277,7 @@ export function ServicesPage() {
                 </h2>
                 <div className={cn('grid gap-3 sm:grid-cols-2 xl:grid-cols-3', q.isFetching && 'opacity-70')}>
                   {bad.map(({ s, health }) => (
-                    <BigCard key={s.service} s={s} health={health} win={win} prev={prevWin} events={eventsByService.get(s.service) ?? []} logDim={logDim} hasMetrics={hasMetrics} />
+                    <BigCard key={s.service} s={s} health={health} win={win} compare={compare} events={eventsByService.get(s.service) ?? []} logDim={logDim} hasMetrics={hasMetrics} />
                   ))}
                 </div>
               </section>
@@ -310,7 +302,7 @@ export function ServicesPage() {
                     </div>
                   )}
                   {fine.map(({ s, health }) => (
-                    <Row key={s.service} s={s} health={health} win={win} events={eventsByService.get(s.service) ?? []} logDim={logDim} hasMetrics={hasMetrics} mobile={isMobile} />
+                    <Row key={s.service} s={s} health={health} win={win} compare={compare} events={eventsByService.get(s.service) ?? []} logDim={logDim} hasMetrics={hasMetrics} mobile={isMobile} />
                   ))}
                 </Card>
               </section>
@@ -336,7 +328,7 @@ export function ServicesPage() {
                   </thead>
                   <tbody>
                     {tableRows.map((s) => (
-                      <tr key={s.service} className="row-hover cursor-pointer border-b border-border/60 last:border-b-0" onClick={() => navigate(serviceHref(s.service, win))}>
+                      <tr key={s.service} className="row-hover cursor-pointer border-b border-border/60 last:border-b-0" onClick={() => navigate(serviceHref(s.service, win, compare))}>
                         <td className="truncate px-4 py-2.5 font-medium" title={s.service}>
                           <span className="mr-2 inline-block align-middle">
                             <HealthDot {...serviceHealth(s)} />
@@ -431,11 +423,11 @@ function Summary({ data, all, restarts, cmpShort }: { data: OverviewResponse; al
 }
 
 /** 异常服务的大卡：数字 + 主因 + 重启 + 趋势 */
-function BigCard({ s, health, win, prev, events, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; prev: Window; events: MetricEvent[]; logDim: string; hasMetrics: boolean }) {
+function BigCard({ s, health, win, compare, events, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; logDim: string; hasMetrics: boolean }) {
   const latencyOk = meaningfulLatency(s.p95_ms)
   const isMobile = useIsMobile()
   return (
-    <Link to={serviceHref(s.service, win)} className={cn('group row-hover flex flex-col rounded-lg border bg-card p-3.5', health.level === 'bad' ? 'border-danger/50' : 'border-warn/50')}>
+    <Link to={serviceHref(s.service, win, compare)} className={cn('group row-hover flex flex-col rounded-lg border bg-card p-3.5', health.level === 'bad' ? 'border-danger/50' : 'border-warn/50')}>
       <div className="flex items-center gap-2">
         <HealthDot level={health.level} reasons={health.reasons} />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold" title={s.service}>
@@ -448,7 +440,7 @@ function BigCard({ s, health, win, prev, events, logDim, hasMetrics }: { s: Serv
       <div className={cn('mt-1 truncate text-2xs', health.level === 'bad' ? 'text-danger' : 'text-warn')} title={health.reasons.join('；')}>
         {health.reasons.join('；')}
       </div>
-      {health.reasons.some((r) => r.startsWith('P95')) && <Contributor service={s.service} win={win} prev={prev} />}
+      <Contributor service={s.service} win={win} compare={compare} />
       {/* 原因区可能是一行也可能两行（带主因），指标和火花图贴底对齐，同一行的卡片才对得齐 */}
       <div className="mt-auto grid grid-cols-3 gap-2 pt-3">
         <Stat label="请求量" value={fmtRps(s.rps)} delta={change(s.rps, s.prev?.rps)} upIs="neutral" />
@@ -461,11 +453,11 @@ function BigCard({ s, health, win, prev, events, logDim, hasMetrics }: { s: Serv
 }
 
 /** 正常服务压成一行 */
-function Row({ s, health, win, events, logDim, hasMetrics, mobile }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; events: MetricEvent[]; logDim: string; hasMetrics: boolean; mobile: boolean }) {
+function Row({ s, health, win, compare, events, logDim, hasMetrics, mobile }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; logDim: string; hasMetrics: boolean; mobile: boolean }) {
   const latencyOk = meaningfulLatency(s.p95_ms)
   if (mobile) {
     return (
-      <Link to={serviceHref(s.service, win)} className="row-hover flex items-center gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
+      <Link to={serviceHref(s.service, win, compare)} className="row-hover flex items-center gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
         <HealthDot {...health} />
         <span className="min-w-0 flex-1 truncate font-medium">{s.service || '(空)'}</span>
         <Restarts events={events} />
@@ -475,7 +467,7 @@ function Row({ s, health, win, events, logDim, hasMetrics, mobile }: { s: Servic
     )
   }
   return (
-    <Link to={serviceHref(s.service, win)} className="group row-hover grid grid-cols-[minmax(0,2fr)_1fr_1fr_1fr_7rem_5rem] items-center gap-x-3 border-b border-border/60 px-3 py-1.5 text-xs last:border-b-0">
+    <Link to={serviceHref(s.service, win, compare)} className="group row-hover grid grid-cols-[minmax(0,2fr)_1fr_1fr_1fr_7rem_5rem] items-center gap-x-3 border-b border-border/60 px-3 py-1.5 text-xs last:border-b-0">
       <span className="flex min-w-0 items-center gap-2">
         <HealthDot {...health} />
         <span className="truncate font-medium" title={s.service}>

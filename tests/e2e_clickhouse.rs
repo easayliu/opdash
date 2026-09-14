@@ -258,12 +258,19 @@ async fn every_endpoint_answers() {
         )
         .await;
         assert_eq!(status, 200, "{body}");
+        // 接口表默认带上对比窗口：哪个接口变了，靠的就是这一列
+        assert_eq!(body["compare"], "day", "{body}");
+        assert!(body["prev_from_ms"].as_i64().unwrap() < body["from_ms"].as_i64().unwrap());
+        if let Some(first) = body["operations"].as_array().and_then(|a| a.first()) {
+            assert!(first.get("prev").is_some(), "{first}");
+        }
         let (status, body) = get_json(
             &app,
             &format!("/api/services/{}/timeseries?from={from}&to={now}", urlenc(&service)),
         )
         .await;
         assert_eq!(status, 200, "{body}");
+        assert!(body["prev_from_ms"].as_i64().unwrap() < body["from_ms"].as_i64().unwrap());
     }
     let (status, body) = get_json(&app, &format!("/api/services?from={from}&to={now}")).await;
     assert_eq!(status, 200, "{body}");
