@@ -9,6 +9,8 @@
  * 尖峰是从什么时候开始的。
  */
 
+import { DEFAULT_COMPARE, type Compare } from './compare'
+
 /** 从一个时刻跳到时间段视图时，前后各放宽多少 */
 export const WINDOW_AROUND_MS = 15 * 60_000
 
@@ -45,9 +47,10 @@ export function metricHref(service: string, metric: string, win?: Window): strin
   return `/metrics?${qs({ view: 'all', service, metric }, win)}`
 }
 
-/** 服务概览（按链路算出来的请求量 / 错误率 / 分位数） */
-export function serviceHref(service: string, win?: Window): string {
-  return `/services/${encodeURIComponent(service)}?${qs({}, win)}`
+/** 服务概览（按链路算出来的请求量 / 错误率 / 分位数）。`compare` 是对比基线，跟着人走——
+ *  总览页选了「和上周同时段比」，点进服务详情看到的还得是和上周比 */
+export function serviceHref(service: string, win?: Window, compare?: Compare): string {
+  return `/services/${encodeURIComponent(service)}?${qs({ cmp: compare === DEFAULT_COMPARE ? null : compare }, win)}`
 }
 
 export function tracesHref(

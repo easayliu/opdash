@@ -24,7 +24,7 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
 | `/traces/:trace_id` | 链路详情：瀑布图、span 属性 / 资源 / 事件（异常堆栈）/ 链接、这条 trace 的日志 |
 | `/metrics` | 指标，两个页签：**服务看板**（选一个服务，按 OTel 语义约定自动拼出 HTTP / JVM / 连接池 / Kafka / Go 几套面板；顶上四个数；Top 接口 / 下游 / topic 表**点一行整页按它过滤**；进程重启和新 pod 启动标成虚线；粘性分区目录）和**全部指标**（233 个指标名平铺，自己选算法、分组、过滤；图上的圆点是 exemplar，点开就是那次请求的链路） |
 | `/services`（首页） | 服务总览：每个服务一张卡——请求量 / 错误率 / P95 各带「和上一个同样长的时间窗比」、一条迷你趋势；错误率 ≥1% / P95 涨 1.5 倍以上的标黄、≥5% / 3 倍标红并排到最前面；可切成表格 |
-| `/services/:name` | 单个服务：入口接口 / 下游调用两张表，请求量与错误、延迟分位趋势 |
+| `/services/:name` | 单个服务：**和对比时段比，是哪些接口变了**（变化榜 + 每一列都带变化的接口表），请求量与错误、延迟分位趋势（都叠着对比时段） |
 
 ### 首页 · 服务总览（照着 Cloudflare 的 Zone Overview 做的）
 
@@ -33,7 +33,8 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
 * **顶上一行全站数字**：全站请求量 / 错误率（各带变化）、异常服务数、进程重启次数、全站请求趋势
   （叠着对比时段的灰影）。
 * **异常的放大，正常的压扁**：错误率 ≥ 1% 或 P95 比对比时段高 1.5 倍以上的服务用大卡放在最上面，
-  卡上多一行**主因**（「主要是 `GET /x`：P95 80ms → 2.1s」，只对异常服务查一次接口表）和**重启标记**
+  卡上多一行**主因**（「主要是 `GET /x`：P95 80ms → 2.1s」，只对异常服务查一次接口表，挑法和
+  详情页的变化榜共用）和**重启标记**
   （`↻ 2 次重启`，hover 看时刻和 pod）；其余 80 多个服务一行一个，名字 · 请求量 · 错误率 · P95 · 小趋势，
   一屏看完全站。hover 任何一行出三个小图标直接跳日志 / 链路 / 指标。
 * **对比基线可选，默认昨天同时段**：和「上一小时」比的话，白天永远在涨、晚上永远在跌，早高峰的
@@ -55,6 +56,30 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
 * **健康色**（`ui/src/lib/health.ts`，全站同一套阈值）：错误率 ≥ 5% 红、≥ 1% 黄；P95 ≥ 200ms 且
   是上一周期的 3 倍红、1.5 倍黄；上一周期零错误、这周期开始出错也标黄。坏的排最前，顶上
   「异常 N」一点只看它们。
+
+### 单个服务 · 到底是哪些接口变了
+
+总览页回答「谁不对」，服务详情页要回答的是下一句：**是哪个接口不对**。「这个服务比昨天慢 3 倍」
+没法动手，「`POST /order/submit` 的 P95 从 120ms 变成 2.1s，这一小时多耗了 34 秒」才能。所以接口表
+当前窗和对比窗**各查一次**（`/api/services/{name}/operations?compare=day|week|prev|none`，两条并发，
+都锁定了 `service_name` 走排序键前缀，加一条的代价和第一条差不多），按 `(span_name, span_kind)`
+对齐成一行：
+
+* **变化榜**（`ui/src/lib/compare.ts`）：一屏之内告诉你「变了的是这几个」。**按影响面排，不按百分比排**——
+  一小时 20 次的接口从 10ms 变 40ms 是 +300%，会排在「5 万次的接口从 80ms 变 120ms」前面，但用户
+  在喊的是后者。所以先按性质分档（接口没了 > 错误变多 > 变慢 > 新出现 > 流量变化），档内各按自己的
+  影响面：错误看多出来多少次失败，延迟看多耗的总时间（ΔP95 × 次数），流量看多出来多少次请求。
+  阈值和总览页同一套思路（两边各 ≥ 100 次才比 P95，倍数和绝对值都要够），低流量接口的统计噪声不上榜。
+  点一行，上面两张图只看这个接口。
+* **接口表每一列都带变化**：次数 / 错误 / 错误率 / P50 / P95 / P99 下面一行是和对比时段比的
+  `+12%`、`3.1×`。表头默认按值排，切到「按变化排」就按这一列的变化排——找退化的接口时，
+  「P95 最高的」和「P95 涨得最多的」常常不是同一批：前者是本来就慢的那几个，后者才是今天新坏的。
+* **接口的出现和消失**：只比两边都有的接口会漏掉最硬的两种变化。对比窗有、当前窗一次都没有的
+  接口补成 0 次的一行标「没了」，反过来标「新」（多半是刚发的版本改了路由或 span 名）。
+* **两张图也叠对比时段**：请求量柱图后面垫一层灰影，延迟图上多一条虚线的「P95 · 昨天同时段」。
+  选了某个接口之后，这两条对比线也只属于这个接口——「它是什么时候开始和昨天不一样的」直接看出来。
+* **对比基线跟着人走**：总览页选了「和上周同时段比」，点进服务详情看到的还是和上周比
+  （`serviceHref` 带 `cmp`，见 `ui/src/lib/links.ts`）。
 
 ### 看板里的几个 Cloudflare 套路
 
@@ -474,9 +499,9 @@ GET /api/metrics/query        ?from&to&metric&service&agg&field&by&attr=k=v&ratt
 GET /api/metrics/labels       ?metric&column=attributes|resource_attributes
 GET /api/metrics/label_values ?metric&key&column
 GET /api/metrics/exemplars    ?metric&service&attr&limit
-GET /api/services             ?from&to
-GET /api/services/{name}/operations   ?kind=entry|client
-GET /api/services/{name}/timeseries   ?span_name
+GET /api/services             ?from&to&compare=day|week|prev&<维度列>
+GET /api/services/{name}/operations   ?from&to&kind=entry|client&compare=day|week|prev|none
+GET /api/services/{name}/timeseries   ?from&to&span_name&compare=day|week|prev|none
 ```
 
 ## 还没做

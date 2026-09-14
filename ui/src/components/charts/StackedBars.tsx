@@ -41,13 +41,17 @@ interface Props {
   onHoverTs?: (tMs: number | null) => void
   /** 数值怎么显示（指标页要带单位）。不给就是纯数字 */
   format?: (v: number) => string
+  /** 对比时段同一格的量，画成垫在柱子后面的浅灰影子——形状一比就知道是「这个时段本来就这样」
+   *  还是「今天不一样」（和总览卡上的迷你趋势同一套读法）。值从 `values[ghost.key]` 取，
+   *  不参与堆叠，但会算进纵轴最大值，不然影子会撑出画布 */
+  ghost?: { key: string; label: string }
   className?: string
 }
 
 const M = { left: 48, right: 8, top: 8, bottom: 22 }
 
 /** 按时间分桶的堆叠柱状图：日志直方图、请求量 / 错误数都用它。 */
-export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, onPointClick, events, syncTs, onHoverTs, format = formatCompact, className }: Props) {
+export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, onPointClick, events, syncTs, onHoverTs, format = formatCompact, ghost, className }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; bucket: BarBucket } | null>(null)
   const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
@@ -58,7 +62,15 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
   const xOf = (t: number) => M.left + ((t - fromMs) / span) * W
   const tOf = (x: number) => fromMs + ((x - M.left) / Math.max(1, W)) * span
 
-  const max = useMemo(() => Math.max(0, ...buckets.map((b) => series.reduce((s, k) => s + (b.values[k.key] ?? 0), 0))), [buckets, series])
+  const ghostKey = ghost?.key
+  const max = useMemo(
+    () =>
+      Math.max(
+        0,
+        ...buckets.map((b) => Math.max(series.reduce((s, k) => s + (b.values[k.key] ?? 0), 0), ghostKey ? (b.values[ghostKey] ?? 0) : 0)),
+      ),
+    [buckets, series, ghostKey],
+  )
   const yMax = niceMax(max)
   const yOf = (v: number) => M.top + H - (yMax > 0 ? (v / yMax) * H : 0)
   const slot = (widthMs / span) * W
@@ -139,6 +151,24 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
               {formatTick(t, widthMs)}
             </text>
           ))}
+          {ghost &&
+            buckets.map((b) => {
+              const v = b.values[ghost.key] ?? 0
+              if (v <= 0) return null
+              // 比主柱宽一点，像垫在后面的影子；再宽就糊成一片
+              const w = Math.min(slot, barW + 4)
+              return (
+                <rect
+                  key={`ghost${b.t_ms}`}
+                  x={xOf(b.t_ms) + slot / 2 - w / 2}
+                  y={yOf(v)}
+                  width={w}
+                  height={Math.max(1, M.top + H - yOf(v))}
+                  fill="var(--muted-fg)"
+                  opacity={0.18}
+                />
+              )
+            })}
           {buckets.map((b) => {
             let acc = 0
             const cx = xOf(b.t_ms) + slot / 2
@@ -211,6 +241,9 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
             ...series
               .filter((s) => (hover.bucket.values[s.key] ?? 0) > 0)
               .map((s) => ({ color: s.color, label: s.label, value: format(hover.bucket.values[s.key] ?? 0) })),
+            ...(ghost && (hover.bucket.values[ghost.key] ?? 0) > 0
+              ? [{ label: ghost.label, value: format(hover.bucket.values[ghost.key] ?? 0) }]
+              : []),
           ]}
         />
       )}

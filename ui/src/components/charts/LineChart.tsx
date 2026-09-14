@@ -9,6 +9,8 @@ export interface LineSeries {
   key: string
   label: string
   color: string
+  /** 画成虚线。对比时段的那条线用它：同一个颜色体系里，虚线一眼就读成「这不是现在」 */
+  dashed?: boolean
 }
 
 export interface LinePoint {
@@ -222,7 +224,16 @@ export function LineChart({
                       />
                     ))}
                 {segs.map((seg, i) => (
-                  <path key={i} d={line(seg)} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+                  <path
+                    key={i}
+                    d={line(seg)}
+                    fill="none"
+                    stroke={s.color}
+                    strokeWidth={s.dashed ? 1.5 : 2}
+                    strokeDasharray={s.dashed ? '5 4' : undefined}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
                 ))}
                 {dots && segs.flat().map(([x, y], i) => <circle key={i} cx={x} cy={y} r={2} fill={s.color} />)}
               </g>
@@ -306,7 +317,10 @@ export function Legend({ series, className }: { series: LineSeries[]; className?
     <div className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg', className)}>
       {series.map((s) => (
         <span key={s.key} className="inline-flex items-center gap-1.5">
-          <span className="inline-block h-0.5 w-3 rounded" style={{ background: s.color }} />
+          <span
+            className="inline-block h-0.5 w-3 rounded"
+            style={s.dashed ? { background: `repeating-linear-gradient(to right, ${s.color} 0 4px, transparent 4px 7px)` } : { background: s.color }}
+          />
           {s.label}
         </span>
       ))}

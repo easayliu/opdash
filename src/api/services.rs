@@ -103,6 +103,17 @@ fn compare_window(kind: &str, range: &TimeRange) -> Result<(String, TimeRange)> 
     ))
 }
 
+/// 和 [`compare_window`] 一样，多认一个 `none`：只看当前窗口，省掉一半查询。接口表和时间序列
+/// 各自要多跑一条查询才能给出对比，调用方不需要对比时能关掉。
+fn compare_window_opt(kind: &str, range: &TimeRange) -> Result<(String, Option<TimeRange>)> {
+    if kind == "none" {
+        return Ok((kind.to_owned(), None));
+    }
+    compare_window(kind, range).map(|(kind, prev)| (kind, Some(prev))).map_err(|_| {
+        Error::bad_request(format!("compare 只能是 prev / day / week / none，不是 {kind:?}"))
+    })
+}
+
 async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<OverviewResponse>> {
     let schema = state.schema.get().await?;
     let range = range(&state, &p)?;
@@ -236,6 +247,20 @@ pub struct OperationStat {
     pub p95_ms: f64,
     pub p99_ms: f64,
     pub max_ms: f64,
+    /// 对比窗口里同一个接口的同一组数。`compare=none`、或者那段时间没有这个接口（新上的接口）
+    /// 就是 null
+    pub prev: Option<PrevOp>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+pub struct PrevOp {
+    pub requests: u64,
+    pub errors: u64,
+    pub error_rate: f64,
+    pub rps: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -243,10 +268,22 @@ pub struct OperationsResponse {
     pub service: String,
     /// `entry`（Server / Consumer）或 `client`（Client / Producer）
     pub kind: String,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// 对比窗口怎么取，见 [`compare_window_opt`]。`none` 表示没查对比窗口，每行的 `prev` 都是 null
+    pub compare: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_from_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_to_ms: Option<i64>,
     pub operations: Vec<OperationStat>,
     pub stats: Stats,
 }
 
+/// 接口表。服务级的「比昨天慢了 3 倍」只说明有事，**是哪个接口**才是能动手的信息，所以这里
+/// 当前窗和对比窗各查一次，按 `(span_name, span_kind)` 对齐成一行，前端按变化排序。
+///
+/// 两条查询都锁定了 `service_name`，走排序键前缀，加一条的代价和第一条差不多（而且是并发发的）。
 async fn operations(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -263,13 +300,53 @@ async fn operations(
         }
     };
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
-    let result =
-        state.client.rows::<OperationRow>(queries.operations(&range, &name, kinds)?).await?;
+    let (compare, prev_range) = compare_window_opt(p.get("compare").unwrap_or("day"), &range)?;
+    let current_query = queries.operations(&range, &name, kinds)?;
+    let (current, previous) = match &prev_range {
+        Some(prev) => {
+            let prev_query = queries.operations(prev, &name, kinds)?;
+            let (current, previous) = tokio::try_join!(
+                state.client.rows::<OperationRow>(current_query),
+                state.client.rows::<OperationRow>(prev_query),
+            )?;
+            (current, Some(previous))
+        }
+        None => (state.client.rows::<OperationRow>(current_query).await?, None),
+    };
+    let mut stats = current.stats;
     let secs = (range.span_ms() as f64 / 1000.0).max(1.0);
-    let operations = result
+    let prev_secs = prev_range.as_ref().map_or(1.0, |r| (r.span_ms() as f64 / 1000.0).max(1.0));
+    let mut prev_by_op: std::collections::HashMap<(String, String), PrevOp> = match previous {
+        Some(previous) => {
+            stats.absorb(&previous.stats);
+            previous
+                .rows
+                .into_iter()
+                .map(|r| {
+                    let stat = PrevOp {
+                        requests: r.requests,
+                        errors: r.errors,
+                        error_rate: if r.requests > 0 {
+                            r.errors as f64 / r.requests as f64
+                        } else {
+                            0.0
+                        },
+                        rps: r.requests as f64 / prev_secs,
+                        p50_ms: pct(&r.q, 0),
+                        p95_ms: pct(&r.q, 1),
+                        p99_ms: pct(&r.q, 2),
+                    };
+                    ((r.span_name, r.span_kind), stat)
+                })
+                .collect()
+        }
+        None => std::collections::HashMap::new(),
+    };
+    let mut operations: Vec<OperationStat> = current
         .rows
         .into_iter()
         .map(|r| OperationStat {
+            prev: prev_by_op.remove(&(r.span_name.clone(), r.span_kind.clone())),
             span_name: r.span_name,
             kind: r.span_kind,
             requests: r.requests,
@@ -282,11 +359,33 @@ async fn operations(
             max_ms: r.max_ms,
         })
         .collect();
+    // 对比窗口有、现在一次都没有的接口：整个接口不见了也是一种「哪些请求变了」，而且是最该被
+    // 看见的一种。补成 0 次的一行接在后面（按对比窗口的量排，输出才稳定）
+    let mut gone: Vec<((String, String), PrevOp)> = prev_by_op.into_iter().collect();
+    gone.sort_by(|a, b| b.1.requests.cmp(&a.1.requests).then_with(|| a.0.cmp(&b.0)));
+    operations.extend(gone.into_iter().map(|((span_name, kind), prev)| OperationStat {
+        span_name,
+        kind,
+        requests: 0,
+        errors: 0,
+        error_rate: 0.0,
+        rps: 0.0,
+        p50_ms: 0.0,
+        p95_ms: 0.0,
+        p99_ms: 0.0,
+        max_ms: 0.0,
+        prev: Some(prev),
+    }));
     Ok(Json(OperationsResponse {
         service: name,
         kind: kind.to_owned(),
+        from_ms: range.from_ms,
+        to_ms: range.to_ms,
+        compare,
+        prev_from_ms: prev_range.as_ref().map(|r| r.from_ms),
+        prev_to_ms: prev_range.as_ref().map(|r| r.to_ms),
         operations,
-        stats: result.stats,
+        stats,
     }))
 }
 
@@ -298,6 +397,12 @@ pub struct TimeseriesResponse {
     pub width_ms: i64,
     pub from_ms: i64,
     pub to_ms: i64,
+    /// 对比窗口怎么取，见 [`compare_window_opt`]。`none` 表示没查，每个点的 `prev` 都是 null
+    pub compare: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_from_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_to_ms: Option<i64>,
     pub points: Vec<Point>,
     pub stats: Stats,
 }
@@ -310,6 +415,17 @@ pub struct Point {
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub p99_ms: f64,
+    /// 对比窗口里相对位置相同的那一格。那一格一个请求都没有就是 null——画成 0 的话延迟曲线
+    /// 会被拽到地板上，和「那时候没有流量」分不开
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev: Option<PrevPoint>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+pub struct PrevPoint {
+    pub requests: u64,
+    pub errors: u64,
+    pub p95_ms: f64,
 }
 
 async fn timeseries(
@@ -323,10 +439,25 @@ async fn timeseries(
     let bucket = Bucket::choose(&range, tz, 120);
     let span_name = p.get("span_name").map(str::to_owned);
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
-    let result = state
-        .client
-        .rows::<TimeseriesRow>(queries.timeseries(&range, &name, span_name.as_deref(), &bucket)?)
-        .await?;
+    let (compare, prev_range) = compare_window_opt(p.get("compare").unwrap_or("day"), &range)?;
+    let current_query = queries.timeseries(&range, &name, span_name.as_deref(), &bucket)?;
+    // 对比窗口的桶按同样的宽度、从它自己的起点切，这样两边第 i 格对应同一个相对时刻
+    let prev_bucket = prev_range.as_ref().map(|prev| Bucket {
+        width_ms: bucket.width_ms,
+        origin_ms: bucket.origin_ms - (range.from_ms - prev.from_ms),
+    });
+    let (result, previous) = match (&prev_range, &prev_bucket) {
+        (Some(prev), Some(prev_bucket)) => {
+            let prev_query = queries.timeseries(prev, &name, span_name.as_deref(), prev_bucket)?;
+            let (current, previous) = tokio::try_join!(
+                state.client.rows::<TimeseriesRow>(current_query),
+                state.client.rows::<TimeseriesRow>(prev_query),
+            )?;
+            (current, Some(previous))
+        }
+        _ => (state.client.rows::<TimeseriesRow>(current_query).await?, None),
+    };
+    let mut stats = result.stats;
     let first = bucket.first_index(&range);
     let count = bucket.count(&range).max(0) as usize;
     let mut points: Vec<Point> = (0..count as i64)
@@ -337,6 +468,7 @@ async fn timeseries(
             p50_ms: 0.0,
             p95_ms: 0.0,
             p99_ms: 0.0,
+            prev: None,
         })
         .collect();
     for row in result.rows {
@@ -351,13 +483,33 @@ async fn timeseries(
         pt.p95_ms = pct(&row.q, 1);
         pt.p99_ms = pct(&row.q, 2);
     }
+    if let (Some(previous), Some(prev_range), Some(prev_bucket)) =
+        (previous, prev_range.as_ref(), prev_bucket.as_ref())
+    {
+        stats.absorb(&previous.stats);
+        let prev_first = prev_bucket.first_index(prev_range);
+        for row in previous.rows {
+            let idx = row.bucket - prev_first;
+            if idx < 0 || idx as usize >= points.len() {
+                continue;
+            }
+            points[idx as usize].prev = Some(PrevPoint {
+                requests: row.requests,
+                errors: row.errors,
+                p95_ms: pct(&row.q, 1),
+            });
+        }
+    }
     Ok(Json(TimeseriesResponse {
         service: name,
         span_name,
         width_ms: bucket.width_ms,
         from_ms: range.from_ms,
         to_ms: range.to_ms,
+        compare,
+        prev_from_ms: prev_range.as_ref().map(|r| r.from_ms),
+        prev_to_ms: prev_range.as_ref().map(|r| r.to_ms),
         points,
-        stats: result.stats,
+        stats,
     }))
 }

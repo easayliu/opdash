@@ -250,12 +250,26 @@ export interface OverviewResponse {
   from_ms: number
   to_ms: number
   /** 对比窗口怎么取：prev 上一段 / day 昨天同时段 / week 上周同时段 */
-  compare: 'prev' | 'day' | 'week'
+  compare: Compare
   prev_from_ms: number
   prev_to_ms: number
   spark_width_ms: number
   services: ServiceStat[]
   stats: Stats
+}
+
+/** 对比窗口怎么取。`none` 只有接口表和时间序列认，意思是不查对比窗口 */
+export type Compare = 'prev' | 'day' | 'week'
+
+/** 对比窗口里同一个接口的数 */
+export interface PrevOp {
+  requests: number
+  errors: number
+  error_rate: number
+  rps: number
+  p50_ms: number
+  p95_ms: number
+  p99_ms: number
 }
 
 export interface OperationStat {
@@ -269,11 +283,19 @@ export interface OperationStat {
   p95_ms: number
   p99_ms: number
   max_ms: number
+  /** 对比窗口里的同一个接口；那段时间没有它（新接口）就是 null。
+   *  反过来，对比窗口有、现在一次都没有的接口也会出现在表里，requests 是 0 */
+  prev: PrevOp | null
 }
 
 export interface OperationsResponse {
   service: string
   kind: 'entry' | 'client'
+  from_ms: number
+  to_ms: number
+  compare: Compare | 'none'
+  prev_from_ms?: number
+  prev_to_ms?: number
   operations: OperationStat[]
   stats: Stats
 }
@@ -285,6 +307,8 @@ export interface TimeseriesPoint {
   p50_ms: number
   p95_ms: number
   p99_ms: number
+  /** 对比窗口里相对位置相同的那一格；那一格没有请求就是 null（曲线在这里断开） */
+  prev?: { requests: number; errors: number; p95_ms: number } | null
 }
 
 export interface TimeseriesResponse {
@@ -293,6 +317,9 @@ export interface TimeseriesResponse {
   width_ms: number
   from_ms: number
   to_ms: number
+  compare: Compare | 'none'
+  prev_from_ms?: number
+  prev_to_ms?: number
   points: TimeseriesPoint[]
   stats: Stats
 }
