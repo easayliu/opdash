@@ -8,7 +8,7 @@ import { StatsLine } from '@/components/StatsLine'
 import { TraceFilters, type TraceFilterState } from '@/components/TraceFilters'
 import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { formatDuration, formatTsMicro, writeRange } from '@/lib/time'
-import { logsHref, metricsHref, serviceHref } from '@/lib/links'
+import { errorsHref, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
 
@@ -114,6 +114,9 @@ export function TracesPage() {
             )}
           >
             <Button size="xs">错误日志</Button>
+          </Link>
+          <Link to={errorsHref({ service: filter.service }, { fromMs: range.fromMs, toMs: range.toMs })} title="这个服务在报哪几种错，按次数排">
+            <Button size="xs">错误分组</Button>
           </Link>
           <Link to={serviceHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })}>
             <Button size="xs">服务概览</Button>

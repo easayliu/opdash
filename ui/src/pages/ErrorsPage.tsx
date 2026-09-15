@@ -34,11 +34,20 @@ export function ErrorsPage() {
   const { params, set } = useUrlState()
   const kind = (KINDS.find((k) => k.value === params.get('kind'))?.value ?? 'entry') as Kind
   const service = params.get('service') ?? ''
+  // 从服务详情页选中某个接口点过来、从「同接口的其它报错」点过来时带的。**必须传给查询**，
+  // 不然人以为在看这一个接口的错，看到的却是整个服务的，而页面上一点提示都没有
+  const spanName = params.get('span_name') ?? ''
   const opened = params.get('g') ?? ''
   const [needle, setNeedle] = useState('')
   const win: Window = { fromMs: range.fromMs, toMs: range.toMs }
 
-  const q = useErrorGroups({ from: range.fromMs, to: range.toMs, kind, service: service || undefined })
+  const q = useErrorGroups({
+    from: range.fromMs,
+    to: range.toMs,
+    kind,
+    service: service || undefined,
+    span_name: spanName || undefined,
+  })
   const services = useTraceValues({ from: range.fromMs, to: range.toMs, field: 'service', limit: 500 })
   const serviceOptions: ComboOption[] = useMemo(() => {
     const vals = services.data?.values ?? []
@@ -59,7 +68,16 @@ export function ErrorsPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
         <h1 className="text-base font-semibold">错误</h1>
-        <span className="hidden text-xs text-muted-fg xl:inline">同一种报错归一组，按次数排</span>
+        {spanName ? (
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
+            <span className="truncate">{spanName}</span>
+            <button type="button" onClick={() => set({ span_name: null, g: null })} title="看整个服务的错误">
+              ✕
+            </button>
+          </span>
+        ) : (
+          <span className="hidden text-xs text-muted-fg xl:inline">同一种报错归一组，按次数排</span>
+        )}
         {q.isFetching && <Spinner className="size-4" />}
         <span className="ml-auto flex flex-wrap items-center gap-2">
           <span className="flex h-8 items-center rounded-md border border-input p-0.5">
@@ -77,7 +95,7 @@ export function ErrorsPage() {
           </span>
           <Combobox
             value={service}
-            onChange={(v) => set({ service: v || null, g: null })}
+            onChange={(v) => set({ service: v || null, span_name: null, g: null })}
             options={serviceOptions}
             placeholder="全部服务"
             searchPlaceholder="筛服务名…"
@@ -103,7 +121,7 @@ export function ErrorsPage() {
         )}
         {q.data && !q.data.groups.length && (
           <EmptyState
-            title={service ? `${service} 这段时间没有${kind === 'client' ? '失败的下游调用' : '错误'}` : '这段时间没有错误'}
+            title={service ? `${spanName || service} 这段时间没有${kind === 'client' ? '失败的下游调用' : '错误'}` : '这段时间没有错误'}
             hint={kind === 'entry' ? '这里只看入口 span（Server / Consumer）。服务调下游失败但自己兜住了的，切到「下游调用」看。' : undefined}
           />
         )}

@@ -15,7 +15,7 @@ import { Button, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/lib/time'
-import { metricsHref, serviceHref, tracesHref } from '@/lib/links'
+import { errorsHref, metricsHref, serviceHref, tracesHref } from '@/lib/links'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
 import { positiveTerms } from '@/lib/query-syntax'
@@ -374,6 +374,9 @@ function CrossLinks({ service, win, hasMetrics }: { service?: string; win: { fro
       )}
       <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)}>
         <Button size="xs">最慢的链路</Button>
+      </Link>
+      <Link to={errorsHref({ service }, win)} title="这个服务在报哪几种错，按次数排">
+        <Button size="xs">错误分组</Button>
       </Link>
       <Link to={tracesHref({ service, errorOnly: true }, win)}>
         <Button size="xs">出错的链路</Button>

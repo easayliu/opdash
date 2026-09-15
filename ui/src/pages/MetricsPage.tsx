@@ -11,7 +11,7 @@ import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Input, Select, Spi
 import { ColorAssigner, SERIES_SLOTS } from '@/lib/colors'
 import { coveredMetricNames, isErrorLabel, resolveDashboard, type ResolvedPanel } from '@/lib/dashboards'
 import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
-import { logsHref, msFactor, seriesContext, serviceHref, traceHref, tracesHref } from '@/lib/links'
+import { errorsHref, logsHref, msFactor, seriesContext, serviceHref, traceHref, tracesHref } from '@/lib/links'
 import { formatBytes, formatDuration, formatDurationMs, formatTs } from '@/lib/time'
 import { useInView } from '@/lib/in-view'
 import { useIsMobile } from '@/lib/media'
@@ -405,6 +405,7 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
   const win = { fromMs: Number(rangeParams.from), toMs: Number(rangeParams.to) }
   const links: { to: string; label: string; title: string }[] = [
     { to: tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer', attrs }, win), label: '最慢的链路', title: '这段时间里这个服务最慢的请求' },
+    { to: errorsHref({ service }, win), label: '错误分组', title: '这个服务在报哪几种错，按次数排' },
     { to: tracesHref({ service, errorOnly: true, attrs }, win), label: '出错的链路', title: '这段时间里出错的请求' },
     { to: logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win), label: '错误日志', title: '这段时间这个服务的 ERROR / WARN 日志' },
     { to: serviceHref(service, win), label: '服务概览', title: '按链路算出来的请求量 / 错误率 / 分位数' },
