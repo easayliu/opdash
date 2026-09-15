@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { PlusIcon, SearchIcon, XIcon } from 'lucide-react'
 import type { Params } from '@/api/client'
-import { useMeta, useMetricCatalog, useMetricEvents, useMetricExemplars, useMetricLabelValues, useMetricLabels, useMetricQuery } from '@/api/queries'
+import { useErrorGroups, useMeta, useMetricCatalog, useMetricEvents, useMetricExemplars, useMetricLabels, useMetricLabelValues, useMetricQuery } from '@/api/queries'
 import type { MetricAgg, MetricField, MetricInfo, MetricQueryResponse } from '@/api/types'
 import { LineChart, type ChartEvent, type ChartMarker, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
@@ -11,6 +11,7 @@ import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Input, Select, Spi
 import { ColorAssigner, SERIES_SLOTS } from '@/lib/colors'
 import { coveredMetricNames, isErrorLabel, resolveDashboard, type ResolvedPanel } from '@/lib/dashboards'
 import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
+import { errorTitle } from '@/lib/errors'
 import { errorsHref, logsHref, msFactor, seriesContext, serviceHref, traceHref, tracesHref } from '@/lib/links'
 import { formatBytes, formatDuration, formatDurationMs, formatTs } from '@/lib/time'
 import { useInView } from '@/lib/in-view'
@@ -820,6 +821,19 @@ function DrillPopover({
   const factor = msFactor(info.unit)
   const minMs = factor != null && value != null && ['quantile', 'mean', 'max', 'avg'].includes(agg) ? value * factor : null
 
+  /**
+   * 这一格有没有报错，**打开弹层就查**，不等人点进去才发现是空的。
+   *
+   * 不能靠「放宽窗口」蒙混：线上量过，对有过错误的服务，随便点中一分钟能命中错误的概率是
+   * 10.9%，前后各放宽 30 分钟也只到 39.8%——错误本来就稀且成簇，放宽既治不好，又毁掉这个
+   * 弹层「只看这一格」的承诺（其余几条链接都精确到那一分钟）。
+   *
+   * 所以改成如实回答：有就写几种、点进去；没有就直说「这一格没有报错」——**这句本身就是答案**，
+   * 说明这个尖峰是慢不是错，不用再去翻错误页。一分钟窗口锁定服务，线上 49 ms / 0.2 MB。
+   */
+  const errs = useErrorGroups({ from: win.fromMs, to: win.toMs, service: svc, span_name: ctx.spanName })
+  const errGroups = errs.data?.groups ?? []
+
   const links: { to: string; label: string; title?: string }[] = [
     {
       to: tracesHref({ service: svc, attrs: ctx.traceAttrs, spanName: ctx.spanName, errorOnly: ctx.errorOnly, sort: 'duration' }, win),
@@ -832,6 +846,16 @@ function DrillPopover({
       to: tracesHref({ service: svc, attrs: ctx.traceAttrs, spanName: ctx.spanName, minMs, sort: 'duration' }, win),
       label: `≥ ${format(value as number)} 的链路`,
       title: '只看比这个点还慢的请求',
+    })
+  }
+  if (errGroups.length > 0) {
+    links.push({
+      to: errorsHref({ service: svc, spanName: ctx.spanName }, win),
+      label: `这一格的报错 · ${errGroups.length} 种`,
+      title: errGroups
+        .slice(0, 3)
+        .map((g) => `${errorTitle(g)}${g.message ? `: ${g.message}` : ''}（${g.count} 次）`)
+        .join('\n'),
     })
   }
   links.push({
@@ -865,6 +889,11 @@ function DrillPopover({
             </Link>
           ))}
         </div>
+        {errs.isSuccess && errGroups.length === 0 && (
+          <div className="mt-1.5 text-2xs text-muted-fg" title="这一格里这个服务没有出错的入口 span（Server / Consumer）">
+            这一格没有报错<span className="hidden sm:inline">——尖的是耗时不是错误</span>
+          </div>
+        )}
         {!ctx.useful && ctx.label === '' && (
           <div className="mt-1.5 text-2xs text-muted-fg">这个面板没有能带过去的标签，只按服务和这一格的时间筛</div>
         )}
