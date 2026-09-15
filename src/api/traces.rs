@@ -392,10 +392,9 @@ async fn errors(State(state): State<AppState>, p: Params) -> Result<Json<ErrorsR
         .map(|r| {
             total += r.n;
             ErrorGroup {
-                id: format!(
-                    "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-                    r.service_name, r.span_name, r.exc_type, r.exc_msg, r.http_status
-                ),
+                // 分组身份由 ErrorGroupRow 自己给，和 SQL 的 GROUP BY 共用一份列清单；
+                // 在这里手拼过，漏了 peer 和 span_kind，导致两组共用一个 id（见 ERROR_GROUP_KEYS）
+                id: r.group_id(),
                 service: r.service_name,
                 span_kind: r.span_kind,
                 span_name: r.span_name,

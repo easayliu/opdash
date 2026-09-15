@@ -40,6 +40,17 @@ const HEAVY_COLUMNS: &[&str] = &[
     "`links.attributes` AS link_attrs",
 ];
 
+/// 错误分组的分组键。SQL 的 `GROUP BY` 和 [`ErrorGroupRow::group_id`] **必须用同一份**。
+///
+/// 少一列的后果不是少分几组，而是**两组共用一个 id**——前端拿 id 记展开状态、React 也拿它当
+/// key，于是点开一个、长得像的那几组跟着一起展开。线上出过：`dy-control-server` 的两个 `POST`
+/// 报同一句 `SSLException: Read timed out`，只有 `peer` 不同（`log.snssdk.com` 和
+/// `webcast.amemv.com`），而当时的 id 没带 `peer`，点一个两个一起开。
+///
+/// `group_id_covers_every_group_by_column` 这个测试钉住两边对得上。
+pub const ERROR_GROUP_KEYS: &[&str] =
+    &["service_name", "span_kind", "span_name", "exc_type", "exc_msg", "http_status", "peer"];
+
 /// OTLP 的 span kind，存的是这些字符串。
 pub const SPAN_KINDS: &[&str] =
     &["Server", "Client", "Internal", "Producer", "Consumer", "Unspecified"];
@@ -977,9 +988,10 @@ impl TraceQueries<'_> {
              toUnixTimestamp64Milli(min(timestamp)) AS first_ms, toUnixTimestamp64Milli(max(timestamp)) AS last_ms,\n  \
              argMax(trace_id, timestamp) AS sample_trace, argMax(span_id, timestamp) AS sample_span\n\
              FROM {from}\nWHERE {time}\n  AND status_code = 'Error'{kinds_sql}{service_sql}{name_sql}\n\
-             GROUP BY service_name, span_kind, span_name, exc_type, exc_msg, http_status, peer\n\
+             GROUP BY {group_by}\n\
              ORDER BY n DESC, service_name\nLIMIT {limit}",
             from = self.table_ref(),
+            group_by = ERROR_GROUP_KEYS.join(", "),
         );
         Ok(Self::finish(b, sql))
     }
@@ -1138,6 +1150,26 @@ pub struct ErrorGroupRow {
     pub sample_span: String,
 }
 
+impl ErrorGroupRow {
+    /// 这一组的身份。前端按它记「哪一组展开着」、拿它做 React key、首页异常卡也靠它直达某一组。
+    ///
+    /// **取值顺序必须和 [`ERROR_GROUP_KEYS`] 一一对应**：漏掉任何一列，两组就会共用一个 id，
+    /// 点开一个另一个跟着开。分隔符用 US（`\u{1f}`），日志里的服务名 / 接口名 / 异常消息都不会
+    /// 含有它，不会撞。
+    pub fn group_id(&self) -> String {
+        [
+            self.service_name.as_str(),
+            self.span_kind.as_str(),
+            self.span_name.as_str(),
+            self.exc_type.as_str(),
+            self.exc_msg.as_str(),
+            self.http_status.as_str(),
+            self.peer.as_str(),
+        ]
+        .join("\u{1f}")
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TimeseriesRow {
     #[serde(deserialize_with = "num::de")]
@@ -1187,6 +1219,77 @@ mod tests {
 
     fn range() -> TimeRange {
         TimeRange { from_ms: 1_000_000, to_ms: 2_000_000 }
+    }
+    /// 分组 id 必须覆盖 SQL 里 `GROUP BY` 的每一列。
+    ///
+    /// 漏一列就会有两组共用一个 id，前端点开一个、另一个跟着开——线上就是漏了 `peer` 才发现的。
+    /// 这里逐列改一遍：任何一列变了，id 就必须跟着变。
+    #[test]
+    fn group_id_covers_every_group_by_column() {
+        let base = ErrorGroupRow {
+            service_name: "svc".into(),
+            span_kind: "Client".into(),
+            span_name: "POST".into(),
+            exc_type: "javax.net.ssl.SSLException".into(),
+            exc_msg: "Read timed out".into(),
+            http_status: "500".into(),
+            peer: "log.snssdk.com".into(),
+            n: 1,
+            traces: 1,
+            first_ms: 0,
+            last_ms: 0,
+            sample_trace: "t".into(),
+            sample_span: "s".into(),
+        };
+        let id = base.group_id();
+        assert_eq!(
+            id.split('\u{1f}').count(),
+            ERROR_GROUP_KEYS.len(),
+            "group_id 的列数和 GROUP BY 对不上：{id}"
+        );
+
+        // 逐列改一遍：只有分组键变了 id 才该变
+        let variants = [
+            ("service_name", ErrorGroupRow { service_name: "other".into(), ..clone_row(&base) }),
+            ("span_kind", ErrorGroupRow { span_kind: "Producer".into(), ..clone_row(&base) }),
+            ("span_name", ErrorGroupRow { span_name: "GET".into(), ..clone_row(&base) }),
+            (
+                "exc_type",
+                ErrorGroupRow { exc_type: "java.io.IOException".into(), ..clone_row(&base) },
+            ),
+            ("exc_msg", ErrorGroupRow { exc_msg: "Broken pipe".into(), ..clone_row(&base) }),
+            ("http_status", ErrorGroupRow { http_status: "404".into(), ..clone_row(&base) }),
+            // 这一条就是线上那个 bug：只有对端不同
+            ("peer", ErrorGroupRow { peer: "webcast.amemv.com".into(), ..clone_row(&base) }),
+        ];
+        assert_eq!(variants.len(), ERROR_GROUP_KEYS.len());
+        for (name, row) in &variants {
+            assert_ne!(row.group_id(), id, "只改了 {name}，id 却没变");
+        }
+
+        // 反过来：聚合值变了不该换身份，不然翻一次页展开状态就丢了
+        let mut same = clone_row(&base);
+        same.n = 999;
+        same.sample_trace = "another".into();
+        assert_eq!(same.group_id(), id);
+    }
+
+    fn clone_row(r: &ErrorGroupRow) -> ErrorGroupRow {
+        ErrorGroupRow {
+            service_name: r.service_name.clone(),
+            span_kind: r.span_kind.clone(),
+            span_name: r.span_name.clone(),
+            exc_type: r.exc_type.clone(),
+            exc_msg: r.exc_msg.clone(),
+            http_status: r.http_status.clone(),
+            peer: r.peer.clone(),
+            n: r.n,
+            traces: r.traces,
+            first_ms: r.first_ms,
+            last_ms: r.last_ms,
+            sample_trace: r.sample_trace.clone(),
+            sample_span: r.sample_span.clone(),
+        }
     }
 
     #[test]
