@@ -142,8 +142,11 @@ impl Tail {
     async fn fetch(&mut self, from_ms: i64, to_ms: i64, order: Order) -> Result<Fetched> {
         let mut filter = self.filter.clone();
         filter.range = Some(TimeRange { from_ms: from_ms.max(0), to_ms });
-        let queries =
-            LogQueries { database: &self.state.config.database, table: &self.schema.logs };
+        let queries = LogQueries {
+            database: &self.state.config.database,
+            table: &self.schema.logs,
+            max_message_chars: self.state.config.max_message_chars,
+        };
         let query = queries.search(&filter, order, self.limit, 0)?;
         let res = self.state.client.rows::<LogRow>(query).await?;
         let returned = res.rows.len();

@@ -25,3 +25,20 @@ export function useRowKeys(rows: LogRow[]): string[] {
     })
   }, [rows])
 }
+
+/**
+ * 这条日志的 message 被服务端截断了没有。
+ *
+ * 线上真有 41 MB 一条的日志（一次业务请求把整个响应体打进了日志）。不截的话，一条 52 行的
+ * 链路日志响应就是 63.8 MB、12.6 秒——页面在传输和渲染上直接假死。服务端按
+ * `--max-message-chars`（默认 16384 字符）截，并带回原始长度。
+ */
+export function messageTruncated(row: LogRow): boolean {
+  return row.message_len != null && row.message_len > row.message.length
+}
+
+/** 「只取了前 16,384 字，完整 41,149,053 字」 */
+export function truncationNote(row: LogRow): string {
+  const n = (v: number) => v.toLocaleString('zh-CN')
+  return `只取了前 ${n(row.message.length)} 字，这条日志完整有 ${n(row.message_len ?? 0)} 字`
+}

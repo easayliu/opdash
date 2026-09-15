@@ -484,6 +484,9 @@ pub struct LogRow {
     pub thread: String,
     pub logger: String,
     pub message: String,
+    /// `message` 被截断前有多少字符。等于 `message` 的长度就是没截断；导出那条路不带这个字段
+    #[serde(default, deserialize_with = "num::de_opt")]
+    pub message_len: Option<u64>,
     pub file: String,
     pub host: String,
     #[serde(flatten)]
@@ -545,6 +548,9 @@ fn displayable(kind: ColumnKind) -> bool {
 pub struct LogQueries<'a> {
     pub database: &'a str,
     pub table: &'a Table,
+    /// 每条日志的 `message` 最多取多少字符（[`crate::config::Config::max_message_chars`]）。
+    /// 只作用于列表 / 上下文 / 跟随，导出不截。
+    pub max_message_chars: u32,
 }
 
 impl LogQueries<'_> {
@@ -558,7 +564,23 @@ impl LogQueries<'_> {
     /// 线上物理带着整套 span 列（`resource_attributes JSON`、`events.attributes Array(JSON)`
     /// ……，logpipe 不往里写，全是默认值），页面上也没有地方显示它们，`SELECT *` 式地带上
     /// 只是白读、白传：线上一小时窗口取 200 行实测 0.129 GB → 0.098 GB。
-    fn select_columns(&self) -> Result<String> {
+    fn select_columns(&self, cap: Option<u32>) -> Result<String> {
+        // 截断在 SQL 里做，不是拿回来再截：线上一条 41 MB 的日志，ClickHouse 只用了 1.7 秒，
+        // 12.6 秒里另外 11 秒全花在 ClickHouse → opdash 这一程的传输上。在 Rust 里截省不掉它。
+        //
+        // 单位是**字符**不是字节（`substringUTF8` / `lengthUTF8`）：按字节切会把多字节字符劈成
+        // 半个，ClickHouse 对非法 UTF-8 的行为是未定义的，吐出来的 JSON 可能直接解析不了。
+        //
+        // 原始长度必须写成 `` `表名`.message `` ——直接写 `lengthUTF8(message)` 会解析成上面那个
+        // 截断后的别名 `message`，量出来永远等于 cap（和 [`Self::export_columns`] 里 `time`
+        // 别名踩的是同一个坑）。
+        let message = match cap {
+            Some(n) => format!(
+                "substringUTF8(message, 1, {n}) AS message, lengthUTF8({tbl}.message) AS message_len",
+                tbl = quote_ident(&self.table.name)?,
+            ),
+            None => "message".to_owned(),
+        };
         let mut cols: Vec<String> = vec![
             "toUnixTimestamp64Milli(timestamp) AS ts_ms".into(),
             "level".into(),
@@ -566,7 +588,7 @@ impl LogQueries<'_> {
             "span_id".into(),
             "thread".into(),
             "logger".into(),
-            "message".into(),
+            message,
             "file".into(),
             "host".into(),
         ];
@@ -581,7 +603,7 @@ impl LogQueries<'_> {
     fn export_columns(&self) -> Result<String> {
         // 导出给人看：时间按列的时区格式化成 `2026-09-08 16:52:15.123`。别名不能叫 timestamp：
         // ClickHouse 里 WHERE 会优先解析成这个别名（String），时间范围比较就报类型错
-        Ok(self.select_columns()?.replacen(
+        Ok(self.select_columns(None)?.replacen(
             "toUnixTimestamp64Milli(timestamp) AS ts_ms",
             "toString(timestamp) AS time",
             1,
@@ -603,7 +625,7 @@ impl LogQueries<'_> {
         // 按排序键读、读够 LIMIT 就停，见 [`order_by`]
         let sql = format!(
             "SELECT {cols}\nFROM {from}\nWHERE {where_sql}\nORDER BY {order_by}\nLIMIT {limit} OFFSET {offset}",
-            cols = self.select_columns()?,
+            cols = self.select_columns(Some(self.max_message_chars))?,
             from = self.table_ref(),
             order_by = order_by(order),
         );
@@ -677,7 +699,7 @@ impl LogQueries<'_> {
         };
         let sql = format!(
             "SELECT {cols}\nFROM {from}\nWHERE host = {host} AND file = {file}\n  AND timestamp {cmp} fromUnixTimestamp64Milli({ts})\n  AND {bound}\nORDER BY {order_by}\nLIMIT {n}",
-            cols = self.select_columns()?,
+            cols = self.select_columns(Some(self.max_message_chars))?,
             from = self.table_ref(),
             order_by = order_by(order),
         );
@@ -837,7 +859,7 @@ mod tests {
     #[test]
     fn boolean_sql() {
         let table = table();
-        let q = LogQueries { database: "logs", table: &table };
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
         let sql_of = |s: &str| {
             let filter = LogFilter { range: Some(range()), q: s.into(), ..Default::default() };
             q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned()
@@ -864,15 +886,42 @@ mod tests {
         );
         let sql = sql_of("NOT (a b)");
         assert!(sql.contains("AND NOT (positionCaseInsensitiveUTF8(message, {p2:String}) > 0 AND positionCaseInsensitiveUTF8(message, {p3:String}) > 0)"), "{sql}");
-        // 只有操作符：没有 message 条件
+        // 只有操作符：**WHERE 里**没有 message 条件。只看 WHERE——SELECT 里的
+        // `substringUTF8(message, …)` 是截断，不是过滤条件
         let sql = sql_of("OR AND");
-        assert!(!sql.contains("(message"), "{sql}");
+        let where_sql = sql.split("\nWHERE ").nth(1).unwrap_or("");
+        assert!(!where_sql.contains("message"), "{sql}");
+    }
+
+    /// 列表要截 `message`、要带回原始长度，导出不能截。
+    ///
+    /// 原始长度必须是 `` `app_log`.message `` 而不是 `message`：后者会解析成上面那个截断后的
+    /// 别名，量出来永远等于 cap。这条线上踩过（返回 16384 而不是真实的 41149053），
+    /// 单测钉住写法。
+    #[test]
+    fn list_truncates_message_but_export_does_not() {
+        let table = table();
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 4096 };
+        let filter = LogFilter { range: Some(range()), ..Default::default() };
+
+        let search = q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned();
+        assert!(search.contains("substringUTF8(message, 1, 4096) AS message"), "{search}");
+        assert!(search.contains("lengthUTF8(`app_log`.message) AS message_len"), "{search}");
+
+        let context = q.context("h", "f", 0, true, 5).unwrap().sql().to_owned();
+        assert!(context.contains("substringUTF8(message, 1, 4096) AS message"), "{context}");
+
+        // 导出是拿全文的那条路，截了就没意义了
+        let export = q.export(&filter, Order::Desc, 10).unwrap().sql().to_owned();
+        assert!(export.contains(", message,"), "{export}");
+        assert!(!export.contains("substringUTF8"), "{export}");
+        assert!(!export.contains("message_len"), "{export}");
     }
 
     #[test]
     fn long_alphanumeric_terms_use_the_token_index() {
         let table = table();
-        let q = LogQueries { database: "logs", table: &table };
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
         let sql_of = |query: &str| {
             let filter = LogFilter { range: Some(range()), q: query.into(), ..Default::default() };
             q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned()
@@ -942,7 +991,7 @@ mod tests {
                 kind: ColumnKind::classify(ty),
             });
         }
-        let q = LogQueries { database: "logs", table: &t };
+        let q = LogQueries { database: "logs", table: &t, max_message_chars: 16_384 };
         let filter = LogFilter { range: Some(range()), ..Default::default() };
         let sql = q.search(&filter, Order::Desc, 10, 0).unwrap();
         for skipped in ["span_attributes", "events.attributes", "labels"] {
@@ -955,7 +1004,7 @@ mod tests {
     #[test]
     fn search_binds_everything() {
         let table = table();
-        let q = LogQueries { database: "logs", table: &table };
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
         let filter = LogFilter {
             range: Some(range()),
             q: "支付 -超时".into(),
@@ -993,7 +1042,7 @@ mod tests {
     #[test]
     fn regex_mode_uses_match() {
         let table = table();
-        let q = LogQueries { database: "logs", table: &table };
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
         let filter = LogFilter {
             range: Some(range()),
             q: "order.*failed".into(),
@@ -1008,7 +1057,7 @@ mod tests {
     #[test]
     fn trace_id_alone_needs_no_range() {
         let table = table();
-        let q = LogQueries { database: "logs", table: &table };
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
         let filter = LogFilter { trace_id: Some("abc".into()), ..Default::default() };
         let query = q.search(&filter, Order::Asc, 10, 0).unwrap();
         assert!(query.sql().contains("WHERE trace_id = {p0:String}\n"), "{}", query.sql());
@@ -1025,7 +1074,7 @@ mod tests {
     #[test]
     fn histogram_facets_context_export() {
         let table = table();
-        let q = LogQueries { database: "logs", table: &table };
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
         let filter = LogFilter { range: Some(range()), ..Default::default() };
         let h = q.histogram(&filter, &Bucket { width_ms: 60_000, origin_ms: 0 }).unwrap();
         assert!(

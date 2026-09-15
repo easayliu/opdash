@@ -57,7 +57,10 @@ export interface LogRow {
   span_id: string
   thread: string
   logger: string
+  /** 可能被服务端截断了，判断见 [`messageTruncated`]（ui/src/lib/log-row.ts） */
   message: string
+  /** 截断前有多少字符。等于 message 的长度就是没截；导出那条路不带这个字段 */
+  message_len?: number
   file: string
   host: string
   /** 动态列：service_name / namespace / pod / container / stream / cluster …… */

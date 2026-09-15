@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
 import { Badge, Button, levelTone } from '@/components/ui'
-import { rowKey, useRowKeys } from '@/lib/log-row'
+import { messageTruncated, rowKey, truncationNote, useRowKeys } from '@/lib/log-row'
 import { useIsMobile } from '@/lib/media'
 import { formatTs } from '@/lib/time'
 import { cn, copyText, scrollParent, splitFirstLine } from '@/lib/utils'
@@ -310,6 +310,13 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
                 <div className={cn('mono break-all leading-5', !open && 'line-clamp-2')}>
                   <Highlight text={first} terms={highlight} />
                   {!open && rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
+                  {/* 展开时也标：标记要贴在文本断掉的那一点上，不然人得滚过一万六千字
+                      才在下面的详情里看到「已截断」 */}
+                  {messageTruncated(r) && (
+                    <span className="ml-1 text-warn" title={truncationNote(r)}>
+                      · 已截断
+                    </span>
+                  )}
                 </div>
               </td>
               <td className="mono px-1.5 py-1.5 text-2xs">
@@ -431,6 +438,11 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
               <div className="mono mt-1 line-clamp-3 break-all leading-5">
                 <Highlight text={first} terms={highlight} />
                 {rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
+                {messageTruncated(r) && (
+                  <span className="ml-1 text-warn" title={truncationNote(r)}>
+                    · 已截断
+                  </span>
+                )}
               </div>
             )}
           </li>
@@ -454,6 +466,11 @@ export function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; di
   ]
   return (
     <div className="space-y-3">
+      {messageTruncated(row) && (
+        <div className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-2xs text-warn">
+          {truncationNote(row)}。整条发给浏览器会把页面卡死（线上真有 41 MB 一条的），要全文请用日志页的「导出」——导出不截。
+        </div>
+      )}
       <pre className="mono max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-3 text-xs leading-5 whitespace-pre-wrap break-all">
         <Highlight text={row.message} terms={highlight} />
       </pre>

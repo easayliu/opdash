@@ -176,6 +176,7 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--max-range` | `OPDASH_MAX_RANGE` | `31d` | 允许查询的最大时间跨度 |
 | `--max-rows` / `--max-offset` | `OPDASH_MAX_ROWS` / `OPDASH_MAX_OFFSET` | `1000` / `10000` | 日志一页最多几行；最多翻到第几条 |
 | `--export-max-rows` | `OPDASH_EXPORT_MAX_ROWS` | `50000` | 导出上限 |
+| `--max-message-chars` | `OPDASH_MAX_MESSAGE_CHARS` | `16384` | 列表 / 上下文 / 跟随里每条日志的 `message` 最多取多少字符，**导出不受限**。见下面「一条日志能有多大」 |
 | `--max-trace-spans` | `OPDASH_MAX_TRACE_SPANS` | `5000` | 一条 trace 最多取多少 span，超过标记截断 |
 | `--max-read-bytes` / `--max-read-rows` | `OPDASH_MAX_READ_BYTES` / `OPDASH_MAX_READ_ROWS` | `0`（不限） | 单条查询的读量护栏（`max_bytes_to_read` / `max_rows_to_read`），超过立刻报错让用户缩小范围，比等超时体验好；集群上按分片各自计 |
 | `--max-concurrent-queries` | `OPDASH_MAX_CONCURRENT_QUERIES` | `16` | 同时最多几条查询在库上跑，排队 10 秒没名额回 503 |
@@ -251,6 +252,28 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
 指标表和这两张不一样，**它缺了不算错**：表不存在、缺 metricpipe 的固定列、或者属性列不是 JSON，
 都只是让 `/api/meta` 的 `metrics` 变成 `null`（`metrics_note` 里是原因，启动日志里也有一句），
 指标页签不显示，日志和链路一切照旧。硬要求三张表齐全的话，一个还没上指标的环境连日志都打不开了。
+
+### 一条日志能有多大
+
+线上 `message` 的 p50 是 **129 字符**、p99 是 9.4 KB——但一小时 844 万条里有 **200 条超过 1 MB，
+最大 49 MB**（业务把整个响应体打进了日志）。撞上一条，页面就完了：一条 52 行的链路日志响应
+**63.8 MB / 12.6 秒**，浏览器主线程连续无响应 **近两分钟**。
+
+所以列表、上下文、跟随这三条路都在 **SQL 里**截断 `message`（`--max-message-chars`，默认 16384 字符，
+是 p99 的 1.7 倍，正常的堆栈和 SQL 一个字都不会少），并带回原始长度 `message_len`，
+前端在文字断掉的那一点上标「· 已截断」，展开里说清楚完整有多少字、要全文去导出。
+同一个请求改完是 **103.8 KB / 0.38 秒**，主线程最长卡 5 ms。
+
+几个坑：
+
+* **必须在 SQL 里截，不能拿回来再截**：那 12.6 秒里 ClickHouse 只占 1.7 秒，另外 11 秒全花在
+  ClickHouse → opdash 这一程的传输上，在 Rust 里截省不掉。
+* **单位是字符不是字节**（`substringUTF8` / `lengthUTF8`）：按字节切会把多字节字符劈成半个，
+  ClickHouse 对非法 UTF-8 的行为是未定义的，吐出来的 JSON 可能直接解析不了。
+* **原始长度要写成 `` `app_log`.message ``**：直接写 `lengthUTF8(message)` 会解析成上面那个截断后的
+  别名 `message`，量出来永远等于 cap（线上就返回过 16384 而不是真实的 41149053）。和
+  `export_columns` 里 `time` 别名踩的是同一个坑，单测钉住了写法。
+* **导出不截**：那是拿全文的唯一一条路，截了就没意义了。
 
 ### 查询是怎么写的（排障时看这里）
 

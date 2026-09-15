@@ -118,7 +118,11 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
             state.config.max_offset
         )));
     }
-    let queries = LogQueries { database: &state.config.database, table: &schema.logs };
+    let queries = LogQueries {
+        database: &state.config.database,
+        table: &schema.logs,
+        max_message_chars: state.config.max_message_chars,
+    };
     let want_total = offset == 0 && p.get_bool("count")?.unwrap_or(true);
     let token_terms = filter.token_terms();
     let search_q = queries.search(&filter, order, limit, offset)?;
@@ -207,7 +211,11 @@ async fn histogram(State(state): State<AppState>, p: Params) -> Result<Json<Hist
     };
     let tz = parse_tz(&state.config.timezone)?;
     let bucket = Bucket::choose(&range, tz, 120);
-    let queries = LogQueries { database: &state.config.database, table: &schema.logs };
+    let queries = LogQueries {
+        database: &state.config.database,
+        table: &schema.logs,
+        max_message_chars: state.config.max_message_chars,
+    };
     let result = state.client.rows::<HistogramRow>(queries.histogram(&filter, &bucket)?).await?;
 
     let first = bucket.first_index(&range);
@@ -260,7 +268,11 @@ async fn facets(State(state): State<AppState>, p: Params) -> Result<Json<FacetsR
     }
     let filter = build_filter(&state, &schema, &p)?;
     let limit = p.get_limit("limit", 50, 500)?;
-    let queries = LogQueries { database: &state.config.database, table: &schema.logs };
+    let queries = LogQueries {
+        database: &state.config.database,
+        table: &schema.logs,
+        max_message_chars: state.config.max_message_chars,
+    };
     let result = state.client.rows::<FacetRow>(queries.facets(&filter, &field, limit)?).await?;
     Ok(Json(FacetsResponse { field, values: result.rows, stats: result.stats }))
 }
@@ -283,7 +295,11 @@ async fn context(State(state): State<AppState>, p: Params) -> Result<Json<Contex
     let ts = p.get_i64("ts")?.ok_or_else(|| Error::bad_request("缺少参数 ts（unix 毫秒）"))?;
     let before_n = p.get_limit("before", 50, 500)?;
     let after_n = p.get_limit("after", 50, 500)?;
-    let queries = LogQueries { database: &state.config.database, table: &schema.logs };
+    let queries = LogQueries {
+        database: &state.config.database,
+        table: &schema.logs,
+        max_message_chars: state.config.max_message_chars,
+    };
     let (before, after) = tokio::join!(
         state.client.rows::<LogRow>(queries.context(host, file, ts, true, before_n)?),
         state.client.rows::<LogRow>(queries.context(host, file, ts, false, after_n)?),
@@ -318,7 +334,11 @@ async fn export(State(state): State<AppState>, p: Params) -> Result<Response> {
             return Err(Error::bad_request(format!("format 只能是 csv 或 jsonl，不是 {other:?}")));
         }
     };
-    let queries = LogQueries { database: &state.config.database, table: &schema.logs };
+    let queries = LogQueries {
+        database: &state.config.database,
+        table: &schema.logs,
+        max_message_chars: state.config.max_message_chars,
+    };
     let resp = state.client.send(&queries.export(&filter, order, limit)?, Some(format)).await?;
     let name = match &filter.range {
         Some(r) => format!("logs-{}-{}.{ext}", r.from_ms / 1000, r.to_ms / 1000),

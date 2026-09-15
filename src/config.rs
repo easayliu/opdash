@@ -63,6 +63,16 @@ pub struct Config {
     #[arg(long, env = "OPDASH_EXPORT_MAX_ROWS", default_value_t = 50_000)]
     pub export_max_rows: u32,
 
+    /// 列表 / 上下文 / 跟随里每条日志的 `message` 最多取多少个字符，超过的截断并在响应里带上
+    /// 原始长度（`message_len`）。**导出不受这个限制**，要全文就导出。
+    ///
+    /// 线上 `message` 的 p50 是 129 字符、p99 是 9.4 KB，但一小时 844 万条里有 200 条超过 1 MB、
+    /// 最大 49 MB——撞上一条，整页就卡死在传输和渲染上（实测一条 41 MB 的日志让链路详情页
+    /// 一次要收 53 MB，12.6 秒里 11 秒花在传）。默认 16384 字符，是 p99 的 1.7 倍，正常的堆栈
+    /// 和 SQL 一个字都不会少。
+    #[arg(long, env = "OPDASH_MAX_MESSAGE_CHARS", default_value_t = 16_384)]
+    pub max_message_chars: u32,
+
     /// 一条 trace 最多取多少个 span，超过的截断并在响应里标记
     #[arg(long, env = "OPDASH_MAX_TRACE_SPANS", default_value_t = 5_000)]
     pub max_trace_spans: u32,
@@ -175,6 +185,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         if self.max_rows == 0 {
             return Err("--max-rows 不能为 0".into());
+        }
+        if self.max_message_chars < 256 {
+            return Err("--max-message-chars 至少 256，再小连一行堆栈都放不下".into());
         }
         if self.query_timeout.as_secs() == 0 {
             return Err("--query-timeout 至少 1 秒".into());
