@@ -27,6 +27,15 @@ type Kind = (typeof KINDS)[number]['value']
 
 /** 展开一组时，从样本链路里拉几条错误日志当堆栈用 */
 const STACK_LOG_LIMIT = 5
+/**
+ * 拉堆栈时围着样本那一刻取多宽的时间窗。
+ *
+ * 一条链路的日志都在它自己那几秒里，前后各一小时已经宽得离谱；但**不给时间范围的代价是
+ * 天差地别**：线上实测同一次展开，不给是 2.8 亿行 / 5.2 GB / 3.7 秒，给了是 21 万行 /
+ * 15.5 MB / 0.16 秒。日志表按 `(timestamp, level, trace_id)` 排，时间范围直接走主键，
+ * 而只按 trace_id 点查只能靠 bloom filter，它有 2.5% 的误判率，摊到 30 天上就是几亿行。
+ */
+const STACK_WINDOW_MS = 60 * 60_000
 
 export function ErrorsPage() {
   const meta = useMeta()
@@ -211,8 +220,25 @@ function GroupRow({ g, win, open, onToggle, logDim }: { g: ErrorGroup; win: Wind
  * * 三个去处，每个都已经把服务、接口、时间填好了，点过去不用再筛一遍。
  */
 function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: string }) {
-  // 按 trace id 点查不带时间范围，和 lib/links 里 logsHref 的理由一样
-  const logs = useLogSearch({ trace_id: g.sample_trace, level: 'ERROR,WARN', limit: STACK_LOG_LIMIT, order: 'asc' })
+  /**
+   * 这里**要**带时间范围，和 `logsHref` 按 trace id 跳日志页的规矩相反。
+   *
+   * 那条规矩是「人手上只有一个 trace id，不知道它是什么时候的，收窄时间范围会把它挡掉」。
+   * 而这一组自己就带着 `last_ms`——`sample_trace` 正是 `argMax(trace_id, timestamp)` 取出来的，
+   * 两者指的是同一条 span，时刻是确定的。已知时刻还去扫全表没有道理，见 [`STACK_WINDOW_MS`]。
+   *
+   * `count: 0` 关掉服务端那条并发的 `count()`：这里只显示前几条堆栈，不显示总数，
+   * 白扫一遍同样的数据（单这一条就从 2.7 秒降到 1.9 秒）。
+   */
+  const logs = useLogSearch({
+    trace_id: g.sample_trace,
+    level: 'ERROR,WARN',
+    limit: STACK_LOG_LIMIT,
+    order: 'asc',
+    count: 0,
+    from: g.last_ms - STACK_WINDOW_MS,
+    to: g.last_ms + STACK_WINDOW_MS,
+  })
   const rows = logs.data?.rows ?? []
   return (
     <div className="border-t border-border/60 px-3 py-3">
