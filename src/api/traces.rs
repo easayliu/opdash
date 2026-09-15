@@ -15,9 +15,10 @@ use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
     AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, ENTRY_KINDS,
-    HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink,
-    SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary, ValueRow,
-    candidate_range, dedup_by_trace, normalize_kind, normalize_span_id, normalize_trace_id,
+    ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span,
+    SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary,
+    ValueRow, candidate_range, dedup_by_trace, normalize_kind, normalize_span_id,
+    normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -26,6 +27,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/traces/search", get(search))
         .route("/api/traces/heatmap", get(heatmap))
+        .route("/api/errors", get(errors))
         .route("/api/traces/values", get(values))
         .route("/api/traces/attr_keys", get(attr_keys))
         .route("/api/traces/attr_values", get(attr_values))
@@ -315,6 +317,111 @@ pub struct HeatmapResponse {
 
 /// 耗时 × 时间的热力图。和检索用同一套筛选条件，但不取前 N 条，而是在库里按
 /// 时间桶 × 对数耗时档聚合，返回的格子数有上限，任意范围都能看到全貌。
+/// 一种报错。`kind` / `msg` 里是什么、为什么可能为空，见 [`TraceQueries::error_groups`]。
+#[derive(Serialize)]
+pub struct ErrorGroup {
+    /// 分组身份，前端拿它做 key 和「只看这一种」的筛选
+    pub id: String,
+    pub service: String,
+    pub span_kind: String,
+    pub span_name: String,
+    pub exception: String,
+    pub message: String,
+    pub http_status: String,
+    pub peer: String,
+    pub count: u64,
+    pub traces: u64,
+    pub first_ms: i64,
+    pub last_ms: i64,
+    /// 最近一条的样本：点进去就是那条链路，落地自动选中报错的 span
+    pub sample_trace: String,
+    pub sample_span: String,
+}
+
+#[derive(Serialize)]
+pub struct ErrorsResponse {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub kind: String,
+    /// 这段时间内出错的 span 总数（列表被 limit 截断时也是全量）
+    pub total: u64,
+    pub groups: Vec<ErrorGroup>,
+    pub stats: Stats,
+}
+
+/// 异常消息截多长；超出的部分只会把同一种错拆成很多组。
+const ERROR_MSG_LEN: u32 = 160;
+/// 最多返回多少组。线上全站一小时的入口错误是 13 组，200 足够宽裕。
+const ERROR_GROUPS_LIMIT: u32 = 200;
+
+/// `/api/errors`：把出错的 span 按「同一种报错」归堆。
+///
+/// 默认 `kind=entry`（Server / Consumer）——服务总览上那个错误率就是按入口 span 算的，
+/// 默认值一致，点进来看到的才是「dash 上那些错误到底是什么」。不限 kind 的话，线上一小时
+/// 的列表里 70% 是下游 HTTP 404（4 万条），真正的入口错误会被压到看不见。
+async fn errors(State(state): State<AppState>, p: Params) -> Result<Json<ErrorsResponse>> {
+    let schema = state.schema.get().await?;
+    let range = range(&state, &p)?;
+    let kind = p.get("kind").unwrap_or("entry");
+    let kinds: &[&str] = match kind {
+        "entry" => ENTRY_KINDS,
+        "client" => CLIENT_KINDS,
+        "all" => &[],
+        other => {
+            return Err(Error::bad_request(format!(
+                "kind 只能是 entry / client / all，不是 {other:?}"
+            )));
+        }
+    };
+    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
+    let result = state
+        .client
+        .rows::<ErrorGroupRow>(queries.error_groups(
+            &range,
+            kinds,
+            p.get("service"),
+            p.get("span_name"),
+            ERROR_MSG_LEN,
+            ERROR_GROUPS_LIMIT,
+        )?)
+        .await?;
+    let mut total = 0;
+    let groups = result
+        .rows
+        .into_iter()
+        .map(|r| {
+            total += r.n;
+            ErrorGroup {
+                id: format!(
+                    "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                    r.service_name, r.span_name, r.exc_type, r.exc_msg, r.http_status
+                ),
+                service: r.service_name,
+                span_kind: r.span_kind,
+                span_name: r.span_name,
+                exception: r.exc_type,
+                message: r.exc_msg,
+                http_status: r.http_status,
+                peer: r.peer,
+                count: r.n,
+                traces: r.traces,
+                first_ms: r.first_ms,
+                last_ms: r.last_ms,
+                sample_trace: r.sample_trace,
+                sample_span: r.sample_span,
+            }
+        })
+        .collect();
+    Ok(Json(ErrorsResponse {
+        from_ms: range.from_ms,
+        to_ms: range.to_ms,
+        kind: kind.to_owned(),
+        total,
+        groups,
+        stats: result.stats,
+    }))
+}
+
 async fn heatmap(State(state): State<AppState>, p: Params) -> Result<Json<HeatmapResponse>> {
     let schema = state.schema.get().await?;
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };

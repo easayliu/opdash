@@ -924,6 +924,66 @@ impl TraceQueries<'_> {
         Ok(Self::finish(b, sql))
     }
 
+    /// 错误分组：把出错的 span 按「同一种报错」归堆，一条查询出整张列表。
+    ///
+    /// **分组键不能用 `status_message`**：线上一小时 55989 条错误 span 里只有 2 条非空，Java
+    /// agent 根本不写它。真正的报错在 `events.attributes` 的 `exception.type` /
+    /// `exception.message` 里（19.5% 的错误 span 带），剩下的靠 `http.response.status_code`
+    /// 兜底——这两样都取不到时只能给出「哪个接口在错」，具体异常要靠详情层按 `trace_id`
+    /// 去日志表拿（被 `GlobalExceptionHandler` 吞掉的异常就是这一类）。
+    ///
+    /// 读 `Array(JSON)` 的子列走 `arrayMap(x -> x.` 路径 `)`：ClickHouse 只读那一条子列流，
+    /// 线上实测一小时 2500 万行读 247 MB / 283 ms。**不能写成 `arrayFirst(x -> …, 列)` 直接对
+    /// JSON 数组过滤**，那会退化成 `getSubcolumn` 把整列 JSON 读出来（慢 100 倍，和属性过滤
+    /// 同一个坑，见 [`attr_path`]）；所以先 `arrayMap` 成字符串数组，再在字符串数组上 `arrayFirst`。
+    ///
+    /// `msg_len` 截断异常消息：消息里常带 id、URL、耗时，不截的话同一种错会散成几百组。
+    /// 截断之外不做归一化——线上真实数据里截到 160 字符已经够聚（`Connection reset`、
+    /// `Read timed out` 这些本来就是定长的），再正则替换数字反而会把「可用容器不足：live-video」
+    /// 这种有信息量的消息削平。
+    pub fn error_groups(
+        &self,
+        range: &TimeRange,
+        kinds: &[&str],
+        service: Option<&str>,
+        span_name: Option<&str>,
+        msg_len: u32,
+        limit: u32,
+    ) -> Result<Query> {
+        let mut b = Bindings::new();
+        let time = b.time_predicate("timestamp", range);
+        let kinds_sql = if kinds.is_empty() {
+            String::new()
+        } else {
+            format!("\n  AND span_kind IN {}", b.bind("Array(String)", kinds))
+        };
+        let service_sql = match service {
+            Some(s) => format!("\n  AND service_name = {}", b.bind("String", s)),
+            None => String::new(),
+        };
+        let name_sql = match span_name {
+            Some(n) => format!("\n  AND span_name = {}", b.bind("String", n)),
+            None => String::new(),
+        };
+        let msg_len = b.bind("UInt32", msg_len);
+        let limit = b.bind("UInt32", limit);
+        let sql = format!(
+            "SELECT service_name, span_kind, span_name,\n  \
+             arrayFirst(t -> t != '', arrayMap(x -> toString(x.`exception.type`), `events.attributes`)) AS exc_type,\n  \
+             substring(arrayFirst(t -> t != '', arrayMap(x -> toString(x.`exception.message`), `events.attributes`)), 1, {msg_len}) AS exc_msg,\n  \
+             toString(span_attributes.`http.response.status_code`) AS http_status,\n  \
+             toString(span_attributes.`server.address`) AS peer,\n  \
+             count() AS n, uniqExact(trace_id) AS traces,\n  \
+             toUnixTimestamp64Milli(min(timestamp)) AS first_ms, toUnixTimestamp64Milli(max(timestamp)) AS last_ms,\n  \
+             argMax(trace_id, timestamp) AS sample_trace, argMax(span_id, timestamp) AS sample_span\n\
+             FROM {from}\nWHERE {time}\n  AND status_code = 'Error'{kinds_sql}{service_sql}{name_sql}\n\
+             GROUP BY service_name, span_kind, span_name, exc_type, exc_msg, http_status, peer\n\
+             ORDER BY n DESC, service_name\nLIMIT {limit}",
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
     /// 某个服务（可再限定一个 span_name）的入口指标时间序列。
     pub fn timeseries(
         &self,
@@ -1050,6 +1110,32 @@ pub struct OperationRow {
     pub q: Vec<f64>,
     #[serde(deserialize_with = "num::de")]
     pub max_ms: f64,
+}
+
+/// [`TraceQueries::error_groups`] 的一行 = 一种报错。
+#[derive(Debug, Deserialize)]
+pub struct ErrorGroupRow {
+    pub service_name: String,
+    pub span_kind: String,
+    pub span_name: String,
+    /// 异常类全名；span 上没有 exception 事件时是空串
+    pub exc_type: String,
+    /// 异常消息，已截断
+    pub exc_msg: String,
+    /// HTTP 响应码（字符串，OTLP 里是整数），没有就是空串
+    pub http_status: String,
+    /// `server.address`：Client span 的 `span_name` 只有 `GET` / `POST`，靠它才认得出对端
+    pub peer: String,
+    #[serde(deserialize_with = "num::de")]
+    pub n: u64,
+    #[serde(deserialize_with = "num::de")]
+    pub traces: u64,
+    #[serde(deserialize_with = "num::de")]
+    pub first_ms: i64,
+    #[serde(deserialize_with = "num::de")]
+    pub last_ms: i64,
+    pub sample_trace: String,
+    pub sample_span: String,
 }
 
 #[derive(Debug, Deserialize)]

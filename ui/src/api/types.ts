@@ -258,6 +258,44 @@ export interface OverviewResponse {
   stats: Stats
 }
 
+/**
+ * 一种报错。`/api/errors` 把出错的 span 按「同一种报错」归堆，一行就是一堆。
+ *
+ * `exception` / `message` 只有 span 上带 exception 事件时才有（线上约五分之一）；
+ * 没有的那些退到 `http_status`，两样都空就只剩「哪个接口在错」——具体异常要展开这一组，
+ * 按样本 trace id 去日志里拿（被全局异常处理器吞掉的就是这一类）。
+ */
+export interface ErrorGroup {
+  id: string
+  service: string
+  span_kind: string
+  span_name: string
+  /** 异常类全名，如 `java.net.SocketException`；没有就是空串 */
+  exception: string
+  /** 异常消息，服务端已截断到 160 字符 */
+  message: string
+  /** HTTP 响应码；没有就是空串 */
+  http_status: string
+  /** `server.address`：Client span 的 span_name 只有 `GET` / `POST`，靠它认对端 */
+  peer: string
+  count: number
+  traces: number
+  first_ms: number
+  last_ms: number
+  sample_trace: string
+  sample_span: string
+}
+
+export interface ErrorsResponse {
+  from_ms: number
+  to_ms: number
+  kind: string
+  /** 这段时间出错的 span 总数 */
+  total: number
+  groups: ErrorGroup[]
+  stats: Stats
+}
+
 /** 对比窗口怎么取。`none` 只有接口表和时间序列认，意思是不查对比窗口 */
 export type Compare = 'prev' | 'day' | 'week'
 

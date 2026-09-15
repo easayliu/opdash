@@ -23,6 +23,7 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
 | `/traces` | 链路检索：服务、接口、span 类型、只看错误、耗时区间、属性 `key=value`；耗时 × 时间散点图 |
 | `/traces/:trace_id` | 链路详情：瀑布图、span 属性 / 资源 / 事件（异常堆栈）/ 链接、这条 trace 的日志 |
 | `/metrics` | 指标，两个页签：**服务看板**（选一个服务，按 OTel 语义约定自动拼出 HTTP / JVM / 连接池 / Kafka / Go 几套面板；顶上四个数；Top 接口 / 下游 / topic 表**点一行整页按它过滤**；进程重启和新 pod 启动标成虚线；粘性分区目录）和**全部指标**（233 个指标名平铺，自己选算法、分组、过滤；图上的圆点是 exemplar，点开就是那次请求的链路） |
+| `/errors` | **错误分组**：把出错的 span 按「同一种报错」归堆——异常类 + 消息 + 哪个接口，一行一种，带次数 / 影响多少条链路 / 最后一次什么时候；展开就是堆栈、样本链路和三个去处 |
 | `/services`（首页） | 服务总览：每个服务一张卡——请求量 / 错误率 / P95 各带「和上一个同样长的时间窗比」、一条迷你趋势；错误率 ≥1% / P95 涨 1.5 倍以上的标黄、≥5% / 3 倍标红并排到最前面；可切成表格 |
 | `/services/:name` | 单个服务：**和对比时段比，是哪些接口变了**（变化榜 + 每一列都带变化的接口表），请求量与错误、延迟分位趋势（都叠着对比时段） |
 
@@ -110,6 +111,9 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
 | **指标图上的一个点** | **这一格的链路 / ≥ 这个值的链路 / 这一格的错误日志** | 点图上任意一点，见下面「点选下钻」 |
 | 指标图上的 exemplar | 那一次请求的链路详情 | 图上的圆点 |
 | 服务概览 | 三个信号 | 顶部 |
+| **首页异常卡** | **这个服务在报的那句错** | 卡上「⚠ 异常类: 消息 N 次」那一行，点了直接展开对应的错误分组 |
+| 错误分组的一行 | 样本链路（落地就选中报错的 span）/ 这个接口的全部错误链路 / 这个服务的错误日志 | 展开之后 |
+| 服务详情 | 错误分组 | 顶部「错误分组」，在「出错的链路」前面 |
 
 **点选下钻**：光带服务和时间等于到了新页面还得自己再筛一遍，而面板本来就知道更多。点图上一个点，
 弹层里的链接会把三样东西一起带过去：
@@ -561,6 +565,7 @@ GET /api/metrics/query        ?from&to&metric&service&agg&field&by&attr=k=v&ratt
 GET /api/metrics/labels       ?metric&column=attributes|resource_attributes
 GET /api/metrics/label_values ?metric&key&column
 GET /api/metrics/exemplars    ?metric&service&attr&limit
+GET /api/errors               ?from&to&kind=entry|client|all&service&span_name   错误分组，默认 entry
 GET /api/services             ?from&to&compare=day|week|prev&<维度列>
 GET /api/services/{name}/operations   ?from&to&kind=entry|client&compare=day|week|prev|none
 GET /api/services/{name}/timeseries   ?from&to&span_name&compare=day|week|prev|none

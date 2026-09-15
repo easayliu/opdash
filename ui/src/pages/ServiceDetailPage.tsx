@@ -9,7 +9,7 @@ import { Badge, Button, Card, EmptyState, ErrorBox, Select, Spinner } from '@/co
 import { Delta, ErrorRate } from '@/pages/ServicesPage'
 import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Mover } from '@/lib/compare'
 import { change, pct } from '@/lib/health'
-import { logsHref, metricsHref, tracesHref } from '@/lib/links'
+import { errorsHref, logsHref, metricsHref, tracesHref } from '@/lib/links'
 import { formatDurationMs, formatNumber } from '@/lib/time'
 import { useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
@@ -155,6 +155,10 @@ export function ServiceDetailPage() {
           </Select>
           <Link to={tracesHref({ service, spanName: op || undefined, kinds: 'Server,Consumer', sort: 'duration' }, win)}>
             <Button size="sm">最慢的链路</Button>
+          </Link>
+          {/* 「错误分组」在「出错的链路」前面：先问是什么错，再决定要不要一条条看链路 */}
+          <Link to={errorsHref({ service, spanName: op || undefined }, win)}>
+            <Button size="sm">错误分组</Button>
           </Link>
           <Link to={tracesHref({ service, spanName: op || undefined, errorOnly: true }, win)}>
             <Button size="sm">出错的链路</Button>

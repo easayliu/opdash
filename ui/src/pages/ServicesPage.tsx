@@ -1,14 +1,15 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { AlertTriangleIcon, ChartLineIcon, GitBranchIcon, LayoutGridIcon, RotateCwIcon, ScrollTextIcon, SearchIcon, TableIcon } from 'lucide-react'
-import { useMeta, useMetricEvents, useOperations, useServices } from '@/api/queries'
-import type { MetricEvent, OverviewResponse, ServiceStat } from '@/api/types'
+import { useErrorGroups, useMeta, useMetricEvents, useOperations, useServices } from '@/api/queries'
+import type { ErrorGroup, MetricEvent, OverviewResponse, ServiceStat } from '@/api/types'
 import { Sparkline } from '@/components/charts/Sparkline'
 import { StatsLine } from '@/components/StatsLine'
 import { Button, Card, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
 import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Compare } from '@/lib/compare'
 import { change, changeTone, formatChange, healthRank, meaningfulLatency, pct, serviceHealth, type Health } from '@/lib/health'
-import { logsHref, metricsHref, serviceHref, tracesHref, type Window } from '@/lib/links'
+import { errorTitle, errorTitleFull } from '@/lib/errors'
+import { errorsHref, logsHref, metricsHref, serviceHref, tracesHref, type Window } from '@/lib/links'
 import { formatDurationMs, formatNumber, formatTs } from '@/lib/time'
 import { useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
@@ -130,6 +131,31 @@ function Contributor({ service, win, compare }: { service: string; win: Window; 
   )
 }
 
+/**
+ * 异常卡上的「主要在报什么错」。**这一行是 dash 到报错之间唯一的一跳**：以前得点进服务详情、
+ * 再点「出错的链路」、再在瀑布图里找红条，才能知道 6% 的错误率背后是哪一句异常。
+ *
+ * 点它直接进错误分组页并展开这一组（`errorsHref` 的 `group`），不经过服务详情。
+ */
+function TopError({ g, win }: { g: ErrorGroup; win: Window }) {
+  const stop = (e: React.MouseEvent) => e.stopPropagation()
+  return (
+    <Link
+      to={errorsHref({ service: g.service, group: g.id }, win)}
+      onClick={stop}
+      className="mt-1 flex min-w-0 items-baseline gap-1 text-2xs text-muted-fg hover:text-fg"
+      title={`${errorTitleFull(g)}${g.message ? `: ${g.message}` : ''}（${formatNumber(g.count)} 次）`}
+    >
+      <AlertTriangleIcon className="size-3 shrink-0 translate-y-0.5 text-danger" />
+      <span className="min-w-0 truncate">
+        <span className="mono font-medium text-fg">{errorTitle(g)}</span>
+        {g.message && <span className="text-fg/80">: {g.message}</span>}
+      </span>
+      <span className="shrink-0 tabular-nums">{formatNumber(g.count)} 次</span>
+    </Link>
+  )
+}
+
 /** 卡上的重启小标 */
 function Restarts({ events }: { events: MetricEvent[] }) {
   if (!events.length) return null
@@ -177,6 +203,15 @@ export function ServicesPage() {
     for (const e of events.data?.events ?? []) m.set(e.service, [...(m.get(e.service) ?? []), e])
     return m
   }, [events.data])
+
+  // 全站错误分组一次查完按服务分：异常卡上要写出「主要在报什么错」，一张卡各查一次的话
+  // 十几张卡就是十几条查询，而这一条线上是 172 ms。返回已按次数降序，每个服务第一条就是它的头号报错
+  const errs = useErrorGroups({ from: range.fromMs, to: range.toMs })
+  const topErrorByService = useMemo(() => {
+    const m = new Map<string, ErrorGroup>()
+    for (const g of errs.data?.groups ?? []) if (!m.has(g.service)) m.set(g.service, g)
+    return m
+  }, [errs.data])
 
   const all = useMemo(() => (q.data?.services ?? []).map((s) => ({ s, health: serviceHealth(s) })), [q.data])
   const shown = useMemo(() => {
@@ -277,7 +312,17 @@ export function ServicesPage() {
                 </h2>
                 <div className={cn('grid gap-3 sm:grid-cols-2 xl:grid-cols-3', q.isFetching && 'opacity-70')}>
                   {bad.map(({ s, health }) => (
-                    <BigCard key={s.service} s={s} health={health} win={win} compare={compare} events={eventsByService.get(s.service) ?? []} logDim={logDim} hasMetrics={hasMetrics} />
+                    <BigCard
+                      key={s.service}
+                      s={s}
+                      health={health}
+                      win={win}
+                      compare={compare}
+                      events={eventsByService.get(s.service) ?? []}
+                      topError={topErrorByService.get(s.service)}
+                      logDim={logDim}
+                      hasMetrics={hasMetrics}
+                    />
                   ))}
                 </div>
               </section>
@@ -423,7 +468,7 @@ function Summary({ data, all, restarts, cmpShort }: { data: OverviewResponse; al
 }
 
 /** 异常服务的大卡：数字 + 主因 + 重启 + 趋势 */
-function BigCard({ s, health, win, compare, events, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; logDim: string; hasMetrics: boolean }) {
+function BigCard({ s, health, win, compare, events, topError, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; topError?: ErrorGroup; logDim: string; hasMetrics: boolean }) {
   const latencyOk = meaningfulLatency(s.p95_ms)
   const isMobile = useIsMobile()
   return (
@@ -441,6 +486,7 @@ function BigCard({ s, health, win, compare, events, logDim, hasMetrics }: { s: S
         {health.reasons.join('；')}
       </div>
       <Contributor service={s.service} win={win} compare={compare} />
+      {topError && <TopError g={topError} win={win} />}
       {/* 原因区可能是一行也可能两行（带主因），指标和火花图贴底对齐，同一行的卡片才对得齐 */}
       <div className="mt-auto grid grid-cols-3 gap-2 pt-3">
         <Stat label="请求量" value={fmtRps(s.rps)} delta={change(s.rps, s.prev?.rps)} upIs="neutral" />

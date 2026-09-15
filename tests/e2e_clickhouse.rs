@@ -280,6 +280,27 @@ async fn every_endpoint_answers() {
         assert!(first["spark"]["requests"].is_array(), "{first}");
         assert!(first.get("prev").is_some(), "{first}");
     }
+    // 错误分组：`arrayMap(x -> x.`exception.type`, `events.attributes`)` 这种 Array(JSON) 的
+    // 子列写法假库验不了，而写错了不会报错、只会静默返回空串——所以这里连「有没有真的取到值」一起验
+    let (status, body) = get_json(&app, &format!("/api/errors?from={from}&to={now}")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["kind"], "entry", "{body}");
+    let groups = body["groups"].as_array().cloned().unwrap_or_default();
+    for g in &groups {
+        assert!(!g["service"].as_str().unwrap_or_default().is_empty(), "{g}");
+        assert!(!g["sample_trace"].as_str().unwrap_or_default().is_empty(), "{g}");
+    }
+    // 这段时间要是一条异常都没有，那只能说明没错误，不能说明子列写法是对的
+    if groups.iter().any(|g| !g["exception"].as_str().unwrap_or_default().is_empty()) {
+        eprintln!("错误分组取到了 exception.type");
+    }
+    let (status, body) =
+        get_json(&app, &format!("/api/errors?from={from}&to={now}&kind=all")).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) =
+        get_json(&app, &format!("/api/errors?from={from}&to={now}&kind=nope")).await;
+    assert_eq!(status, 400, "{body}");
+
     // 不选服务、范围超过 6 小时 → 400
     let (status, body) =
         get_json(&app, &format!("/api/traces/search?from={}&to={now}", now - 7 * 3_600_000)).await;

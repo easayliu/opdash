@@ -4,6 +4,7 @@ import { apiGet, type Params } from './client'
 import type {
   AuthMe,
   ContextResponse,
+  ErrorsResponse,
   FacetsResponse,
   HeatmapResponse,
   HistogramResponse,
@@ -91,6 +92,16 @@ export function useTraceLogs(
     placeholderData: keepPreviousData,
     staleTime: 60_000,
     enabled: enabled && !!limits,
+  })
+}
+
+/** 错误分组。默认 `kind=entry`（入口 span），和服务总览上那个错误率同一口径 */
+export function useErrorGroups(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['errors', params],
+    queryFn: ({ signal }) => apiGet<ErrorsResponse>('/errors', params, signal),
+    placeholderData: keepPreviousData,
+    enabled,
   })
 }
 

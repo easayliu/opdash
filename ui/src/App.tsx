@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router'
-import { ActivityIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
+import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
 import { UserMenu } from '@/components/UserMenu'
@@ -12,12 +12,15 @@ import { LogsPage } from '@/pages/LogsPage'
 import { TracesPage } from '@/pages/TracesPage'
 import { TraceDetailPage } from '@/pages/TraceDetailPage'
 import { ServicesPage } from '@/pages/ServicesPage'
+import { ErrorsPage } from '@/pages/ErrorsPage'
 import { ServiceDetailPage } from '@/pages/ServiceDetailPage'
 import { MetricsPage } from '@/pages/MetricsPage'
 
 // 服务总览排第一、也是首页：打开先看「谁不对」，再去翻它的日志 / 链路 / 指标
 const NAV = [
   { to: '/services', label: '服务', icon: ActivityIcon },
+  // 错误紧挨着服务：总览说「谁不对」，这一页说「不对在哪一句报错上」
+  { to: '/errors', label: '错误', icon: AlertTriangleIcon },
   { to: '/logs', label: '日志', icon: ScrollTextIcon },
   { to: '/traces', label: '链路', icon: GitBranchIcon },
   { to: '/metrics', label: '指标', icon: ChartLineIcon, needs: 'metrics' as const },
@@ -64,6 +67,7 @@ function AppRoutes() {
       <Route path="/traces" element={<TracesPage />} />
       <Route path="/traces/:traceId" element={<TraceDetailPage />} />
       <Route path="/metrics" element={<MetricsPage />} />
+      <Route path="/errors" element={<ErrorsPage />} />
       <Route path="/services" element={<ServicesPage />} />
       <Route path="/services/:name" element={<ServiceDetailPage />} />
       <Route path="*" element={<Navigate to="/services" replace />} />

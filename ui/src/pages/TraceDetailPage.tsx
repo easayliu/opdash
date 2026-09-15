@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { CopyIcon } from 'lucide-react'
 import { useMeta, useSpanAttrs, useTraceDetail, useTraceLogs } from '@/api/queries'
 import { LogTable, sortLogRows, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
-import { SpanPanel, Waterfall, buildTree } from '@/components/Waterfall'
+import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
 import { around, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { formatDuration, formatTsMicro } from '@/lib/time'
@@ -62,6 +62,25 @@ export function TraceDetailPage() {
     const next = errorSpans[(idx + 1) % errors]
     set({ span: next.span_id, span_logs: null }, { replace: true })
   }
+
+  /**
+   * 出错的链路打开就直接选中抛异常的那个 span，右边面板上就是 exception 的类型和堆栈。
+   *
+   * 不这么做的话，从「错误日志」「出错的链路」点进来，落地是一张瀑布图，还要自己在几十上百行
+   * 里找红条、点开、翻到 events——报错本身明明是来这一趟唯一想看的东西。
+   *
+   * 只在本条 trace 第一次加载出来时做一次：之后人自己关掉面板、点了别的 span，就不再插手
+   * （`picked` 记的是已经替哪条 trace 选过了）。URL 里带了 `span=` 的（别人分享的链接、
+   * 从错误分组点过来的样本）也不覆盖。
+   */
+  const picked = useRef<string | null>(null)
+  useEffect(() => {
+    if (picked.current === traceId || !spans.length) return
+    picked.current = traceId
+    if (selected) return
+    const cause = rootCauseSpan(tree)
+    if (cause) set({ span: cause.span_id }, { replace: true })
+  }, [traceId, spans.length, tree, selected, set])
 
   useEffect(() => {
     document.title = root ? `${root.service} ${root.name} · opdash` : 'opdash'

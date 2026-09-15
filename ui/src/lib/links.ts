@@ -53,6 +53,25 @@ export function serviceHref(service: string, win?: Window, compare?: Compare): s
   return `/services/${encodeURIComponent(service)}?${qs({ cmp: compare === DEFAULT_COMPARE ? null : compare }, win)}`
 }
 
+/**
+ * 错误分组页。`group` 是某一组的 id，带上就直接展开那一组——首页异常卡上的报错那一行
+ * 靠它做到「从 dash 一步看到报错」，中间不经过服务详情。
+ */
+export function errorsHref(
+  opts: { service?: string; spanName?: string; kind?: 'entry' | 'client' | 'all'; group?: string },
+  win?: Window,
+): string {
+  return `/errors?${qs(
+    {
+      service: opts.service,
+      span_name: opts.spanName,
+      kind: opts.kind && opts.kind !== 'entry' ? opts.kind : null,
+      g: opts.group,
+    },
+    win,
+  )}`
+}
+
 export function tracesHref(
   opts: {
     service?: string

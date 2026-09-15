@@ -56,6 +56,24 @@ export function buildTree(spans: Span[]): SpanTree {
   return { roots, startUs, endUs: Math.max(endUs, startUs + 1) }
 }
 
+/**
+ * 一条链路里「真正抛异常的那个 span」。
+ *
+ * 出错的 span 往往是一串：最里层的 JDBC / HTTP 客户端抛了，状态一路冒到入口 span，
+ * 于是瀑布图上从上到下好几条红的。**最深的那个**才是原因，上面几条都是转述——所以按
+ * 树深取最深，同深度取先开始的。整条链路没出错就返回 null。
+ */
+export function rootCauseSpan(tree: SpanTree): Span | null {
+  const errs: SpanNode[] = []
+  const walk = (n: SpanNode) => {
+    if (n.span.status === 'Error') errs.push(n)
+    for (const c of n.children) walk(c)
+  }
+  for (const r of tree.roots) walk(r)
+  errs.sort((a, b) => b.depth - a.depth || a.span.start_us - b.span.start_us)
+  return errs[0]?.span ?? null
+}
+
 function kindTone(kind: string): 'muted' | 'info' | 'accent' | 'ok' {
   switch (kind) {
     case 'Server':
@@ -542,6 +560,31 @@ export function SpanPanel({
   metricsLink?: string
 }) {
   const [tab, setTab] = useState<'attrs' | 'resource' | 'events' | 'links'>('attrs')
+  /**
+   * 出错的 span 打开就停在「事件」上——异常的类型、消息、堆栈都在事件里，属性页上只有
+   * `http.response.status_code=500` 这种说不清原因的东西。从错误分组、从「出错的链路」点进来
+   * 的人要的就是这一屏，不该还得自己再点一下页签。
+   *
+   * 属性和事件是点开 span 之后才查的（见 `useSpanAttrs`），所以不能写成 useState 的初值，
+   * 得等事件到了再切。`settled` 记住这个 span 的页签已经定了：自动切过一次之后不再插手，
+   * 人自己点了页签也算定了——不然事件晚一步到，会把人刚点开的属性页顶掉。
+   */
+  const settled = useRef<string | null>(null)
+  const pickTab = (k: 'attrs' | 'resource' | 'events' | 'links') => {
+    settled.current = span.span_id
+    setTab(k)
+  }
+  useEffect(() => {
+    settled.current = null
+    setTab('attrs')
+  }, [span.span_id])
+  useEffect(() => {
+    if (settled.current === span.span_id) return
+    if (span.status === 'Error' && span.events.some((e) => e.name === 'exception')) {
+      settled.current = span.span_id
+      setTab('events')
+    }
+  }, [span.span_id, span.status, span.events])
   const attrs = Object.entries(span.attributes)
   const resource = Object.entries(span.resource)
   const subtitle = spanSubtitle(span)
@@ -604,7 +647,7 @@ export function SpanPanel({
           <button
             key={k}
             type="button"
-            onClick={() => setTab(k)}
+            onClick={() => pickTab(k)}
             className={cn('px-4 py-2 font-medium text-muted-fg hover:text-fg', tab === k && 'border-b-2 border-accent text-accent')}
           >
             {label}
