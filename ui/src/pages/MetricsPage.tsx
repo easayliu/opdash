@@ -16,7 +16,7 @@ import { errorsHref, logsHref, msFactor, seriesContext, serviceHref, traceHref, 
 import { formatBytes, formatDuration, formatDurationMs, formatTs } from '@/lib/time'
 import { useInView } from '@/lib/in-view'
 import { useIsMobile } from '@/lib/media'
-import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
+import { splitList, useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
 import { cn } from '@/lib/utils'
 
 /** 步长：不选就按时间范围自动挑（后端最多 60 个点）。 */
@@ -1134,11 +1134,12 @@ function MetricExplorer({
   // 折线不折尾巴（加起来没意义），所以这里的 rows 就是后端返回的那些
   const { rows, series, points, sparse } = useChartData(data.data)
   const format = valueFormatter(info, choice.agg, choice.field)
+  const from = useFrom()
   const markers: ChartMarker[] = (exemplars.data?.exemplars ?? []).map((e) => ({
     t_ms: e.t_ms,
     value: e.value,
     title: `${formatTs(e.t_ms, { ms: false })}  ${format(e.value)}  ${e.service} — 点开看这次请求`,
-    onClick: () => navigate(traceHref(e.trace_id, e.t_ms)),
+    onClick: () => navigate(traceHref(e.trace_id, e.t_ms), { state: from }),
   }))
 
   const pick = useCallback(

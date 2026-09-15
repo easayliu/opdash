@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router'
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
@@ -59,7 +59,10 @@ function QuickJump() {
  */
 function AppRoutes() {
   const redirect = useRangeMemory()
-  if (redirect) return <Navigate to={redirect} replace />
+  // 补时间范围是内部重定向，得把 state 原样带过去——面包屑的「来处」就放在里面，
+  // 丢了的话从错误分组点进链路详情就没有返回按钮了（`traceHref` 不带 range，必走这条重定向）
+  const { state } = useLocation()
+  if (redirect) return <Navigate to={redirect} replace state={state} />
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/services" replace />} />

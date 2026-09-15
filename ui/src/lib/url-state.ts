@@ -29,6 +29,49 @@ export function useUrlState() {
 }
 
 /**
+ * 「从哪儿来的」。详情页拿它显示面包屑返回。
+ *
+ * 链路详情是三条路的共同终点（错误分组、链路检索、日志行的 trace id），写死一个返回目标是错的；
+ * 而返回目标不能放 URL 里——它是**这一次导航**的上下文，不是视图状态，放进 URL 会跟着被复制给同事，
+ * 别人点了会跳到一个他从没去过的列表。所以走 react-router 的 `state`：跟着这一条历史记录走，
+ * 复制 URL 带不出去，刷新也不留。
+ *
+ * 刚好也给出了正确的显示条件：**直接粘 URL 进来的没有来处，就不显示返回**——总比给一个
+ * 猜出来的目标强。
+ */
+export interface FromState {
+  from: { href: string; label: string }
+}
+
+/**
+ * 页面路径 → 返回按钮上的字。
+ *
+ * 由路径推导而不是让调用方传：`LogTable` 在日志页和链路详情页里都用，同一个组件传死一个
+ * 「日志」，从链路详情点出去的返回就会写着「← 日志」。推导出来的永远是「我现在在哪一页」。
+ */
+function labelOf(pathname: string): string {
+  if (pathname.startsWith('/errors')) return '错误'
+  if (pathname.startsWith('/logs')) return '日志'
+  if (pathname.startsWith('/metrics')) return '指标'
+  if (pathname.startsWith('/services')) return '服务'
+  if (pathname.startsWith('/traces')) return '链路'
+  return '返回'
+}
+
+/** 在列表页调用，生成跳详情时要带的 `state`；返回按钮上的字按当前路径推导。 */
+export function useFrom(): FromState {
+  const { pathname, search } = useLocation()
+  return useMemo(() => ({ from: { href: pathname + search, label: labelOf(pathname) } }), [pathname, search])
+}
+
+/** 在详情页调用，取出来处；没有（直接粘 URL 进来）返回 null。 */
+export function useFromState(): FromState['from'] | null {
+  const { state } = useLocation()
+  const from = (state as Partial<FromState> | null)?.from
+  return from && typeof from.href === 'string' && typeof from.label === 'string' ? from : null
+}
+
+/**
  * 相对范围（`最近 N 分钟`）解析成绝对毫秒时用的「现在」。全局共享一个锚点，只在重新选范围、
  * 点刷新时推进——不是每次渲染重算：
  *

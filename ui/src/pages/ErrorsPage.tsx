@@ -8,7 +8,7 @@ import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Input, Spinner, ty
 import { errorTitle, errorTitleFull, errorWhere, hasDetail, shortException } from '@/lib/errors'
 import { errorsHref, logsHref, tracesHref, traceHref, type Window } from '@/lib/links'
 import { formatNumber, formatTs } from '@/lib/time'
-import { useTimeRange, useUrlState } from '@/lib/url-state'
+import { useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
 import { cn } from '@/lib/utils'
 
 /**
@@ -156,7 +156,9 @@ export function ErrorsPage() {
                       g={g}
                       win={win}
                       open={opened === g.id}
-                      onToggle={() => set({ g: opened === g.id ? null : g.id })}
+                      // 展开/收起是瞬态 UI 状态，不是「换了在看的东西」，用 replace：
+                      // push 的话扫一遍列表展开五组，back 就要按五次才出得去
+                      onToggle={() => set({ g: opened === g.id ? null : g.id }, { replace: true })}
                       logDim={meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container'}
                     />
                   ))}
@@ -220,6 +222,7 @@ function GroupRow({ g, win, open, onToggle, logDim }: { g: ErrorGroup; win: Wind
  * * 三个去处，每个都已经把服务、接口、时间填好了，点过去不用再筛一遍。
  */
 function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: string }) {
+  const from = useFrom()
   /**
    * 这里**要**带时间范围，和 `logsHref` 按 trace id 跳日志页的规矩相反。
    *
@@ -249,7 +252,7 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
         </div>
       )}
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)}>
+        <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from}>
           <Button size="xs" variant="primary">
             看最近这一条链路
           </Button>
@@ -293,7 +296,7 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
         ))}
       </div>
       <div className="mt-2 text-2xs text-muted-fg">
-        样本链路 <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} className="mono text-accent hover:underline">{g.sample_trace}</Link>
+        样本链路 <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from} className="mono text-accent hover:underline">{g.sample_trace}</Link>
         ，点进去会直接选中报错的那个 span。这一组还有{' '}
         <Link to={errorsHref({ service: g.service, spanName: g.span_name }, win)} className="text-accent hover:underline">
           同接口的其它报错

@@ -6,6 +6,7 @@ import type { LogRow } from '@/api/types'
 import { Badge, Button, levelTone } from '@/components/ui'
 import { messageTruncated, rowKey, truncationNote, useRowKeys } from '@/lib/log-row'
 import { useIsMobile } from '@/lib/media'
+import { useFrom } from '@/lib/url-state'
 import { formatTs } from '@/lib/time'
 import { cn, copyText, scrollParent, splitFirstLine } from '@/lib/utils'
 
@@ -218,6 +219,7 @@ type RowsProps = Pick<LogTableProps, 'rows' | 'dims' | 'highlight' | 'anchorKey'
 const THEAD_H = 30
 
 function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, sort, onSort, expanded, toggle }: RowsProps & Pick<LogTableProps, 'compact' | 'sort' | 'onSort'>) {
+  const from = useFrom()
   const tableRef = useRef<HTMLTableElement>(null)
   const keys = useRowKeys(rows)
   const virtualizer = useRowVirtualizer(rows, keys, tableRef, EST_ROW_H, THEAD_H)
@@ -322,7 +324,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
               <td className="mono px-1.5 py-1.5 text-2xs">
                 {r.trace_id ? (
                   <Link
-                    to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
+                    to={`/traces/${r.trace_id}?at=${r.ts_ms}`} state={from}
                     className="text-accent hover:underline"
                     title={`查看链路 ${r.trace_id}`}
                     onClick={(e) => e.stopPropagation()}
@@ -374,6 +376,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
 
 /** 手机上的日志列表：一条一张卡，点开看全文和字段。列太多的表格在窄屏上只能横滚，不如卡片。 */
 function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, expanded, toggle }: RowsProps) {
+  const from = useFrom()
   const listRef = useRef<HTMLUListElement>(null)
   const keys = useRowKeys(rows)
   const virtualizer = useRowVirtualizer(rows, keys, listRef, EST_CARD_H, 0)
@@ -408,7 +411,7 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
               {primary && <span className="min-w-0 flex-1 truncate">{dimValue(r, primary) || '-'}</span>}
               {r.trace_id && (
                 <Link
-                  to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
+                  to={`/traces/${r.trace_id}?at=${r.ts_ms}`} state={from}
                   className="mono shrink-0 text-accent"
                   title={`查看链路 ${r.trace_id}`}
                   onClick={(e) => e.stopPropagation()}
@@ -454,6 +457,7 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
 }
 
 export function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; dims: string[]; highlight?: string[]; onPivot?: (f: string, v: string) => void }) {
+  const from = useFrom()
   const fields: [string, string][] = [
     ['level', row.level],
     ['logger', row.logger],
@@ -486,7 +490,7 @@ export function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; di
                     {v}
                   </button>
                 ) : k === 'trace_id' ? (
-                  <Link to={`/traces/${v}?at=${row.ts_ms}`} className="text-accent hover:underline">
+                  <Link to={`/traces/${v}?at=${row.ts_ms}`} state={from} className="text-accent hover:underline">
                     {v}
                   </Link>
                 ) : k === 'span_id' ? (

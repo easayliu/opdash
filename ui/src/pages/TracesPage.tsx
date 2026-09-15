@@ -9,7 +9,7 @@ import { TraceFilters, type TraceFilterState } from '@/components/TraceFilters'
 import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { formatDuration, formatTsMicro, writeRange } from '@/lib/time'
 import { errorsHref, logsHref, metricsHref, serviceHref } from '@/lib/links'
-import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
+import { splitList, useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
 
 /** 详情页带上开始时间，服务端只查附近分区 */
@@ -22,6 +22,7 @@ export function TracesPage() {
   const navigate = useNavigate()
   const { params, set, setParams } = useUrlState()
   const { range, setRange } = useTimeRange()
+  const from = useFrom()
   const isMobile = useIsMobile()
 
   const filter: TraceFilterState = useMemo(
@@ -184,7 +185,7 @@ export function TracesPage() {
         {traces.length > 0 && isMobile && (
           <ul className="text-xs">
             {traces.map((t) => (
-              <li key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60 px-3 py-2" onClick={() => navigate(traceHref(t))}>
+              <li key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60 px-3 py-2" onClick={() => navigate(traceHref(t), { state: from })}>
                 <div className="flex items-center gap-2">
                   <span className="mono text-2xs text-muted-fg tabular-nums">{formatTsMicro(t.start_us, { date: false }).slice(0, 12)}</span>
                   <span className="min-w-0 flex-1 truncate">
@@ -227,7 +228,7 @@ export function TracesPage() {
             </thead>
             <tbody>
               {traces.map((t) => (
-                <tr key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60" onClick={() => navigate(traceHref(t))}>
+                <tr key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60" onClick={() => navigate(traceHref(t), { state: from })}>
                   <td className="mono px-3 py-2 whitespace-nowrap text-muted-fg tabular-nums">{formatTsMicro(t.start_us).slice(0, 23)}</td>
                   <td className="truncate px-3 py-2">
                     <span className="text-muted-fg">{t.root_service}</span> <span className="font-medium">{t.root_name}</span>
@@ -245,7 +246,7 @@ export function TracesPage() {
                     {t.services.join(', ')}
                   </td>
                   <td className="mono px-3 py-2 text-2xs">
-                    <Link to={traceHref(t)} className="text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
+                    <Link to={traceHref(t)} state={from} className="text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
                       {t.trace_id.slice(0, 12)}…
                     </Link>
                   </td>

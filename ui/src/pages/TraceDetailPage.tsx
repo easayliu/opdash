@@ -9,13 +9,15 @@ import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Wat
 import { ColorAssigner } from '@/lib/colors'
 import { around, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { formatDuration, formatTsMicro } from '@/lib/time'
-import { useUrlState } from '@/lib/url-state'
+import { useFromState, useUrlState } from '@/lib/url-state'
 import { copyText } from '@/lib/utils'
 
 export function TraceDetailPage() {
   const { traceId = '' } = useParams<{ traceId: string }>()
   const meta = useMeta()
   const { params, set } = useUrlState()
+  // 从哪个列表点进来的。直接粘 URL 进来的没有来处，就不显示返回——见 useFromState
+  const from = useFromState()
   const detail = useTraceDetail(traceId, params.get('at'))
   const selected = params.get('span')
   const logsOnlySpan = params.get('span_logs') === '1'
@@ -111,6 +113,11 @@ export function TraceDetailPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-6 gap-y-1.5 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
+        {from && (
+          <Link to={from.href} className="shrink-0 text-sm text-muted-fg hover:text-fg" title={`回到${from.label}`}>
+            ← {from.label}
+          </Link>
+        )}
         <div className="min-w-0 max-w-full">
           <div className="flex min-w-0 items-center gap-2 text-base font-semibold">
             {root ? (
