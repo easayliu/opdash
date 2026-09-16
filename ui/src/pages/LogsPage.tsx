@@ -105,10 +105,23 @@ export function LogsPage() {
   )
 
   const byId = !!(filter.trace_id || filter.span_id)
-  // 按 id 查时不带时间范围（bloom filter 直接命中，时间范围只会把 3 小时前的 trace 挡在外面）
+  /**
+   * 按 id 查时要不要裁时间。
+   *
+   * 不裁的话 bloom filter 得把 30 天的分区全过一遍——线上实测直接撞 30 秒超时，等于这条路
+   * 根本不可用；URL 上有明确的起止时间就用它，同一条 trace 只读 0.76 M 行 / 26 MB（两个数量级）。
+   * 「在日志页打开」带过来的就是这条 trace 的实际跨度。
+   *
+   * 相对范围（`range=1h` 这种）不算数：它只是页面的默认值，不是人冲着这条 id 选的。裁了之后
+   * 万一什么都没查到，空状态上有「不限时间再找一次」兜底，见下面的 EmptyState。
+   */
+  const [unscoped, setUnscoped] = useState(false)
+  // 换了 id 或时间范围就回到默认，不然「不限时间」会一直粘着后面每一次查询
+  useEffect(() => setUnscoped(false), [filter.trace_id, filter.span_id, range.fromMs, range.toMs])
+  const scoped = !byId || (!unscoped && !!params.get('from') && !!params.get('to'))
   const baseParams: Params = useMemo(
     () => ({
-      ...(byId ? {} : { from: range.fromMs, to: range.toMs }),
+      ...(scoped ? { from: range.fromMs, to: range.toMs } : {}),
       q: filter.q,
       regex: filter.regex ? 1 : undefined,
       level: filter.levels.join(','),
@@ -118,11 +131,12 @@ export function LogsPage() {
       span_id: filter.span_id,
       ...Object.fromEntries(Object.entries(filter.dims).map(([k, v]) => [k, v.join(',')])),
     }),
-    [byId, range.fromMs, range.toMs, filter],
+    [scoped, range.fromMs, range.toMs, filter],
   )
   // 直方图各桶之和就是总条数，有直方图时让检索别再跑一条扫同样数据的 count()
+  // 没有范围可裁剪时连总数都别要：那条 count() 会把同样的 30 天再扫一遍（线上 32.7 M 行 / 120.7 MB）
   const search = useLogSearch(
-    { ...baseParams, order: byId ? 'asc' : order, limit, offset, count: byId ? undefined : 0 },
+    { ...baseParams, order: byId ? 'asc' : order, limit, offset, count: byId && scoped ? undefined : 0 },
     !follow && meta.isSuccess,
   )
   /**
@@ -321,9 +335,22 @@ export function LogsPage() {
                 <EmptyState
                   title={follow ? '等待新日志…' : '这个范围内没有匹配的日志'}
                   hint={
-                    byId
-                      ? '这个 trace / span 没有对应的日志：可能是采集延迟（等几秒再刷新），或者这个服务没有打 TID。'
-                      : '试试放宽时间范围、去掉一个筛选条件，或者检查关键字是否写在了 message 里（logger / thread 有单独的框）。'
+                    byId ? (
+                      <>
+                        这个 trace / span 没有对应的日志：可能是采集延迟（等几秒再刷新），或者这个服务没有打 TID。
+                        {scoped && (
+                          <>
+                            {' '}也可能它不在当前时间范围里——
+                            <button type="button" className="text-accent hover:underline" onClick={() => setUnscoped(true)}>
+                              不限时间再找一次
+                            </button>
+                            （要把 30 天的分区全过一遍，会慢）。
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      '试试放宽时间范围、去掉一个筛选条件，或者检查关键字是否写在了 message 里（logger / thread 有单独的框）。'
+                    )
                   }
                 />
               }

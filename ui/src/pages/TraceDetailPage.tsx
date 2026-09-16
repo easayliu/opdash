@@ -12,6 +12,9 @@ import { formatDuration, formatTsMicro } from '@/lib/time'
 import { useFromState, useUrlState } from '@/lib/url-state'
 import { copyText } from '@/lib/utils'
 
+/** 日志窗口在 span 跨度之外前后各放宽多少：给时钟偏差和写入延迟留余量 */
+const LOG_WINDOW_PAD_MS = 5 * 60_000
+
 export function TraceDetailPage() {
   const { traceId = '' } = useParams<{ traceId: string }>()
   const meta = useMeta()
@@ -91,23 +94,56 @@ export function TraceDetailPage() {
     }
   }, [root])
 
-  // 一条 trace 的日志全拉下来，排序在浏览器里做（点表头）。
-  // 知道开始时间就圈到前 1 小时、后 24 小时：日志表按 trace id 找同样靠 bloom filter，不限时间要扫全部分区
   const at = Number(params.get('at')) || undefined
+  /**
+   * 日志窗口按这条 trace 的 span 实际跨度圈，等详情回来再查。
+   *
+   * 日志表按 trace id 找靠的是 bloom filter，读量跟窗口里的**真实数据量**成正比。以前圈的是
+   * `at` 前 1 小时、后 24 小时，看今天的 trace 不花钱（+24 小时还没发生），看昨天的就是
+   * 32.7 M 行 / 145.5 MB —— 为了拿 40 条日志。按 span 跨度前后各放宽 5 分钟只要 0.76 M 行 /
+   * 26.0 MB。
+   *
+   * 会不会漏：线上比对了 717 条 trace 的日志时间和 span 时间，日志最晚比 span 最晚晚 2 ms
+   * （中位），93.3% 的 trace 一条都不漏；漏的那些全是 trace id 被复用的（同一个 id 挂着两小时
+   * 的日志），而那些日志本来就不属于用户正在看的这一次请求。
+   *
+   * 代价是日志要等详情那一趟（以前两条并行）。墙钟基本没变：详情本来就比日志慢。
+   */
+  const logWindow = useMemo<{ from?: number; to?: number } | undefined>(() => {
+    // 还在等详情：这时候查等于用旧办法圈一个大窗
+    if (detail.isPending) return undefined
+    const found = detail.data?.spans ?? []
+    if (found.length) {
+      let from = Infinity
+      let to = -Infinity
+      for (const s of found) {
+        from = Math.min(from, s.start_us / 1000)
+        to = Math.max(to, (s.start_us + s.duration_ns / 1000) / 1000)
+      }
+      return { from: Math.floor(from - LOG_WINDOW_PAD_MS), to: Math.ceil(to + LOG_WINDOW_PAD_MS) }
+    }
+    // span 表里没有这条 trace（采样掉了、过了 TTL，或者只有日志打了 TID）：退回 at 前后一大片；
+    // 连 at 都没有就不带时间条件，让后端靠 bloom filter 扫全部分区
+    return at ? { from: at - 3_600_000, to: at + 24 * 3_600_000 } : {}
+  }, [detail.isPending, detail.data, at])
+  // 一条 trace 的日志全拉下来，排序和「只看某个 span」都在浏览器里做
   const logs = useTraceLogs(
-    {
-      trace_id: traceId,
-      span_id: logsOnlySpan && selected ? selected : undefined,
-      from: at && at - 3_600_000,
-      to: at && at + 24 * 3_600_000,
-    },
+    { trace_id: traceId, ...logWindow },
     meta.data?.limits,
-    showLogs && !!traceId,
+    showLogs && !!traceId && !!logWindow,
   )
   const [sort, setSort] = useState<LogSort>({ key: 'ts_ms', dir: 'asc' })
   const onSort = (key: string) => setSort((s) => ({ key, dir: s.key === key && s.dir === 'asc' ? 'desc' : 'asc' }))
   const sortedLogs = useMemo(() => (logs.data ? sortLogRows(logs.data.rows, sort) : []), [logs.data, sort])
   const selectedLogCount = useMemo(() => (selected ? sortedLogs.filter((r) => r.span_id === selected).length : 0), [sortedLogs, selected])
+  // 「只看选中 span」在本地筛：整条 trace 的日志已经在手里了，为它再查一趟库是白扫一遍
+  const shownLogs = useMemo(
+    () => (logsOnlySpan && selected ? sortedLogs.filter((r) => r.span_id === selected) : sortedLogs),
+    [sortedLogs, logsOnlySpan, selected],
+  )
+  // 去日志页也把窗口带上：日志页按 id 查默认不裁时间，在这个规模的集群上会直接撞超时
+  const logsRangeQuery =
+    logWindow?.from && logWindow.to ? `&from=${logWindow.from}&to=${logWindow.to}` : ''
   const dims = meta.data?.logs.dimensions ?? []
 
   return (
@@ -230,7 +266,7 @@ export function TraceDetailPage() {
                 title="没有这条 trace 的 span"
                 hint={
                   <>
-                    可能还没入库（采集有几秒延迟）、被采样掉了，或者已经超过 30 天。可以看看有没有<Link to={`/logs?trace_id=${traceId}`} className="text-accent hover:underline">这个 trace id 的日志</Link>。
+                    可能还没入库（采集有几秒延迟）、被采样掉了，或者已经超过 30 天。可以看看有没有<Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className="text-accent hover:underline">这个 trace id 的日志</Link>。
                   </>
                 }
               />
@@ -241,14 +277,17 @@ export function TraceDetailPage() {
             <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto px-3 text-xs whitespace-nowrap md:px-4">
               <Button variant="ghost" size="xs" onClick={() => setShowLogs((v) => !v)}>
                 {showLogs ? '▾' : '▸'} 关联日志
-                {logs.data && ` (${logs.data.rows.length})`}
+                {logs.data && ` (${shownLogs.length})`}
               </Button>
               {showLogs && selected && !logsOnlySpan && logs.data && (
                 <span className="hidden text-2xs text-muted-fg md:inline">选中 span 的 {selectedLogCount} 条已高亮</span>
               )}
               {logs.data?.truncated && (
-                <Badge tone="warn" title={`翻页深度到了上限 ${meta.data?.limits.max_offset ?? ''}，库里共 ${logs.data.total ?? '?'} 条，只拉了前面这些`}>
-                  未拉全
+                <Badge
+                  tone="warn"
+                  title={`库里带这个 trace id 的日志有 ${logs.data.total ?? '?'} 条，只取了最早的 ${logs.data.rows.length} 条。这么多多半是 trace id 被复用了（常驻消费者一直用同一个 id），剩下的多半跟这次请求无关——要全看去日志页`}
+                >
+                  只取了前 {logs.data.rows.length} 条
                 </Badge>
               )}
               {showLogs && selected && (
@@ -259,7 +298,7 @@ export function TraceDetailPage() {
               {showLogs && logs.isFetching && <Spinner className="size-3.5" />}
               <span className="ml-auto flex items-center gap-3 text-2xs text-muted-fg">
                 <StatsLine stats={logs.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
-                <Link to={`/logs?trace_id=${traceId}`} className="text-accent hover:underline">
+                <Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className="text-accent hover:underline">
                   在日志页打开
                 </Link>
               </span>
@@ -269,7 +308,7 @@ export function TraceDetailPage() {
                 {logs.isError && <ErrorBox error={logs.error} />}
                 {logs.data && (
                   <LogTable
-                    rows={sortedLogs}
+                    rows={shownLogs}
                     dims={dims}
                     compact
                     selectedSpanId={logsOnlySpan ? null : selected}

@@ -89,6 +89,7 @@ export function ErrorsPage() {
         )}
         {q.isFetching && <Spinner className="size-4" />}
         <span className="ml-auto flex flex-wrap items-center gap-2">
+          <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <span className="flex h-8 items-center rounded-md border border-input p-0.5">
             {KINDS.map((k) => (
               <button
@@ -117,7 +118,6 @@ export function ErrorsPage() {
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
             <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="筛报错" className="h-8 w-36 pl-8 text-xs" aria-label="筛报错" />
           </span>
-          <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
         </span>
       </header>
 

@@ -266,6 +266,7 @@ export function ServiceDetailPage() {
           }
           extra={
             <>
+              <StatsLine stats={ops.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
               {!isMobile && (
                 <span className="flex h-7 items-center rounded-md border border-input p-0.5" title="点表头是按这一列排；切到「变化」就按这一列和对比窗口的变化排">
                   {(['value', 'delta'] as const).map((m) => (
@@ -280,7 +281,6 @@ export function ServiceDetailPage() {
                   ))}
                 </span>
               )}
-              <StatsLine stats={ops.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
             </>
           }
         >

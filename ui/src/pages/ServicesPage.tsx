@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link, useNavigate } from 'react-router'
 import { AlertTriangleIcon, ChartLineIcon, GitBranchIcon, LayoutGridIcon, RotateCwIcon, ScrollTextIcon, SearchIcon, TableIcon } from 'lucide-react'
-import { useErrorGroups, useMeta, useMetricEvents, useOperations, useServices } from '@/api/queries'
-import type { ErrorGroup, MetricEvent, OverviewResponse, ServiceStat } from '@/api/types'
+import { useErrorGroups, useMeta, useMetricEvents, useServiceOperations, useServices } from '@/api/queries'
+import type { ErrorGroup, MetricEvent, OperationStat, OverviewResponse, ServiceStat } from '@/api/types'
 import { Sparkline } from '@/components/charts/Sparkline'
 import { StatsLine } from '@/components/StatsLine'
 import { Button, Card, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
@@ -13,7 +14,7 @@ import { errorsHref, logsHref, metricsHref, serviceHref, tracesHref, type Window
 import { formatDurationMs, formatNumber, formatTs } from '@/lib/time'
 import { useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
-import { cn } from '@/lib/utils'
+import { cn, scrollParent } from '@/lib/utils'
 
 type SortKey = keyof Pick<ServiceStat, 'service' | 'requests' | 'rps' | 'errors' | 'error_rate' | 'p50_ms' | 'p95_ms' | 'p99_ms' | 'max_ms'>
 
@@ -30,6 +31,14 @@ const COLUMNS: { key: SortKey; label: string; align?: 'right'; title?: string }[
 ]
 
 /** 卡片排序 */
+/** 一次向后端问几个服务的接口表，和后端的 MAX_SERVICES_PER_QUERY 对齐。异常服务比这还多的话，
+ *  排在后面的卡就不显示「主要是哪个接口」了——那种时候整个集群都在烧，这一行不是重点 */
+const MAX_CONTRIBUTORS = 24
+
+/** 稳定的空数组：每次 render 新建 `[]` 会让下面那些 memo 组件全部白跑 */
+const NO_EVENTS: MetricEvent[] = []
+const NO_OPS: OperationStat[] = []
+
 const ORDERS = [
   { value: 'health', label: '异常在前' },
   { value: 'rps', label: '按请求量' },
@@ -112,24 +121,28 @@ function QuickLinks({ service, win, logDim, hasMetrics, className }: { service: 
  * 一次返回两个窗口，挑法和详情页的变化榜共用（见 lib/compare.ts）：错误爆了就说错误，慢了
  * 就说慢了。一个接口都没越过阈值（劣化摊薄在几百个接口上）才退回去说当前 P95 最高的那个。
  */
-function Contributor({ service, win, compare }: { service: string; win: Window; compare: Compare }) {
-  const q = useOperations(service, { from: win.fromMs, to: win.toMs, kind: 'entry', compare })
+/**
+ * 异常卡上那句「主要是哪个接口」。
+ *
+ * 数据由 [`ServicesPage`] 一条查询问回来再按服务分（见 `useServiceOperations`），这里只负责
+ * 挑一行显示：以前是每张卡自己 `useOperations`，十几个服务同时报警就是十几条查询。
+ */
+const Contributor = memo(function Contributor({ ops }: { ops: OperationStat[] }) {
   const line = useMemo(() => {
-    const ops = q.data?.operations ?? []
     const mover = topMovers(ops, 1)[0]
     if (mover) return { name: mover.op.span_name, text: mover.detail, requests: mover.op.requests }
     const top = ops.filter((o) => o.requests >= 30).sort((a, b) => b.p95_ms - a.p95_ms)[0]
     if (!top) return null
     const from = top.prev ? `${formatDurationMs(top.prev.p95_ms)} → ` : ''
     return { name: top.span_name, text: `P95 ${from}${formatDurationMs(top.p95_ms)}`, requests: top.requests }
-  }, [q.data])
+  }, [ops])
   if (!line) return null
   return (
     <div className="mt-1 truncate text-2xs text-muted-fg" title={`${line.name}（${formatNumber(line.requests)} 次）`}>
       主要是 <span className="mono text-fg">{line.name}</span>：<span className="font-medium text-fg">{line.text}</span>
     </div>
   )
-}
+})
 
 /**
  * 异常卡上的「主要在报什么错」。**这一行是 dash 到报错之间唯一的一跳**：以前得点进服务详情、
@@ -178,6 +191,82 @@ function Restarts({ events }: { events: MetricEvent[] }) {
  * 服务总览——首页。回答的是「现在谁不对」：先一行全站数字，再是异常服务的大卡（带主因、
  * 重启标记），正常的压成一行一个。数字全带和对比窗口的变化，对比窗口默认昨天同时段。
  */
+/**
+ * 正常服务那张长列表：只渲染视口里的那十几行。
+ *
+ * 线上 83 个服务，全渲染出来是 83 行 × 每行一张趋势图；再加上下面的排序、筛选，任何一次
+ * 重渲染都得把它们走一遍。日志表和瀑布图早就是虚拟化的，这里照搬同一套（`useVirtualizer`
+ * + `scrollParent`）：滚动容器是外层那个 `overflow-auto`，列表前面还有概览卡和异常卡，
+ * 所以要量一下自己在容器里的起点（`scrollMargin`）。
+ *
+ * 行高固定（一行文字），但还是挂上 `measureElement` 兜底——字号或间距一改，估算值就不准了。
+ */
+function FineList({
+  items,
+  win,
+  compare,
+  eventsByService,
+  logDim,
+  hasMetrics,
+  mobile,
+}: {
+  items: { s: ServiceStat; health: { level: Health; reasons: string[] } }[]
+  win: Window
+  compare: Compare
+  eventsByService: Map<string, MetricEvent[]>
+  logDim: string
+  hasMetrics: boolean
+  mobile: boolean
+}) {
+  const hostRef = useRef<HTMLDivElement>(null)
+  const scrollEl = useRef<HTMLElement | null>(null)
+  const [margin, setMargin] = useState(0)
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => (scrollEl.current ??= scrollParent(hostRef.current)),
+    estimateSize: () => (mobile ? 33 : 29),
+    overscan: 8,
+    scrollMargin: margin,
+    getItemKey: (i) => items[i].s.service,
+  })
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    const box = scrollEl.current ?? scrollParent(host)
+    if (!host || !box) return
+    scrollEl.current = box
+    const m = Math.max(0, Math.round(host.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop))
+    setMargin((prev) => (prev === m ? prev : m))
+  })
+  return (
+    <div ref={hostRef} className="relative" style={{ height: virtualizer.getTotalSize() }}>
+      {virtualizer.getVirtualItems().map((v) => {
+        const { s, health } = items[v.index]
+        return (
+          <div
+            key={v.key}
+            data-index={v.index}
+            ref={virtualizer.measureElement}
+            className="absolute top-0 left-0 w-full"
+            style={{ transform: `translateY(${v.start - margin}px)` }}
+          >
+            <Row
+              s={s}
+              health={health}
+              win={win}
+              compare={compare}
+              events={eventsByService.get(s.service) ?? NO_EVENTS}
+              logDim={logDim}
+              hasMetrics={hasMetrics}
+              mobile={mobile}
+              last={v.index === items.length - 1}
+            />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function ServicesPage() {
   const { range } = useTimeRange()
   const { params, set } = useUrlState()
@@ -191,7 +280,8 @@ export function ServicesPage() {
   const onlyBad = params.get('bad') === '1'
   const [needle, setNeedle] = useState('')
   const [tableSort, setTableSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'requests', desc: true })
-  const win: Window = { fromMs: range.fromMs, toMs: range.toMs }
+  // 引用要稳：win 传给下面每一张 memo 过的卡，每次 render 新建对象的话 memo 就白加了
+  const win: Window = useMemo(() => ({ fromMs: range.fromMs, toMs: range.toMs }), [range.fromMs, range.toMs])
   const logDim = meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container'
   const hasMetrics = !!meta.data?.metrics
 
@@ -214,6 +304,27 @@ export function ServicesPage() {
   }, [errs.data])
 
   const all = useMemo(() => (q.data?.services ?? []).map((s) => ({ s, health: serviceHealth(s) })), [q.data])
+
+  // 异常卡上的「主要是哪个接口」：所有异常服务一条查询问完再按服务分，和上面的错误分组、
+  // 重启事件一个路子。按 all 算而不是按过滤后的 bad，这样在搜索框里打字不会重新发查询
+  const contributorNames = useMemo(
+    () => all.filter((x) => x.health.level !== 'ok').map((x) => x.s.service).slice(0, MAX_CONTRIBUTORS),
+    [all],
+  )
+  const contributors = useServiceOperations(
+    contributorNames,
+    { from: range.fromMs, to: range.toMs, kind: 'entry', compare },
+    contributorNames.length > 0,
+  )
+  const opsByService = useMemo(() => {
+    const m = new Map<string, OperationStat[]>()
+    for (const o of contributors.data?.operations ?? []) {
+      const list = m.get(o.service)
+      if (list) list.push(o)
+      else m.set(o.service, [o])
+    }
+    return m
+  }, [contributors.data])
   const shown = useMemo(() => {
     const n = needle.trim().toLowerCase()
     const list = all.filter((x) => !n || x.s.service.toLowerCase().includes(n)).filter((x) => !onlyBad || x.health.level !== 'ok')
@@ -248,6 +359,7 @@ export function ServicesPage() {
         <span className="hidden text-xs text-muted-fg xl:inline">按入口 span（Server / Consumer）算</span>
         {q.isFetching && <Spinner className="size-4" />}
         <span className="ml-auto flex flex-wrap items-center gap-2">
+          <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <Button size="sm" active={onlyBad} onClick={() => set({ bad: onlyBad ? null : '1' })} disabled={!badCount && !onlyBad} title="只看错误率或延迟异常的">
             <AlertTriangleIcon className="size-3.5" />
             异常 {badCount}
@@ -285,7 +397,6 @@ export function ServicesPage() {
               </button>
             ))}
           </span>
-          <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
         </span>
       </header>
 
@@ -318,8 +429,9 @@ export function ServicesPage() {
                       health={health}
                       win={win}
                       compare={compare}
-                      events={eventsByService.get(s.service) ?? []}
+                      events={eventsByService.get(s.service) ?? NO_EVENTS}
                       topError={topErrorByService.get(s.service)}
+                      ops={opsByService.get(s.service) ?? NO_OPS}
                       logDim={logDim}
                       hasMetrics={hasMetrics}
                     />
@@ -346,9 +458,7 @@ export function ServicesPage() {
                       <span />
                     </div>
                   )}
-                  {fine.map(({ s, health }) => (
-                    <Row key={s.service} s={s} health={health} win={win} compare={compare} events={eventsByService.get(s.service) ?? []} logDim={logDim} hasMetrics={hasMetrics} mobile={isMobile} />
-                  ))}
+                  <FineList items={fine} win={win} compare={compare} eventsByService={eventsByService} logDim={logDim} hasMetrics={hasMetrics} mobile={isMobile} />
                 </Card>
               </section>
             )}
@@ -467,8 +577,14 @@ function Summary({ data, all, restarts, cmpShort }: { data: OverviewResponse; al
   )
 }
 
-/** 异常服务的大卡：数字 + 主因 + 重启 + 趋势 */
-function BigCard({ s, health, win, compare, events, topError, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; topError?: ErrorGroup; logDim: string; hasMetrics: boolean }) {
+/**
+ * 异常服务的大卡：数字 + 主因 + 重启 + 趋势。
+ *
+ * `memo` 不是锦上添花：这一页有 80 多张卡 / 行，不包的话在搜索框里打一个字就要把它们连同
+ * 里面的趋势图全部重新渲染一遍。前提是传进来的 props 引用稳定——`win` 在上面 useMemo 过，
+ * 空数组用的是 NO_EVENTS / NO_OPS 这两个常量。
+ */
+const BigCard = memo(function BigCard({ s, health, win, compare, events, topError, ops, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; topError?: ErrorGroup; ops: OperationStat[]; logDim: string; hasMetrics: boolean }) {
   const latencyOk = meaningfulLatency(s.p95_ms)
   const isMobile = useIsMobile()
   return (
@@ -485,7 +601,7 @@ function BigCard({ s, health, win, compare, events, topError, logDim, hasMetrics
       <div className={cn('mt-1 truncate text-2xs', health.level === 'bad' ? 'text-danger' : 'text-warn')} title={health.reasons.join('；')}>
         {health.reasons.join('；')}
       </div>
-      <Contributor service={s.service} win={win} compare={compare} />
+      <Contributor ops={ops} />
       {topError && <TopError g={topError} win={win} />}
       {/* 原因区可能是一行也可能两行（带主因），指标和火花图贴底对齐，同一行的卡片才对得齐 */}
       <div className="mt-auto grid grid-cols-3 gap-2 pt-3">
@@ -496,14 +612,14 @@ function BigCard({ s, health, win, compare, events, topError, logDim, hasMetrics
       <Sparkline requests={s.spark.requests} errors={s.spark.errors} prev={s.spark.prev_requests} className="mt-3" />
     </Link>
   )
-}
+})
 
-/** 正常服务压成一行 */
-function Row({ s, health, win, compare, events, logDim, hasMetrics, mobile }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; logDim: string; hasMetrics: boolean; mobile: boolean }) {
+/** 正常服务压成一行。同样包 memo，理由见 BigCard */
+const Row = memo(function Row({ s, health, win, compare, events, logDim, hasMetrics, mobile, last }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; logDim: string; hasMetrics: boolean; mobile: boolean; last?: boolean }) {
   const latencyOk = meaningfulLatency(s.p95_ms)
   if (mobile) {
     return (
-      <Link to={serviceHref(s.service, win, compare)} className="row-hover flex items-center gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
+      <Link to={serviceHref(s.service, win, compare)} className={cn('row-hover flex items-center gap-2 border-b border-border/60 px-3 py-2 text-xs', last && 'border-b-0')}>
         <HealthDot {...health} />
         <span className="min-w-0 flex-1 truncate font-medium">{s.service || '(空)'}</span>
         <Restarts events={events} />
@@ -513,7 +629,7 @@ function Row({ s, health, win, compare, events, logDim, hasMetrics, mobile }: { 
     )
   }
   return (
-    <Link to={serviceHref(s.service, win, compare)} className="group row-hover grid grid-cols-[minmax(0,2fr)_1fr_1fr_1fr_7rem_5rem] items-center gap-x-3 border-b border-border/60 px-3 py-1.5 text-xs last:border-b-0">
+    <Link to={serviceHref(s.service, win, compare)} className={cn('group row-hover grid grid-cols-[minmax(0,2fr)_1fr_1fr_1fr_7rem_5rem] items-center gap-x-3 border-b border-border/60 px-3 py-1.5 text-xs', last && 'border-b-0')}>
       <span className="flex min-w-0 items-center gap-2">
         <HealthDot {...health} />
         <span className="truncate font-medium" title={s.service}>
@@ -535,4 +651,4 @@ function Row({ s, health, win, compare, events, logDim, hasMetrics, mobile }: { 
       <QuickLinks service={s.service} win={win} logDim={logDim} hasMetrics={hasMetrics} className="justify-end opacity-0 group-hover:opacity-100" />
     </Link>
   )
-}
+})

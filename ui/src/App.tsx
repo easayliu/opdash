@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router'
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
@@ -26,16 +26,33 @@ const NAV = [
   { to: '/metrics', label: '指标', icon: ChartLineIcon, needs: 'metrics' as const },
 ]
 
+/**
+ * 粘 trace id 直达时没有时刻可用，拿当前页面时间范围的中点当猜测。
+ *
+ * 链路详情按这个中心点从窄往宽探窗口（见后端 `DETAIL_PROBE_WINDOWS`），猜中能少读两个数量级；
+ * 猜错了前几档空查、最后一档不限时间兜回来，多读约 27%，结果一样全。范围本身就宽到没法当
+ * 提示的（超过一天）就不猜，直接让它走兜底那档。
+ */
+function guessAt(params: URLSearchParams): number | undefined {
+  const from = Number(params.get('from'))
+  const to = Number(params.get('to'))
+  if (!from || !to || to <= from || to - from > 24 * 3_600_000) return undefined
+  return Math.round((from + to) / 2)
+}
+
 /** 顶栏的直达框：粘一个 trace id 直接开链路；不是 id 就当关键字去搜日志。 */
 function QuickJump() {
   const navigate = useNavigate()
+  const [params] = useSearchParams()
   const [value, setValue] = useState('')
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const v = value.trim()
     if (!v) return
-    if (isHexId(v, 32)) navigate(`/traces/${v.toLowerCase()}`)
-    else if (isHexId(v, 16)) navigate(`/logs?span_id=${v.toLowerCase()}&range=7d`)
+    if (isHexId(v, 32)) {
+      const at = guessAt(params)
+      navigate(`/traces/${v.toLowerCase()}${at ? `?at=${at}` : ''}`)
+    } else if (isHexId(v, 16)) navigate(`/logs?span_id=${v.toLowerCase()}&range=7d`)
     else navigate(`/logs?q=${encodeURIComponent(v)}`)
     setValue('')
   }

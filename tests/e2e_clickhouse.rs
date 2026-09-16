@@ -213,9 +213,23 @@ async fn every_endpoint_answers() {
             let (status, body) =
                 get_json(&app, &format!("/api/traces/{trace_id}/spans/ffffffffffffffff")).await;
             assert_eq!(status, 400, "{body}");
+            // 按 trace id 查日志，带上这条 trace 的实际跨度——页面上的「在日志页打开」也是这么跳的
+            let start_ms = spans[0]["start_us"].as_i64().unwrap() / 1000;
+            let (status, body) = get_json(
+                &app,
+                &format!(
+                    "/api/logs/search?trace_id={trace_id}&from={}&to={}&limit=5",
+                    start_ms - 300_000,
+                    start_ms + 300_000
+                ),
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            // 不带时间范围也得放行（bloom filter 够用），但在生产规模的集群上它要把 30 天的分区
+            // 全过一遍，可能直接撞超时——这里只钉住「没被当成参数错误挡掉」
             let (status, body) =
                 get_json(&app, &format!("/api/logs/search?trace_id={trace_id}&limit=5")).await;
-            assert_eq!(status, 200, "{body}");
+            assert!(status == 200 || status == 504, "{status} {body}");
             let (status, body) =
                 get_json(&app, &format!("/api/traces/search?trace_id={trace_id}")).await;
             assert_eq!(status, 200, "{body}");

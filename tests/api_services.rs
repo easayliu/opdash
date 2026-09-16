@@ -1,7 +1,7 @@
 //! `/api/services/*`：接口表和时间序列怎么和对比窗口对齐。
 //!
 //! 服务级的「比昨天慢 3 倍」只说明有事，**是哪个接口**才是能动手的信息：接口表当前窗和对比窗
-//! 各查一次，按 `(span_name, span_kind)` 对齐；时间序列按相对位置对齐到同一格。这里验的就是
+//! 各查一次，按 `(service, span_name, span_kind)` 对齐；时间序列按相对位置对齐到同一格。这里验的就是
 //! 这两处对齐，以及「对比窗有、当前窗没有」的接口不会被悄悄丢掉。
 //!
 //! 两条查询是并发发的，假库按到达顺序回放，所以测试里把并发上限压成 1——回放顺序才确定
@@ -32,9 +32,13 @@ fn window_of(req: &Captured) -> (i64, i64) {
 }
 
 fn op_row(name: &str, requests: u64, errors: u64, p95: f64) -> String {
+    svc_op_row("svc", name, requests, errors, p95)
+}
+
+fn svc_op_row(service: &str, name: &str, requests: u64, errors: u64, p95: f64) -> String {
     format!(
-        "{{\"span_name\":\"{name}\",\"span_kind\":\"Server\",\"requests\":{requests},\
-         \"errors\":{errors},\"q\":[1,{p95},{p95}],\"max_ms\":{p95}}}\n"
+        "{{\"service_name\":\"{service}\",\"span_name\":\"{name}\",\"span_kind\":\"Server\",\
+         \"requests\":{requests},\"errors\":{errors},\"q\":[1,{p95},{p95}],\"max_ms\":{p95}}}\n"
     )
 }
 
@@ -144,4 +148,77 @@ async fn compare_only_takes_the_four_known_values() {
     .await;
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().unwrap().contains("none"), "{body}");
+}
+
+/// 总览页每张异常卡上那句「主要是哪个接口」：一次问好几个服务，一条查询回来，每行带 service。
+/// 以前是一张卡各查一次，十几个服务同时报警就是十几条。
+#[tokio::test]
+async fn operations_can_answer_several_services_in_one_query() {
+    let fake = FakeClickhouse::start().await;
+    let app = serial_app(&fake).await;
+    fake.respond(svc_op_row("a", "A", 1000, 0, 900.0) + &svc_op_row("b", "B", 500, 0, 10.0));
+
+    let (status, body) = get_json(
+        &app,
+        &format!(
+            "/api/services/operations?service=a,b&compare=none&from={MIDNIGHT_MS}&to={}",
+            MIDNIGHT_MS + HOUR_MS
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let requests = data_requests(&fake);
+    assert_eq!(requests.len(), 1, "两个服务一条查询");
+    // 静态路径要赢过 /api/services/{name}/operations，不能被当成 name = "operations"
+    assert_eq!(requests[0].query_value("param_p2").unwrap(), "['a','b']");
+    let ops = body["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 2);
+    // 每行带上是哪个服务的，前端按它分组
+    assert_eq!(find(ops, "A")["service"], "a");
+    assert_eq!(find(ops, "B")["service"], "b");
+
+    // 同名接口在不同服务下是两行，不能被对齐成一行
+    let fake = FakeClickhouse::start().await;
+    let app = serial_app(&fake).await;
+    fake.respond(svc_op_row("a", "GET /x", 10, 0, 5.0) + &svc_op_row("b", "GET /x", 20, 0, 9.0));
+    fake.respond(svc_op_row("a", "GET /x", 10, 0, 1.0));
+    let (status, body) = get_json(
+        &app,
+        &format!(
+            "/api/services/operations?service=a,b&from={MIDNIGHT_MS}&to={}",
+            MIDNIGHT_MS + HOUR_MS
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let ops = body["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 2, "{body}");
+    let a = ops.iter().find(|o| o["service"] == "a").unwrap();
+    let b = ops.iter().find(|o| o["service"] == "b").unwrap();
+    assert_eq!(a["prev"]["p95_ms"], 1.0, "a 的对比窗对上了");
+    assert!(b["prev"].is_null(), "b 在对比窗里没有，不能借用 a 的");
+}
+
+/// 一次问太多服务就拒绝：`IN` 列表和返回行数都会失控，宁可让页面退回一个一个问
+#[tokio::test]
+async fn operations_refuses_too_many_services() {
+    let fake = FakeClickhouse::start().await;
+    let app = serial_app(&fake).await;
+    let many: Vec<String> = (0..40).map(|i| format!("s{i}")).collect();
+    let (status, body) = get_json(
+        &app,
+        &format!(
+            "/api/services/operations?service={}&from={MIDNIGHT_MS}&to={}",
+            many.join(","),
+            MIDNIGHT_MS + HOUR_MS
+        ),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = get_json(
+        &app,
+        &format!("/api/services/operations?from={MIDNIGHT_MS}&to={}", MIDNIGHT_MS + HOUR_MS),
+    )
+    .await;
+    assert_eq!(status, 400, "一个服务都不给也是 400: {body}");
 }

@@ -51,46 +51,69 @@ export function useLogSearch(params: Params, enabled = true) {
 
 export interface TraceLogs {
   rows: LogRow[]
-  /** 库里带这个 trace id 的总条数（count 查询超时时没有） */
+  /** 库里带这个 trace id 的总条数。只有 `truncated` 时才去数，正常路径不为它多扫一遍 */
   total?: number
-  /** 翻到服务端允许的最深一页仍没拉完 */
+  /** 拉满 [`TRACE_LOG_MAX_PAGES`] 页还没到头，剩下的没拉 */
   truncated: boolean
   stats: Stats
 }
 
 /**
- * 一条 trace 的全部日志：按服务端每页上限一页页拉到没有为止，翻页深度到 max_offset 就停。
- * 一条 trace 的日志通常几十到几百条，一页就完；异常多的也能拉到上万条。
+ * 这一页最多拉几页日志。
+ *
+ * 以前是拉到服务端的翻页上限（max_offset，默认 10000）为止，也就是最多 11 趟。按 trace id 查
+ * 没有排序键可用，`OFFSET` 又是「读满 offset + limit 行再把前面的丢掉」，所以页越深越贵：
+ * 线上一条 trace id 被复用、挂着 26 万条日志的（常驻消费者一直用同一个 id），第 1 页读
+ * 31.9 M 行 / 1.46 GB，第 10 页读 100.2 M 行 / 9.97 GB，11 趟串行累计 60 GB 以上、几十秒，
+ * 最后还是弹一个「未拉全」。
+ *
+ * 那些日志本来就不属于用户正在看的这一次请求。超过两页就停下来说清楚，比闷头拉完有用。
+ */
+const TRACE_LOG_MAX_PAGES = 2
+
+/**
+ * 一条 trace 的全部日志：一页页拉到没有为止，最多 [`TRACE_LOG_MAX_PAGES`] 页。
+ * 一条 trace 的日志通常几十到几百条，一趟就完。
+ *
+ * 不传 `count`：服务端默认会并发一条 `count()` 把总数也数出来，而按 trace id 查没有索引能让
+ * 它提前停，等于把同一段数据再扫一遍（线上实测 32.7 M 行 / 120.7 MB）。页面只在「没拉全」
+ * 时才需要这个总数，所以挪到下面那条路上单独要。
  */
 export function useTraceLogs(
-  filter: { trace_id: string; span_id?: string; from?: number; to?: number },
-  limits: { max_rows: number; max_offset: number } | undefined,
+  filter: { trace_id: string; from?: number; to?: number },
+  limits: { max_rows: number } | undefined,
   enabled = true,
 ) {
   return useQuery({
     queryKey: ['traces', 'logs', filter, limits],
     queryFn: async ({ signal }): Promise<TraceLogs> => {
       const limit = limits?.max_rows ?? 1000
-      const maxOffset = limits?.max_offset ?? 0
       const rows: LogRow[] = []
       const stats: Stats = { read_rows: 0, read_bytes: 0, result_rows: 0, elapsed_ms: 0 }
-      let total: number | undefined
+      const absorb = (s: Stats) => {
+        stats.read_rows += s.read_rows
+        stats.read_bytes += s.read_bytes
+        stats.result_rows += s.result_rows
+        stats.elapsed_ms += s.elapsed_ms
+      }
       let offset = 0
       for (;;) {
-        const page = await apiGet<LogSearchResponse>('/logs/search', { ...filter, order: 'asc', limit, offset }, signal)
+        const page = await apiGet<LogSearchResponse>('/logs/search', { ...filter, order: 'asc', limit, offset, count: false }, signal)
         rows.push(...page.rows)
-        stats.read_rows += page.stats.read_rows
-        stats.read_bytes += page.stats.read_bytes
-        stats.result_rows += page.stats.result_rows
-        stats.elapsed_ms += page.stats.elapsed_ms
-        if (offset === 0) total = page.total
-        if (page.rows.length < limit) return { rows, total, truncated: false, stats }
+        absorb(page.stats)
+        if (page.rows.length < limit) return { rows, truncated: false, stats }
         offset += limit
-        if (offset > maxOffset) return { rows, total, truncated: true, stats }
+        if (offset >= limit * TRACE_LOG_MAX_PAGES) {
+          // 到这儿说明 trace id 多半被复用了。只有这一条路需要总数，才去数
+          const counted = await apiGet<LogSearchResponse>('/logs/search', { ...filter, order: 'asc', limit: 1, offset: 0, count: true }, signal)
+          absorb(counted.stats)
+          return { rows, total: counted.total, truncated: true, stats }
+        }
       }
     },
     placeholderData: keepPreviousData,
-    staleTime: 60_000,
+    // trace 是不会变的历史数据，开关日志页签、来回点 span 不该重打
+    staleTime: 10 * 60_000,
     enabled: enabled && !!limits,
   })
 }
@@ -157,7 +180,8 @@ export function useTraceDetail(traceId: string | undefined, at?: string | null) 
     queryKey: ['traces', 'detail', traceId, at ?? null],
     queryFn: ({ signal }) => apiGet<TraceDetailResponse>(`/traces/${encodeURIComponent(traceId ?? '')}`, { at: at ?? undefined }, signal),
     enabled: !!traceId,
-    staleTime: 60_000,
+    // 已经跑完的 trace 不会再变，重新打一遍要走一整套定位 + 取数
+    staleTime: 10 * 60_000,
   })
 }
 
@@ -228,6 +252,24 @@ export function useOperations(service: string, params: Params) {
     queryFn: ({ signal }) => apiGet<OperationsResponse>(`/services/${encodeURIComponent(service)}/operations`, params, signal),
     placeholderData: keepPreviousData,
     enabled: !!service,
+  })
+}
+
+/**
+ * 一次问好几个服务的接口表。总览页每张异常卡上那句「主要是哪个接口」共用这一条。
+ *
+ * 以前是一张卡一个 `useOperations`，十几个服务同时报警就是十几条查询（每条内部还要查当前窗
+ * 和对比窗两遍）——而那正是最需要这一页的时候。同一页的「头号报错」「进程重启」早就是一条
+ * 查全站再按服务分了。
+ */
+export function useServiceOperations(services: string[], params: Params, enabled = true) {
+  const list = [...services].sort().join(',')
+  return useQuery({
+    queryKey: ['services', 'operations', list, params],
+    queryFn: ({ signal }) => apiGet<OperationsResponse>('/services/operations', { ...params, service: list }, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    enabled: enabled && !!list,
   })
 }
 

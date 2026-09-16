@@ -314,6 +314,8 @@ export interface PrevOp {
 }
 
 export interface OperationStat {
+  /** 一次问多个服务时按它分组（见 useServiceOperations）；单服务那条路上就是它自己 */
+  service: string
   span_name: string
   kind: string
   requests: number

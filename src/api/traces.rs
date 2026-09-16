@@ -15,10 +15,10 @@ use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
     AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, ENTRY_KINDS,
-    ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span,
-    SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary,
-    ValueRow, candidate_range, dedup_by_trace, normalize_kind, normalize_span_id,
-    normalize_trace_id,
+    DETAIL_PROBE_WINDOWS, ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS,
+    SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries,
+    TraceSort, TraceSummary, ValueRow, candidate_range, dedup_by_trace, detail_probe_hit,
+    normalize_kind, normalize_span_id, normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -141,6 +141,10 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
         (vec![normalize_trace_id(raw)?], None, None, Stats::default())
     } else {
         let filter = build_filter(&state, &schema, &p, sort == TraceSort::Duration)?;
+        // 先按**用户给的**范围校验。探测会把窗口切成 1 分钟的小段去查（见 candidates），
+        // 而校验是在拼 SQL 时做的，只能看见切过的那一段——「不选服务不能查超过 6 小时」这条
+        // 护栏就这么被绕过去了：同一个请求，探测凑够了返回 200、没凑够回退整窗才 400
+        filter.validate()?;
         let (rows, stats) = candidates(&state, &queries, &filter, sort, limit).await?;
         // 摘要先按候选自己的时间跨度查，不是按整个搜索窗，见 TraceQueries::summaries
         let narrow = candidate_range(&rows);
@@ -463,10 +467,58 @@ async fn heatmap(State(state): State<AppState>, p: Params) -> Result<Json<Heatma
     }))
 }
 
-/// 详情按时间窗口裁剪时，开始时间往前放多少、往后放多少：往前给时钟偏差留余量，
-/// 往后要装下根返回后才跑的异步 span（消息消费、定时补偿可能晚半小时以上）。
-const DETAIL_WINDOW_BEFORE_MS: i64 = 3_600_000;
-const DETAIL_WINDOW_AFTER_MS: i64 = 24 * 3_600_000;
+/// 一条 trace 的 span 定位在哪一档窗口上查到的。
+struct Located {
+    rows: Vec<LocatedSpan>,
+    /// 几档探测加起来的读量
+    stats: Stats,
+    /// 取回了 `max + 1` 行：这条 trace 的 span 比上限还多
+    truncated: bool,
+    /// 命中的那一档带了时间条件（没带就是扫了全部分区）
+    windowed: bool,
+}
+
+/// 按 [`DETAIL_PROBE_WINDOWS`] 从窄到宽探，命中一档就收工。
+///
+/// `at` 是这条 trace 大概在什么时候——从列表页点进来是它的开始时间，从日志点进来是那条日志的
+/// 时间，顶栏直达时是页面当前时间范围的猜测，也可能干脆没有。不管哪种，最后一档不限时间的
+/// 兜底都保证查得全，猜错只是多跑两趟空查询。
+async fn locate_spans(
+    state: &AppState,
+    queries: &TraceQueries<'_>,
+    trace_id: &str,
+    max: u32,
+    at: Option<i64>,
+) -> Result<Located> {
+    let mut stats = Stats::default();
+    let mut rows = Vec::new();
+    let mut windowed = false;
+    for probe in DETAIL_PROBE_WINDOWS {
+        let window = match (at, probe) {
+            (Some(at), Some((before, after))) => {
+                Some(TimeRange { from_ms: (at - before).max(0), to_ms: at + after })
+            }
+            // 没有 at 就没有中心点，前面几档无从谈起，直接用最后那档
+            (None, Some(_)) => continue,
+            (_, None) => None,
+        };
+        let r = state
+            .client
+            .rows::<LocatedSpan>(queries.detail_locate(trace_id, max, window.as_ref())?)
+            .await?;
+        stats.absorb(&r.stats);
+        // 已经取满上限了，扩窗只是多读一遍、拿回同样被截断的那批
+        let full = r.rows.len() > max as usize;
+        let hit = full || window.as_ref().is_some_and(|w| detail_probe_hit(&r.rows, w));
+        rows = r.rows;
+        windowed = window.is_some();
+        if hit {
+            break;
+        }
+    }
+    let truncated = rows.len() > max as usize;
+    Ok(Located { rows, stats, truncated, windowed })
+}
 
 #[derive(Serialize)]
 pub struct SpanAttrsResponse {
@@ -506,17 +558,10 @@ async fn detail(
     let trace_id = normalize_trace_id(&trace_id)?;
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
     let max = state.config.max_trace_spans;
-    let window = p.get_i64("at")?.map(|at| TimeRange {
-        from_ms: (at - DETAIL_WINDOW_BEFORE_MS).max(0),
-        to_ms: at + DETAIL_WINDOW_AFTER_MS,
-    });
-    let located = state
-        .client
-        .rows::<LocatedSpan>(queries.detail_locate(&trace_id, max, window.as_ref())?)
-        .await?;
-    let mut stats = located.stats;
-    let truncated = located.rows.len() > max as usize;
-    let located: Vec<LocatedSpan> = located.rows.into_iter().take(max as usize).collect();
+    let probe = locate_spans(&state, &queries, &trace_id, max, p.get_i64("at")?).await?;
+    let mut stats = probe.stats;
+    let truncated = probe.truncated;
+    let located: Vec<LocatedSpan> = probe.rows.into_iter().take(max as usize).collect();
     let spans: Vec<Span> = if located.is_empty() {
         Vec::new()
     } else {
@@ -540,7 +585,7 @@ async fn detail(
         trace_id,
         spans,
         truncated,
-        windowed: window.is_some(),
+        windowed: probe.windowed,
         attributes_lazy: true,
         stats,
     }))
@@ -561,10 +606,6 @@ async fn span_attrs(
     let trace_id = normalize_trace_id(&trace_id)?;
     let span_id = normalize_span_id(&span_id)?;
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
-    let window = p.get_i64("at")?.map(|at| TimeRange {
-        from_ms: (at - DETAIL_WINDOW_BEFORE_MS).max(0),
-        to_ms: at + DETAIL_WINDOW_AFTER_MS,
-    });
     let hint = match (p.get("service"), p.get("name"), p.get_i64("ts")?) {
         (Some(service), Some(name), Some(ts_ms)) => Some(LocatedSpan {
             span_id: span_id.clone(),
@@ -579,16 +620,16 @@ async fn span_attrs(
         match hint {
             Some(span) => span,
             None => {
-                let located = state
-                    .client
-                    .rows::<LocatedSpan>(queries.detail_locate(
-                        &trace_id,
-                        state.config.max_trace_spans,
-                        window.as_ref(),
-                    )?)
-                    .await?;
-                stats = located.stats;
-                located.rows.into_iter().find(|s| s.span_id == span_id).ok_or_else(|| {
+                let probe = locate_spans(
+                    &state,
+                    &queries,
+                    &trace_id,
+                    state.config.max_trace_spans,
+                    p.get_i64("at")?,
+                )
+                .await?;
+                stats = probe.stats;
+                probe.rows.into_iter().find(|s| s.span_id == span_id).ok_or_else(|| {
                     Error::bad_request(format!("这条 trace 里没有 span {span_id}"))
                 })?
             }

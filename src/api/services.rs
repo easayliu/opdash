@@ -11,7 +11,7 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
-    CLIENT_KINDS, ENTRY_KINDS, OperationRow, ServiceRow, SparkRow, TimeseriesRow, TraceQueries,
+    CLIENT_KINDS, ENTRY_KINDS, OperationRow, ServiceRow, TimeseriesRow, TraceQueries,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::TRACE_FIXED_COLUMNS;
@@ -19,6 +19,7 @@ use crate::schema::TRACE_FIXED_COLUMNS;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/services", get(overview))
+        .route("/api/services/operations", get(operations_many))
         .route("/api/services/{name}/operations", get(operations))
         .route("/api/services/{name}/timeseries", get(timeseries))
 }
@@ -81,6 +82,10 @@ pub struct OverviewResponse {
     pub stats: Stats,
 }
 
+/// 一次最多问几个服务的接口表。总览页只对不健康的服务问，正常不会有这么多；真有的话
+/// `service_name IN` 的列表和返回的行数都会失控，宁可让页面退回一个一个问。
+const MAX_SERVICES_PER_QUERY: usize = 24;
+
 /// 迷你趋势的桶数。卡片上只有一两百像素宽，再多也看不出来。
 const SPARK_BUCKETS: i64 = 30;
 
@@ -114,6 +119,13 @@ fn compare_window_opt(kind: &str, range: &TimeRange) -> Result<(String, Option<T
     })
 }
 
+/// [`TraceQueries::service_stats`] 一条查询回来的是两种行混在一起的，按 `is_total` 拆开：
+/// 前一半是每个服务整窗的汇总，后一半是迷你趋势的每一格。`partition` 保序，所以汇总那批
+/// 仍然是 SQL 里 `requests DESC` 的顺序，前端拿到的排序没变。
+fn split_totals(rows: Vec<ServiceRow>) -> (Vec<ServiceRow>, Vec<ServiceRow>) {
+    rows.into_iter().partition(|r| r.is_total == 1)
+}
+
 async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<OverviewResponse>> {
     let schema = state.schema.get().await?;
     let range = range(&state, &p)?;
@@ -142,26 +154,21 @@ async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<Overv
         width_ms: bucket.width_ms,
         origin_ms: bucket.origin_ms - (range.from_ms - prev_range.from_ms),
     };
-    // 四条查询互不依赖，一起发
-    let (current, previous, sparks, prev_sparks) = tokio::try_join!(
-        state.client.rows::<ServiceRow>(queries.service_overview(&range, &dims)?),
-        state.client.rows::<ServiceRow>(queries.service_overview(&prev_range, &dims)?),
-        state.client.rows::<SparkRow>(queries.service_sparklines(&range, &dims, &bucket)?),
-        state.client.rows::<SparkRow>(queries.service_sparklines(
-            &prev_range,
-            &dims,
-            &prev_bucket
-        )?),
+    // 当前窗、对比窗各一条，每条同时带回整窗汇总和分桶（GROUPING SETS，见 service_stats）
+    let (current, previous) = tokio::try_join!(
+        state.client.rows::<ServiceRow>(queries.service_stats(&range, &dims, &bucket)?),
+        state
+            .client
+            .rows::<ServiceRow>(queries.service_stats(&prev_range, &dims, &prev_bucket)?),
     )?;
     let mut stats = current.stats;
     stats.absorb(&previous.stats);
-    stats.absorb(&sparks.stats);
-    stats.absorb(&prev_sparks.stats);
+    let (current, sparks) = split_totals(current.rows);
+    let (previous, prev_sparks) = split_totals(previous.rows);
 
     let secs = (range.span_ms() as f64 / 1000.0).max(1.0);
     let prev_secs = (prev_range.span_ms() as f64 / 1000.0).max(1.0);
     let prev_by_name: std::collections::HashMap<String, PrevStat> = previous
-        .rows
         .into_iter()
         .map(|r| {
             let stat = PrevStat {
@@ -187,7 +194,7 @@ async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<Overv
     };
     let mut spark_by_name: std::collections::HashMap<String, Spark> =
         std::collections::HashMap::new();
-    for row in sparks.rows {
+    for row in sparks {
         let idx = row.bucket - first;
         if idx < 0 || idx as usize >= count {
             continue;
@@ -197,7 +204,7 @@ async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<Overv
         s.errors[idx as usize] = row.errors;
     }
     let prev_first = prev_bucket.first_index(&prev_range);
-    for row in prev_sparks.rows {
+    for row in prev_sparks {
         let idx = row.bucket - prev_first;
         if idx < 0 || idx as usize >= count {
             continue;
@@ -207,7 +214,6 @@ async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<Overv
     }
 
     let services = current
-        .rows
         .into_iter()
         .map(|r| ServiceStat {
             prev: prev_by_name.get(&r.service_name).map(|p| PrevStat { ..*p }),
@@ -237,6 +243,8 @@ async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<Overv
 
 #[derive(Serialize)]
 pub struct OperationStat {
+    /// 一次问多个服务时按它分组；单服务那条路上就是路径里的那个名字
+    pub service: String,
     pub span_name: String,
     pub kind: String,
     pub requests: u64,
@@ -280,31 +288,40 @@ pub struct OperationsResponse {
     pub stats: Stats,
 }
 
-/// 接口表。服务级的「比昨天慢了 3 倍」只说明有事，**是哪个接口**才是能动手的信息，所以这里
-/// 当前窗和对比窗各查一次，按 `(span_name, span_kind)` 对齐成一行，前端按变化排序。
+/// `kind` 参数 → 要看哪几种 span。
+fn parse_kinds(p: &Params) -> Result<(&'static str, &'static [&'static str])> {
+    match p.get("kind").unwrap_or("entry") {
+        "entry" => Ok(("entry", ENTRY_KINDS)),
+        "client" => Ok(("client", CLIENT_KINDS)),
+        other => Err(Error::bad_request(format!("kind 只能是 entry 或 client，不是 {other:?}"))),
+    }
+}
+
+/// 接口表查完对齐好的结果，两个 handler（单服务、一次多个服务）共用。
+struct Operations {
+    rows: Vec<OperationStat>,
+    stats: Stats,
+    compare: String,
+    prev_range: Option<TimeRange>,
+}
+
+/// 当前窗和对比窗各查一次，按 `(service, span_name, span_kind)` 对齐成一行，前端按变化排序。
 ///
-/// 两条查询都锁定了 `service_name`，走排序键前缀，加一条的代价和第一条差不多（而且是并发发的）。
-async fn operations(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-    p: Params,
-) -> Result<Json<OperationsResponse>> {
-    let schema = state.schema.get().await?;
-    let range = range(&state, &p)?;
-    let kind = p.get("kind").unwrap_or("entry");
-    let kinds: &[&str] = match kind {
-        "entry" => ENTRY_KINDS,
-        "client" => CLIENT_KINDS,
-        other => {
-            return Err(Error::bad_request(format!("kind 只能是 entry 或 client，不是 {other:?}")));
-        }
-    };
-    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
-    let (compare, prev_range) = compare_window_opt(p.get("compare").unwrap_or("day"), &range)?;
-    let current_query = queries.operations(&range, &name, kinds)?;
+/// 两条查询都锁定了 `service_name`（排序键第一列），走排序键前缀，加一条的代价和第一条
+/// 差不多，而且是并发发的。
+async fn collect_operations(
+    state: &AppState,
+    queries: &TraceQueries<'_>,
+    p: &Params,
+    range: &TimeRange,
+    services: &[&str],
+    kinds: &[&str],
+) -> Result<Operations> {
+    let (compare, prev_range) = compare_window_opt(p.get("compare").unwrap_or("day"), range)?;
+    let current_query = queries.operations(range, services, kinds)?;
     let (current, previous) = match &prev_range {
         Some(prev) => {
-            let prev_query = queries.operations(prev, &name, kinds)?;
+            let prev_query = queries.operations(prev, services, kinds)?;
             let (current, previous) = tokio::try_join!(
                 state.client.rows::<OperationRow>(current_query),
                 state.client.rows::<OperationRow>(prev_query),
@@ -316,7 +333,8 @@ async fn operations(
     let mut stats = current.stats;
     let secs = (range.span_ms() as f64 / 1000.0).max(1.0);
     let prev_secs = prev_range.as_ref().map_or(1.0, |r| (r.span_ms() as f64 / 1000.0).max(1.0));
-    let mut prev_by_op: std::collections::HashMap<(String, String), PrevOp> = match previous {
+    type OpKey = (String, String, String);
+    let mut prev_by_op: std::collections::HashMap<OpKey, PrevOp> = match previous {
         Some(previous) => {
             stats.absorb(&previous.stats);
             previous
@@ -336,17 +354,22 @@ async fn operations(
                         p95_ms: pct(&r.q, 1),
                         p99_ms: pct(&r.q, 2),
                     };
-                    ((r.span_name, r.span_kind), stat)
+                    ((r.service_name, r.span_name, r.span_kind), stat)
                 })
                 .collect()
         }
         None => std::collections::HashMap::new(),
     };
-    let mut operations: Vec<OperationStat> = current
+    let mut rows: Vec<OperationStat> = current
         .rows
         .into_iter()
         .map(|r| OperationStat {
-            prev: prev_by_op.remove(&(r.span_name.clone(), r.span_kind.clone())),
+            prev: prev_by_op.remove(&(
+                r.service_name.clone(),
+                r.span_name.clone(),
+                r.span_kind.clone(),
+            )),
+            service: r.service_name,
             span_name: r.span_name,
             kind: r.span_kind,
             requests: r.requests,
@@ -361,9 +384,10 @@ async fn operations(
         .collect();
     // 对比窗口有、现在一次都没有的接口：整个接口不见了也是一种「哪些请求变了」，而且是最该被
     // 看见的一种。补成 0 次的一行接在后面（按对比窗口的量排，输出才稳定）
-    let mut gone: Vec<((String, String), PrevOp)> = prev_by_op.into_iter().collect();
+    let mut gone: Vec<(OpKey, PrevOp)> = prev_by_op.into_iter().collect();
     gone.sort_by(|a, b| b.1.requests.cmp(&a.1.requests).then_with(|| a.0.cmp(&b.0)));
-    operations.extend(gone.into_iter().map(|((span_name, kind), prev)| OperationStat {
+    rows.extend(gone.into_iter().map(|((service, span_name, kind), prev)| OperationStat {
+        service,
         span_name,
         kind,
         requests: 0,
@@ -376,16 +400,68 @@ async fn operations(
         max_ms: 0.0,
         prev: Some(prev),
     }));
+    Ok(Operations { rows, stats, compare, prev_range })
+}
+
+/// 一个服务的接口表。服务级的「比昨天慢了 3 倍」只说明有事，**是哪个接口**才是能动手的信息。
+async fn operations(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    p: Params,
+) -> Result<Json<OperationsResponse>> {
+    let schema = state.schema.get().await?;
+    let range = range(&state, &p)?;
+    let (kind, kinds) = parse_kinds(&p)?;
+    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
+    let out = collect_operations(&state, &queries, &p, &range, &[name.as_str()], kinds).await?;
     Ok(Json(OperationsResponse {
         service: name,
         kind: kind.to_owned(),
         from_ms: range.from_ms,
         to_ms: range.to_ms,
-        compare,
-        prev_from_ms: prev_range.as_ref().map(|r| r.from_ms),
-        prev_to_ms: prev_range.as_ref().map(|r| r.to_ms),
-        operations,
-        stats,
+        compare: out.compare,
+        prev_from_ms: out.prev_range.as_ref().map(|r| r.from_ms),
+        prev_to_ms: out.prev_range.as_ref().map(|r| r.to_ms),
+        operations: out.rows,
+        stats: out.stats,
+    }))
+}
+
+/// 好几个服务的接口表，一条查询出来，每行带 `service`。
+///
+/// 总览页每张异常卡上那句「主要是哪个接口」用的就是它。以前是一张卡各查一次：现在只有三个
+/// 服务不健康所以看不出来，但一到故障、十几个服务同时报警就是十几条查询——而那正是最需要
+/// 这一页的时候。同一页上的「头号报错」和「进程重启」早就是一条查全站再按服务分了，这是
+/// 漏掉的那个。
+async fn operations_many(
+    State(state): State<AppState>,
+    p: Params,
+) -> Result<Json<OperationsResponse>> {
+    let schema = state.schema.get().await?;
+    let range = range(&state, &p)?;
+    let (kind, kinds) = parse_kinds(&p)?;
+    let services = p.get_list("service");
+    if services.is_empty() {
+        return Err(Error::bad_request("至少给一个 service"));
+    }
+    if services.len() > MAX_SERVICES_PER_QUERY {
+        return Err(Error::bad_request(format!(
+            "一次最多问 {MAX_SERVICES_PER_QUERY} 个服务"
+        )));
+    }
+    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
+    let names: Vec<&str> = services.iter().map(String::as_str).collect();
+    let out = collect_operations(&state, &queries, &p, &range, &names, kinds).await?;
+    Ok(Json(OperationsResponse {
+        service: services.join(","),
+        kind: kind.to_owned(),
+        from_ms: range.from_ms,
+        to_ms: range.to_ms,
+        compare: out.compare,
+        prev_from_ms: out.prev_range.as_ref().map(|r| r.from_ms),
+        prev_to_ms: out.prev_range.as_ref().map(|r| r.to_ms),
+        operations: out.rows,
+        stats: out.stats,
     }))
 }
 

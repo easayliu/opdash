@@ -229,6 +229,49 @@ pub fn candidate_range(rows: &[CandidateRow]) -> Option<TimeRange> {
     Some(TimeRange { from_ms: from_ms.max(0), to_ms: to_ms.max(0) + 1 })
 }
 
+/// 链路详情定位（[`TraceQueries::detail_locate`]）的探测窗口：`(往前, 往后)` 毫秒，从窄到宽，
+/// 最后一档 `None` 是不带时间条件、扫全部分区。查中一档就收工，见 [`detail_probe_hit`]。
+///
+/// 为什么不一上来就用最宽的那档：`trace_id` 只有 bloom filter，读量跟窗口里的**真实数据量**
+/// 成正比，跟窗口名义上有多宽无关（所以「反正 +24 小时还没发生、不花钱」只在看今天的 trace
+/// 时成立，看昨天的立刻现原形）。线上同一条 167 span 的 trace 实测（span 表一天 5.6 亿行）：
+///
+/// | 窗口 | 读量 | 冷查询 |
+/// |---|---|---|
+/// | ±1 分钟 | 21.2 万行 / 8.4 MB | 0.28 s |
+/// | ±15 分钟 | 47.3 万行 / 19.8 MB | 0.42 s |
+/// | -1 小时 ~ +24 小时（改之前一上来就是这档） | 578.8 万行 / 194.5 MB | 4.36 s |
+/// | 不限时间 | 2361.3 万行 / 789.4 MB | 7.25 s |
+///
+/// 而 trace 的跨度几乎都极短：线上 1 小时窗里 726.9 万条 trace，p50 = 0 ms、p99 = 88 ms、
+/// p99.9 = 34.5 s；超过 1 分钟的占 0.134%，超过 15 分钟的占 0.0057%。第一档就命中 99.87%，
+/// 剩下那些多跑一两趟（每趟约 250 ms）换的是少读两个数量级。
+///
+/// 最后那档不限时间的兜底不能省：`at` 可能压根没有（顶栏粘一个 trace id 直达），也可能是**猜**
+/// 的（页面拿当前时间范围当中心点）。猜错了前几档全空，靠它兜回来——代价是多读约 27%，
+/// 猜中省的是两个数量级。
+pub const DETAIL_PROBE_WINDOWS: &[Option<(i64, i64)>] = &[
+    Some((60_000, 60_000)),
+    Some((15 * 60_000, 15 * 60_000)),
+    Some((3_600_000, 24 * 3_600_000)),
+    None,
+];
+
+/// 这一档窗口够不够：定位到了 span，而且它们没贴着窗口边。
+///
+/// 贴边说明窗口外面可能还有（异步消费、定时补偿的 span 会掉在很后面），得换宽一档重查。
+/// 边距取整个窗口宽度的 1/10：±1 分钟的窗留 12 秒，`-1h ~ +24h` 的窗留 2.5 小时。
+/// 一个都没定位到自然也不算命中。
+pub fn detail_probe_hit(rows: &[LocatedSpan], window: &TimeRange) -> bool {
+    let (Some(min), Some(max)) =
+        (rows.iter().map(|s| s.ts_ms).min(), rows.iter().map(|s| s.ts_ms).max())
+    else {
+        return false;
+    };
+    let margin = ((window.to_ms - window.from_ms) / 10).max(1);
+    min - window.from_ms >= margin && window.to_ms - max >= margin
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TraceFilter {
     pub range: Option<TimeRange>,
@@ -644,8 +687,8 @@ impl TraceQueries<'_> {
     /// 先只读轻列定位，误报块每行几十字节，亚秒级；再由 [`Self::detail_fetch`] 按排序键前缀
     /// `(service_name, span_name)` 加实际时间跨度走主键取重列，误报块在主键这一层就被挡掉。
     ///
-    /// `window` 给了就加时间谓词裁剪分区：不限时间要把 30 天的索引块都过一遍；从列表页进来时
-    /// 知道 trace 的开始时间，圈到前后一两天就只剩一两个分区。
+    /// `window` 给了就加时间谓词。窗口宽窄是这一步的**全部**成本（不限时间 789 MB，±1 分钟
+    /// 8.4 MB），所以调用方不是随手圈一个大窗，而是按 [`DETAIL_PROBE_WINDOWS`] 从窄往宽探。
     pub fn detail_locate(
         &self,
         trace_id: &str,
@@ -861,37 +904,20 @@ impl TraceQueries<'_> {
         Ok(Self::finish(b, sql))
     }
 
-    /// 服务概览：每个服务的入口请求量、错误数、延迟分位。
+    /// 服务概览 + 卡片上的迷你趋势，**一条查询出两份**。
+    ///
+    /// 两者的 `WHERE` 一模一样，只差一个 `GROUP BY`，以前是并发发两条、把同一段数据扫两遍。
+    /// `GROUPING SETS` 让 ClickHouse 扫一遍同时聚出「整窗每服务一行」和「每服务每桶一行」：
+    /// 线上 1 小时窗实测 **两条分开 2025 万行 / 289.0 MB，合并后 1011 万行 / 183.2 MB**。
+    /// 总览页当前窗和对比窗各要一份，所以这一改是四条变两条。
+    ///
+    /// `grouping(bucket)` 分辨这一行是哪一种：**1 是整窗汇总**（`bucket` 没参与分组，值是默认的
+    /// 0，不能拿来用），0 是某一个桶。
+    ///
     /// `quantilesTDigest` 内存有界、跨分片能合并；默认的 `quantiles` 是 8192 个样本的水塘抽样，
-    /// 尾部分位恰恰最不准。单位直接换成毫秒，JSON 里是普通浮点数。
-    pub fn service_overview(
-        &self,
-        range: &TimeRange,
-        dims: &[(String, Vec<String>)],
-    ) -> Result<Query> {
-        let mut b = Bindings::new();
-        let time = b.time_predicate("timestamp", range);
-        let kinds = b.bind("Array(String)", ENTRY_KINDS);
-        let mut where_sql = format!("{time}\n  AND span_kind IN {kinds}");
-        for (column, values) in dims {
-            where_sql.push_str(&format!(
-                "\n  AND {} IN {}",
-                quote_ident(column)?,
-                b.bind("Array(String)", values)
-            ));
-        }
-        let sql = format!(
-            "SELECT service_name, count() AS requests, countIf(status_code = 'Error') AS errors,\n  \
-             quantilesTDigest(0.5, 0.95, 0.99)(toFloat64(duration_ns) / 1e6) AS q, max(duration_ns) / 1e6 AS max_ms\n\
-             FROM {from}\nWHERE {where_sql}\nGROUP BY service_name\nORDER BY requests DESC, service_name",
-            from = self.table_ref(),
-        );
-        Ok(Self::finish(b, sql))
-    }
-
-    /// 服务总览卡片上的迷你趋势：所有服务一起，按桶数请求量和错误数。一条查询出全部服务，
-    /// 比每张卡各查一次省得多；桶数少（几十个），行数 = 服务数 × 桶数，很小。
-    pub fn service_sparklines(
+    /// 尾部分位恰恰最不准。单位直接换成毫秒，JSON 里是普通浮点数。分桶那一组用不上分位数，
+    /// 但 `GROUPING SETS` 的每一组都会把聚合函数算一遍——多出来的这点 CPU 比多扫一遍表便宜。
+    pub fn service_stats(
         &self,
         range: &TimeRange,
         dims: &[(String, Vec<String>)],
@@ -910,26 +936,44 @@ impl TraceQueries<'_> {
         }
         let origin = b.bind("Int64", bucket.origin_ms);
         let width = b.bind("Int64", bucket.width_ms);
+        // 桶表达式在 GROUP BY 里要原样再写一遍：GROUPING SETS 里引用不了 SELECT 的别名
+        let bucket_expr =
+            format!("intDiv(toUnixTimestamp64Milli(timestamp) - {origin}, {width})");
         let sql = format!(
-            "SELECT service_name, intDiv(toUnixTimestamp64Milli(timestamp) - {origin}, {width}) AS bucket,\n  \
-             count() AS requests, countIf(status_code = 'Error') AS errors\n\
-             FROM {from}\nWHERE {where_sql}\nGROUP BY service_name, bucket\nORDER BY service_name, bucket",
+            "SELECT service_name, grouping({bucket_expr}) AS is_total, {bucket_expr} AS bucket,\n  \
+             count() AS requests, countIf(status_code = 'Error') AS errors,\n  \
+             quantilesTDigest(0.5, 0.95, 0.99)(toFloat64(duration_ns) / 1e6) AS q, max(duration_ns) / 1e6 AS max_ms\n\
+             FROM {from}\nWHERE {where_sql}\n\
+             GROUP BY GROUPING SETS ((service_name), (service_name, {bucket_expr}))\n\
+             ORDER BY is_total DESC, requests DESC, service_name, bucket",
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
     }
 
-    /// 某个服务按 span_name（接口 / 下游调用）的指标。`kinds` 决定看入口还是对外调用。
-    pub fn operations(&self, range: &TimeRange, service: &str, kinds: &[&str]) -> Result<Query> {
+    /// 按 span_name（接口 / 下游调用）的指标。`kinds` 决定看入口还是对外调用。
+    ///
+    /// 一次可以问好几个服务：总览页上每张异常卡都要写一句「主要是哪个接口」，一张卡各查一次
+    /// 的话，一到故障、十几个服务同时报警就是十几条查询——而那正是最需要这一页的时候。
+    /// `service_name` 是排序键第一列，`IN` 几个服务照样走排序键前缀，一条顶十条。
+    pub fn operations(
+        &self,
+        range: &TimeRange,
+        services: &[&str],
+        kinds: &[&str],
+    ) -> Result<Query> {
+        if services.is_empty() {
+            return Err(Error::internal("operations 需要至少一个服务"));
+        }
         let mut b = Bindings::new();
         let time = b.time_predicate("timestamp", range);
-        let service = b.bind("String", service);
+        let services = b.bind("Array(String)", services);
         let kinds = b.bind("Array(String)", kinds);
         let sql = format!(
-            "SELECT span_name, span_kind, count() AS requests, countIf(status_code = 'Error') AS errors,\n  \
+            "SELECT service_name, span_name, span_kind, count() AS requests, countIf(status_code = 'Error') AS errors,\n  \
              quantilesTDigest(0.5, 0.95, 0.99)(toFloat64(duration_ns) / 1e6) AS q, max(duration_ns) / 1e6 AS max_ms\n\
-             FROM {from}\nWHERE {time}\n  AND service_name = {service}\n  AND span_kind IN {kinds}\n\
-             GROUP BY span_name, span_kind\nORDER BY requests DESC, span_name",
+             FROM {from}\nWHERE {time}\n  AND service_name IN {services}\n  AND span_kind IN {kinds}\n\
+             GROUP BY service_name, span_name, span_kind\nORDER BY requests DESC, service_name, span_name",
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
@@ -1087,19 +1131,14 @@ fn attr_column(raw: &str) -> Result<&'static str> {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SparkRow {
-    pub service_name: String,
-    #[serde(deserialize_with = "num::de")]
-    pub bucket: i64,
-    #[serde(deserialize_with = "num::de")]
-    pub requests: u64,
-    #[serde(deserialize_with = "num::de")]
-    pub errors: u64,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct ServiceRow {
     pub service_name: String,
+    /// 1 = 整个窗口的汇总，0 = [`ServiceRow::bucket`] 那一格。见 [`TraceQueries::service_stats`]
+    #[serde(deserialize_with = "num::de")]
+    pub is_total: u8,
+    /// `is_total = 1` 的行上没有意义（没参与分组，是默认值）
+    #[serde(deserialize_with = "num::de")]
+    pub bucket: i64,
     #[serde(deserialize_with = "num::de")]
     pub requests: u64,
     #[serde(deserialize_with = "num::de")]
@@ -1112,6 +1151,7 @@ pub struct ServiceRow {
 
 #[derive(Debug, Deserialize)]
 pub struct OperationRow {
+    pub service_name: String,
     pub span_name: String,
     pub span_kind: String,
     #[serde(deserialize_with = "num::de")]
@@ -1458,6 +1498,36 @@ mod tests {
     }
 
     #[test]
+    fn probe_window_is_a_hit_only_when_spans_sit_clear_of_both_edges() {
+        let span = |ts_ms| LocatedSpan {
+            span_id: "a".into(),
+            service_name: "s".into(),
+            span_name: "n".into(),
+            ts_ms,
+        };
+        // ±1 分钟的窗（宽 120 秒）边距是 12 秒
+        let w = TimeRange { from_ms: 1_000_000, to_ms: 1_120_000 };
+        assert!(detail_probe_hit(&[span(1_040_000), span(1_060_000)], &w));
+        // 最晚的贴着右边——异步 span 可能还在窗外，得换宽一档
+        assert!(!detail_probe_hit(&[span(1_040_000), span(1_119_000)], &w));
+        // 最早的贴着左边，同理（at 未必是 trace 的开头，从日志点进来就可能落在中段）
+        assert!(!detail_probe_hit(&[span(1_001_000)], &w));
+        // 一个都没定位到，也不算命中
+        assert!(!detail_probe_hit(&[], &w));
+    }
+
+    #[test]
+    fn probe_windows_widen_and_end_with_an_unbounded_one() {
+        let widths: Vec<i64> = DETAIL_PROBE_WINDOWS
+            .iter()
+            .filter_map(|w| w.map(|(before, after)| before + after))
+            .collect();
+        assert!(widths.windows(2).all(|p| p[0] < p[1]), "{widths:?} 必须一档比一档宽");
+        // 最后一档不限时间：`at` 可能没有、也可能是猜的，全靠它兜底
+        assert_eq!(DETAIL_PROBE_WINDOWS.last(), Some(&None));
+    }
+
+    #[test]
     fn candidates_can_skip_limit_by_so_clickhouse_reads_lazily() {
         let table = table();
         let q = TraceQueries { database: "logs", table: &table };
@@ -1683,7 +1753,7 @@ mod tests {
     fn service_queries_use_tdigest_and_entry_kinds() {
         let table = table();
         let q = TraceQueries { database: "logs", table: &table };
-        let o = q.service_overview(&range(), &[]).unwrap();
+        let o = q.service_stats(&range(), &[], &Bucket { width_ms: 60_000, origin_ms: 0 }).unwrap();
         assert!(
             o.sql()
                 .contains("quantilesTDigest(0.5, 0.95, 0.99)(toFloat64(duration_ns) / 1e6) AS q"),
@@ -1692,8 +1762,21 @@ mod tests {
         );
         assert!(o.sql().contains("span_kind IN {p2:Array(String)}"));
         assert_eq!(o.params()[2].1, "['Server','Consumer']");
-        let ops = q.operations(&range(), "svc", CLIENT_KINDS).unwrap();
+        // 汇总和分桶一条查询出两份：桶表达式在 SELECT、grouping() 和 GROUP BY 里都要原样出现
+        let bucket_expr = "intDiv(toUnixTimestamp64Milli(timestamp) - {p3:Int64}, {p4:Int64})";
+        assert_eq!(o.sql().matches(bucket_expr).count(), 3, "{}", o.sql());
+        assert!(
+            o.sql().contains(&format!(
+                "GROUP BY GROUPING SETS ((service_name), (service_name, {bucket_expr}))"
+            )),
+            "{}",
+            o.sql()
+        );
+        let ops = q.operations(&range(), &["svc", "svc2"], CLIENT_KINDS).unwrap();
+        assert_eq!(ops.params()[2].1, "['svc','svc2']");
         assert_eq!(ops.params()[3].1, "['Client','Producer']");
+        assert!(ops.sql().contains("GROUP BY service_name, span_name, span_kind"), "{}", ops.sql());
+        assert!(q.operations(&range(), &[], CLIENT_KINDS).is_err());
         let ts = q
             .timeseries(
                 &range(),
