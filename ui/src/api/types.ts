@@ -203,6 +203,13 @@ export interface TraceDetailResponse {
   truncated: boolean
   /** 只查了开始时间附近的时间窗口（带 at 参数） */
   windowed: boolean
+  /** 实际查的那一段时间（unix 毫秒）；不限时间时是 null */
+  window_from_ms: number | null
+  window_to_ms: number | null
+  /** span 太多，宽窗口那一档装不下，退回了围着 at 的窄窗口——图上只有这一段 */
+  narrowed: boolean
+  /** 请求里 `span=` 指名的那个 span 被截断切掉了，服务端单独取回来钉在 `spans` 末尾 */
+  pinned_span: string | null
   /** span 的属性 / events / links 没跟着回来，点开某个 span 时单独取（那四个 JSON 列是详情查询的全部成本） */
   attributes_lazy: boolean
   stats: Stats

@@ -709,6 +709,34 @@ impl TraceQueries<'_> {
         Ok(Self::finish(b, sql))
     }
 
+    /// 同一趟定位，但只找指名的那一个 span。
+    ///
+    /// 用在 URL 上带 `span=` 进来、而它不在 [`Self::detail_locate`] 那批里的时候：截断是按
+    /// 时间从早往晚切的，一条几万 span 的 trace 里，出错的那个（分享的链接、错误分组给的样本
+    /// 都正指着它）多半落在被切掉的后半段。捞回来才谈得上「打开链接就选中它」。
+    ///
+    /// 成本和 [`Self::detail_locate`] 同一量级：一样是 `trace_id` 走 bloom filter、只读轻列，
+    /// 多一个 `span_id` 等值条件只是少返回几千行——`span_id` 不在排序键上，挡不掉 granule。
+    pub fn detail_locate_span(
+        &self,
+        trace_id: &str,
+        span_id: &str,
+        window: Option<&TimeRange>,
+    ) -> Result<Query> {
+        let mut b = Bindings::new();
+        let id = b.bind("String", trace_id);
+        let span = b.bind("String", span_id);
+        let time_sql = match window {
+            Some(w) => format!("\n  AND {}", b.time_predicate("timestamp", w)),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT span_id, service_name, span_name, toUnixTimestamp64Milli(timestamp) AS ts_ms\nFROM {from}\nWHERE trace_id = {id}\n  AND span_id = {span}{time_sql}\nORDER BY timestamp\nLIMIT 1",
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
     /// 链路详情第二步：按第一步定位到的 span 取全部列。
     ///
     /// `(service_name, span_name)` 是排序键前缀，加上 `toDateTime(timestamp)` 落在第一步看到的
@@ -1603,6 +1631,28 @@ mod tests {
             w.sql()
         );
         assert_eq!(w.params()[2].1, "1000000");
+    }
+
+    #[test]
+    fn detail_locate_span_asks_for_one_row() {
+        let table = table();
+        let q = TraceQueries { database: "logs", table: &table };
+        let d = q.detail_locate_span("abc", "0881", Some(&range())).unwrap();
+        assert!(
+            d.sql().contains(
+                "WHERE trace_id = {p0:String}\n  AND span_id = {p1:String}\n  AND timestamp >= "
+            ),
+            "{}",
+            d.sql()
+        );
+        assert!(d.sql().ends_with("ORDER BY timestamp\nLIMIT 1"), "{}", d.sql());
+        assert_eq!(d.params()[1].1, "0881");
+        // 和定位整条 trace 一样只读轻列
+        for heavy in ["span_attributes", "resource_attributes", "events.", "links."] {
+            assert!(!d.sql().contains(heavy), "{heavy} 不该出现在定位查询里: {}", d.sql());
+        }
+        let n = q.detail_locate_span("abc", "0881", None).unwrap();
+        assert!(!n.sql().contains("timestamp >="), "不带窗口就没有时间谓词: {}", n.sql());
     }
 
     #[test]

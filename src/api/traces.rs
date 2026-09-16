@@ -472,10 +472,12 @@ struct Located {
     rows: Vec<LocatedSpan>,
     /// 几档探测加起来的读量
     stats: Stats,
-    /// 取回了 `max + 1` 行：这条 trace 的 span 比上限还多
+    /// 这条 trace 的 span 没显示全：要么取满了 `max`，要么退回了更窄的一档窗口
     truncated: bool,
-    /// 命中的那一档带了时间条件（没带就是扫了全部分区）
-    windowed: bool,
+    /// 用的那一档窗口；`None` = 不限时间，扫了全部分区
+    window: Option<TimeRange>,
+    /// 宽的那一档装不下，退回了窄的一档（见 [`locate_spans`]）
+    narrowed: bool,
 }
 
 /// 按 [`DETAIL_PROBE_WINDOWS`] 从窄到宽探，命中一档就收工。
@@ -483,6 +485,19 @@ struct Located {
 /// `at` 是这条 trace 大概在什么时候——从列表页点进来是它的开始时间，从日志点进来是那条日志的
 /// 时间，顶栏直达时是页面当前时间范围的猜测，也可能干脆没有。不管哪种，最后一档不限时间的
 /// 兜底都保证查得全，猜错只是多跑两趟空查询。
+///
+/// **装不下就退回窄窗口**（2026-09-16 加）。span 数超过 `--max-trace-spans` 时，宽窗口那一档
+/// 取回来的是「按时间从早往晚的前 5000 个」——对被复用的 trace id（常驻消费者一直用同一个，
+/// 线上那条 `1719ae…8dbc` 挂着 2 小时 13 分、21882 个 span）来说，那是一小时前的另一段，和用户
+/// 带着 `at` 点进来想看的那一刻毫无关系，指名的 span 也在被切掉的后半段里。所以改成退回
+/// **第一档够用的窗口**（够用 = 至少 `max/10` 个 span，免得 `at` 偏了几分钟时退回一张空图）：
+/// 它围着 `at`、在自己这个窗口里是完整的，而且便宜得多。线上同一条 trace 实测：
+///
+/// | 退回哪一档 | span 数 | 取数 | 关联日志的窗口 |
+/// |---|---|---|---|
+/// | 不退（最早的 5000 个） | 5000 | 16.4 MB | 18 分钟，且指名的 span 不在图里 |
+/// | ±15 分钟 | 4738 | 34.3 MB | 39 分钟 / 1.6 GB |
+/// | **±1 分钟（现在）** | **701** | **3.8 MB** | **11 分钟 / 0.4 GB** |
 async fn locate_spans(
     state: &AppState,
     queries: &TraceQueries<'_>,
@@ -491,8 +506,11 @@ async fn locate_spans(
     at: Option<i64>,
 ) -> Result<Located> {
     let mut stats = Stats::default();
-    let mut rows = Vec::new();
-    let mut windowed = false;
+    // 装不下时的退路：第一档「够用」的窗口（至少 max/10 个 span）
+    let mut narrow: Option<(Vec<LocatedSpan>, Option<TimeRange>)> = None;
+    // 探过的最后一档：没探中也没装不下时就用它（原来的行为）
+    let mut last: Option<(Vec<LocatedSpan>, Option<TimeRange>)> = None;
+    let mut done: Option<(Vec<LocatedSpan>, Option<TimeRange>, bool, bool)> = None;
     for probe in DETAIL_PROBE_WINDOWS {
         let window = match (at, probe) {
             (Some(at), Some((before, after))) => {
@@ -500,6 +518,9 @@ async fn locate_spans(
             }
             // 没有 at 就没有中心点，前面几档无从谈起，直接用最后那档
             (None, Some(_)) => continue,
+            // 最后这档是全表扫（线上 5.1 GB / 39 s）。上一档已经装了半个上限还多，这条 trace
+            // 无论如何都放不下，扫回来也只会被截断、再退回窄窗口——那一趟纯亏
+            (_, None) if last.as_ref().is_some_and(|(r, _)| r.len() * 2 > max as usize) => break,
             (_, None) => None,
         };
         let r = state
@@ -507,17 +528,65 @@ async fn locate_spans(
             .rows::<LocatedSpan>(queries.detail_locate(trace_id, max, window.as_ref())?)
             .await?;
         stats.absorb(&r.stats);
-        // 已经取满上限了，扩窗只是多读一遍、拿回同样被截断的那批
-        let full = r.rows.len() > max as usize;
-        let hit = full || window.as_ref().is_some_and(|w| detail_probe_hit(&r.rows, w));
-        rows = r.rows;
-        windowed = window.is_some();
-        if hit {
+        if r.rows.len() > max as usize {
+            // 这一档装不下：退回围着 at 的窄窗口；没有退路（第一档就满了）才按时间切前 max 个
+            done = Some(match narrow.take() {
+                Some((rows, window)) => (rows, window, true, true),
+                None => (r.rows, window, true, false),
+            });
             break;
         }
+        if window.as_ref().is_some_and(|w| detail_probe_hit(&r.rows, w)) {
+            done = Some((r.rows, window, false, false));
+            break;
+        }
+        // 没探中：贴着窗口边，trace 多半还往外延伸，继续往宽里探
+        if narrow.is_none() && r.rows.len() * 10 >= max as usize && !r.rows.is_empty() {
+            narrow = Some((r.rows.clone(), window));
+        }
+        if !r.rows.is_empty() {
+            last = Some((r.rows, window));
+        }
     }
-    let truncated = rows.len() > max as usize;
-    Ok(Located { rows, stats, truncated, windowed })
+    let (rows, window, truncated, narrowed) = done
+        .or_else(|| last.map(|(rows, window)| (rows, window, false, false)))
+        .unwrap_or_default();
+    Ok(Located { rows, stats, truncated, window, narrowed })
+}
+
+/// 单独定位 URL 上 `span=` 指名的那一个 span，窗口同样按 [`DETAIL_PROBE_WINDOWS`] 从窄往宽探。
+///
+/// `deep`：要不要走最后那档不限时间的兜底。主查询被截断（这条 trace 的 span 可能散在探到的
+/// 窗口之外），或者它本来就没带时间条件时才走；否则窗口里已经是这条 trace 的全部 span，
+/// 再为一个找不到的 id 扫全部分区（线上 789 MB / 7 s）多半只是 id 抄错了。
+async fn locate_one(
+    state: &AppState,
+    queries: &TraceQueries<'_>,
+    trace_id: &str,
+    span_id: &str,
+    at: Option<i64>,
+    deep: bool,
+) -> Result<(Option<LocatedSpan>, Stats)> {
+    let mut stats = Stats::default();
+    for probe in DETAIL_PROBE_WINDOWS {
+        let window = match (at, probe) {
+            (Some(at), Some((before, after))) => {
+                Some(TimeRange { from_ms: (at - before).max(0), to_ms: at + after })
+            }
+            (None, Some(_)) => continue,
+            (_, None) if !deep => continue,
+            (_, None) => None,
+        };
+        let r = state
+            .client
+            .rows::<LocatedSpan>(queries.detail_locate_span(trace_id, span_id, window.as_ref())?)
+            .await?;
+        stats.absorb(&r.stats);
+        if let Some(found) = r.rows.into_iter().next() {
+            return Ok((Some(found), stats));
+        }
+    }
+    Ok((None, stats))
 }
 
 #[derive(Serialize)]
@@ -537,8 +606,16 @@ pub struct DetailResponse {
     pub spans: Vec<Span>,
     /// span 数超过了 `--max-trace-spans`，只返回了前面这些
     pub truncated: bool,
-    /// 按 `at` 附近的时间窗口查的（前 1 小时、后 24 小时）；不带 `at` 是全表按 bloom filter 找
+    /// 按 `at` 附近的时间窗口查的；false = 不限时间，扫了全部分区
     pub windowed: bool,
+    /// 实际查的时间窗（unix 毫秒）。`truncated` 时前端拿它说清楚「只显示了哪一段」
+    pub window_from_ms: Option<i64>,
+    pub window_to_ms: Option<i64>,
+    /// span 太多，宽的那一档装不下，退回了围着 `at` 的窄窗口（见 [`locate_spans`]）
+    pub narrowed: bool,
+    /// `span=` 指名的那个 span 不在上面这批里（trace 被截断了），单独捞回来钉在 `spans` 末尾。
+    /// 它的父 span 多半不在图里，瀑布图上会挂成一条「父缺失」
+    pub pinned_span: Option<String>,
     /// span 的属性 / events / links 没在这里返回，点开某个 span 时按
     /// `/api/traces/{trace_id}/spans/{span_id}` 单独取（那四个 JSON 列是详情查询的全部成本）
     pub attributes_lazy: bool,
@@ -546,6 +623,7 @@ pub struct DetailResponse {
 }
 
 /// `at`（unix 毫秒，可选）：trace 的开始时间。列表页 / 日志页跳过来时都知道，带上就能裁剪分区。
+/// `span`（可选）：页面要选中的那个 span，超过上限被截断时保证它也在返回里，见 [`locate_one`]。
 ///
 /// 两次往返：先按 trace id 只读轻列定位 span（bloom filter 的误报块读起来便宜），再按排序键前缀
 /// 走主键取全部列。原因见 [`TraceQueries::detail_locate`]。
@@ -558,11 +636,30 @@ async fn detail(
     let trace_id = normalize_trace_id(&trace_id)?;
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
     let max = state.config.max_trace_spans;
-    let probe = locate_spans(&state, &queries, &trace_id, max, p.get_i64("at")?).await?;
+    let at = p.get_i64("at")?;
+    // 写错的 span id 不拦成 400：它只是「页面想选中哪个」的提示，瀑布图本身照样该画出来
+    let wanted = p.get("span").and_then(|s| normalize_span_id(s).ok());
+    let probe = locate_spans(&state, &queries, &trace_id, max, at).await?;
     let mut stats = probe.stats;
     let truncated = probe.truncated;
+    let narrowed = probe.narrowed;
+    let window = probe.window;
     let located: Vec<LocatedSpan> = probe.rows.into_iter().take(max as usize).collect();
-    let spans: Vec<Span> = if located.is_empty() {
+    // 页面指名要看的那个 span 不在这批里（截断切掉了，或退回窄窗口时落在窗口外）：
+    // 单独定位一次，下面取完瀑布图再把它钉进去
+    let pinned = match &wanted {
+        Some(id) if !located.iter().any(|s| &s.span_id == id) => {
+            let deep = truncated || window.is_none();
+            // 没有 at（顶栏直达、点了「查全部时间」）就拿定位到的最后一个 span 当中心点：
+            // 被 LIMIT 切掉的都在它后面，几档窄窗口多半就能捞着，省掉那趟全表扫
+            let center = at.or_else(|| located.iter().map(|s| s.ts_ms).max());
+            let (found, s) = locate_one(&state, &queries, &trace_id, id, center, deep).await?;
+            stats.absorb(&s);
+            found
+        }
+        _ => None,
+    };
+    let mut spans: Vec<Span> = if located.is_empty() {
         Vec::new()
     } else {
         // 瀑布图不要属性列：那四列是这一步的全部成本，点开某个 span 时再单独取
@@ -581,11 +678,25 @@ async fn detail(
         }
         full.rows.into_iter().map(Span::from).collect()
     };
+    // 钉住的那一个按排序键前缀单独取（一行，0.01 GB 量级），排在末尾，瀑布图自己按时间排
+    let mut pinned_span = None;
+    if let Some(span) = pinned {
+        let one = state.client.rows::<SpanRow>(queries.detail_span(&trace_id, &span)?).await?;
+        stats.absorb(&one.stats);
+        if let Some(row) = one.rows.into_iter().next() {
+            pinned_span = Some(span.span_id);
+            spans.push(Span::from(row));
+        }
+    }
     Ok(Json(DetailResponse {
         trace_id,
         spans,
         truncated,
-        windowed: probe.windowed,
+        windowed: window.is_some(),
+        window_from_ms: window.as_ref().map(|w| w.from_ms),
+        window_to_ms: window.as_ref().map(|w| w.to_ms),
+        narrowed,
+        pinned_span,
         attributes_lazy: true,
         stats,
     }))
@@ -616,24 +727,17 @@ async fn span_attrs(
         _ => None,
     };
     let mut stats = Stats::default();
-    let span =
-        match hint {
-            Some(span) => span,
-            None => {
-                let probe = locate_spans(
-                    &state,
-                    &queries,
-                    &trace_id,
-                    state.config.max_trace_spans,
-                    p.get_i64("at")?,
-                )
-                .await?;
-                stats = probe.stats;
-                probe.rows.into_iter().find(|s| s.span_id == span_id).ok_or_else(|| {
-                    Error::bad_request(format!("这条 trace 里没有 span {span_id}"))
-                })?
-            }
-        };
+    let span = match hint {
+        Some(span) => span,
+        // 只找这一个 span：定位整条 trace 再从里面挑，既多读几千行，超过
+        // `--max-trace-spans` 时还会把要找的那个截掉（见 locate_one）
+        None => {
+            let (found, s) =
+                locate_one(&state, &queries, &trace_id, &span_id, p.get_i64("at")?, true).await?;
+            stats = s;
+            found.ok_or_else(|| Error::bad_request(format!("这条 trace 里没有 span {span_id}")))?
+        }
+    };
     let full = state.client.rows::<SpanRow>(queries.detail_span(&trace_id, &span)?).await?;
     stats.absorb(&full.stats);
     let span = full

@@ -2,18 +2,37 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { CopyIcon } from 'lucide-react'
 import { useMeta, useSpanAttrs, useTraceDetail, useTraceLogs } from '@/api/queries'
+import type { TraceDetailResponse } from '@/api/types'
 import { LogTable, sortLogRows, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
 import { around, logsHref, metricsHref, serviceHref } from '@/lib/links'
-import { formatDuration, formatTsMicro } from '@/lib/time'
+import { formatDuration, formatTs, formatTsMicro } from '@/lib/time'
 import { useFromState, useUrlState } from '@/lib/url-state'
 import { copyText } from '@/lib/utils'
 
 /** 日志窗口在 span 跨度之外前后各放宽多少：给时钟偏差和写入延迟留余量 */
 const LOG_WINDOW_PAD_MS = 5 * 60_000
+
+/**
+ * 「已截断」徽标上的解释。两种截断说的不是一回事：
+ *
+ * * `narrowed`：span 太多，服务端退回了围着 `at` 的窄窗口——图上是**完整的一段时间**，
+ *   只是这条 trace 在这段之外还有（多半是被复用的 trace id）；
+ * * 否则：第一档窗口就装不下，按时间切了前 N 个。
+ */
+function truncatedHint(d: TraceDetailResponse, max = 5000): string {
+  const span =
+    d.window_from_ms != null && d.window_to_ms != null
+      ? `${formatTs(d.window_from_ms, { ms: false })} ~ ${formatTs(d.window_to_ms, { ms: false, date: false })}`
+      : ''
+  const pinned = d.pinned_span ? `；链接指名的 ${d.pinned_span} 不在这一段里，已单独取回来钉在图上` : ''
+  return d.narrowed
+    ? `这条 trace 的 span 超过 ${max} 个，只显示 ${span} 这一段（以进来时的时刻为中心）${pinned}`
+    : `超过 ${max} 个 span，按时间只显示最早的这些${pinned}`
+}
 
 export function TraceDetailPage() {
   const { traceId = '' } = useParams<{ traceId: string }>()
@@ -21,8 +40,18 @@ export function TraceDetailPage() {
   const { params, set } = useUrlState()
   // 从哪个列表点进来的。直接粘 URL 进来的没有来处，就不显示返回——见 useFromState
   const from = useFromState()
-  const detail = useTraceDetail(traceId, params.get('at'))
   const selected = params.get('span')
+  /**
+   * 进页面时 URL 上指名的那个 span（分享的链接、错误分组给的样本），交给服务端钉进结果里。
+   *
+   * 超过 `--max-trace-spans` 的 trace 截断是按时间从早往晚切的，指名的那个——尤其是出错的
+   * 那个——常常正好在被切掉的后半段：链接打开只剩一张瀑布图，点不中人专程来看的这一条。
+   *
+   * 记在 ref 里只认第一次：跟着当前选中走的话，点一下瀑布图就换了 query key，整条详情重查一遍。
+   */
+  const pinned = useRef<{ trace: string; span: string | null } | null>(null)
+  if (pinned.current?.trace !== traceId) pinned.current = { trace: traceId, span: selected }
+  const detail = useTraceDetail(traceId, params.get('at'), pinned.current.span)
   const logsOnlySpan = params.get('span_logs') === '1'
   const [showLogs, setShowLogs] = useState(params.get('tab') !== 'none')
 
@@ -195,8 +224,8 @@ export function TraceDetailPage() {
               <dd className="tabular-nums">
                 {spans.length}
                 {detail.data.truncated && (
-                  <Badge tone="warn" className="ml-1" title={`超过 ${meta.data?.limits.max_trace_spans ?? 5000} 个 span，只显示前面这些`}>
-                    已截断
+                  <Badge tone="warn" className="ml-1" title={truncatedHint(detail.data, meta.data?.limits.max_trace_spans)}>
+                    {detail.data.narrowed ? '只显示这一段' : '已截断'}
                   </Badge>
                 )}
               </dd>

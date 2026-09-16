@@ -183,11 +183,25 @@ export function useTraceHeatmap(params: Params, enabled = true) {
   })
 }
 
-/** `at`：trace 开始时间（unix 毫秒），给了服务端只查前后一两天的分区，快很多 */
-export function useTraceDetail(traceId: string | undefined, at?: string | null) {
+/**
+ * 一条 trace 的瀑布图。
+ *
+ * `at` 是 trace 的开始时间（unix 毫秒），给了服务端只查它前后的分区，快很多。
+ *
+ * `span` 是**打开这个页面时** URL 上指名要选中的那个（分享的链接、错误分组给的样本）：span 数
+ * 超过 `--max-trace-spans` 时截断按时间从早往晚切，指名的那个常常正好在被切掉的后半段，
+ * 服务端会单独把它取回来。**只能是进页面时的那一个**：跟着当前选中走的话，点一下瀑布图就换了
+ * query key，整条详情要重查一遍。
+ */
+export function useTraceDetail(traceId: string | undefined, at?: string | null, span?: string | null) {
   return useQuery({
-    queryKey: ['traces', 'detail', traceId, at ?? null],
-    queryFn: ({ signal }) => apiGet<TraceDetailResponse>(`/traces/${encodeURIComponent(traceId ?? '')}`, { at: at ?? undefined }, signal),
+    queryKey: ['traces', 'detail', traceId, at ?? null, span ?? null],
+    queryFn: ({ signal }) =>
+      apiGet<TraceDetailResponse>(
+        `/traces/${encodeURIComponent(traceId ?? '')}`,
+        { at: at ?? undefined, span: span ?? undefined },
+        signal,
+      ),
     enabled: !!traceId,
     // 已经跑完的 trace 不会再变，重新打一遍要走一整套定位 + 取数
     staleTime: 10 * 60_000,
