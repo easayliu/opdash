@@ -17,7 +17,6 @@ use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::logs::{
     CONTEXT_WINDOW_MS, CountRow, FacetRow, HistogramRow, LogFilter, LogQueries, LogRow, Order,
-    facetable,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{LOG_FIXED_COLUMNS, Schema};
@@ -255,16 +254,30 @@ async fn histogram(State(state): State<AppState>, p: Params) -> Result<Json<Hist
 
 #[derive(Serialize)]
 pub struct FacetsResponse {
-    pub field: String,
-    pub values: Vec<FacetRow>,
+    /// 按请求里 `field` 的顺序，一个维度一项
+    pub facets: Vec<Facet>,
     pub stats: Stats,
 }
 
+#[derive(Serialize)]
+pub struct Facet {
+    pub field: String,
+    /// 计数是近似的（Space-Saving），见 [`LogQueries::facets`]
+    pub values: Vec<FacetRow>,
+}
+
+/// 一次最多问几个维度。日志表上能筛的列就十来个，这个上限只是防手写 URL 把 SQL 撑爆。
+const MAX_FACET_FIELDS: usize = 32;
+
+/// 几个维度各自最常见的取值，一条查询出全部——日志页顶上那一排下拉框一次填满。
 async fn facets(State(state): State<AppState>, p: Params) -> Result<Json<FacetsResponse>> {
     let schema = state.schema.get().await?;
-    let field = p.get("field").ok_or_else(|| Error::bad_request("缺少参数 field"))?.to_owned();
-    if !facetable(&schema.logs, &field) {
-        return Err(Error::bad_request(format!("列 {field:?} 不支持统计取值")));
+    let fields = p.get_list("field");
+    if fields.is_empty() {
+        return Err(Error::bad_request("缺少参数 field"));
+    }
+    if fields.len() > MAX_FACET_FIELDS {
+        return Err(Error::bad_request(format!("一次最多问 {MAX_FACET_FIELDS} 个维度")));
     }
     let filter = build_filter(&state, &schema, &p)?;
     let limit = p.get_limit("limit", 50, 500)?;
@@ -273,8 +286,24 @@ async fn facets(State(state): State<AppState>, p: Params) -> Result<Json<FacetsR
         table: &schema.logs,
         max_message_chars: state.config.max_message_chars,
     };
-    let result = state.client.rows::<FacetRow>(queries.facets(&filter, &field, limit)?).await?;
-    Ok(Json(FacetsResponse { field, values: result.rows, stats: result.stats }))
+    let names: Vec<&str> = fields.iter().map(String::as_str).collect();
+    // 一行，每个维度一列：`{"pod": [["p-1", 42], …], "namespace": […]}`
+    type TopValues = std::collections::BTreeMap<String, Vec<(String, f64)>>;
+    let result = state.client.rows::<TopValues>(queries.facets(&filter, &names, limit)?).await?;
+    let mut by_field = result.rows.into_iter().next().unwrap_or_default();
+    let facets = fields
+        .iter()
+        .map(|field| Facet {
+            values: by_field
+                .remove(field)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(value, count)| FacetRow { value, count: count as u64 })
+                .collect(),
+            field: field.clone(),
+        })
+        .collect();
+    Ok(Json(FacetsResponse { facets, stats: result.stats }))
 }
 
 #[derive(Serialize)]

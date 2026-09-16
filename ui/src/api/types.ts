@@ -100,9 +100,14 @@ export interface ValueCount {
   count: number
 }
 
-export interface FacetsResponse {
+export interface Facet {
   field: string
+  /** 计数是近似的（Space-Saving）：一条查询要同时算十来个维度，精确分组得一个维度扫一遍 */
   values: ValueCount[]
+}
+
+export interface FacetsResponse {
+  facets: Facet[]
   stats: Stats
 }
 

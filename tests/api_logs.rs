@@ -86,3 +86,58 @@ async fn search_counts_when_asked() {
     assert_eq!(sql.len(), 2, "检索 + count 两条: {sql:?}");
     assert!(sql.iter().any(|s| s.contains("SELECT count() AS count")), "{sql:?}");
 }
+
+/// 筛选下拉的候选值：十来个维度一条查询，不是一个维度一条。
+///
+/// 以前日志页一打开就发 4 条 facets、点「更多筛选」再发 10 条，14 条的 WHERE 一模一样、
+/// 只差分组的那一列，每条都要扫一遍整个时间窗。
+#[tokio::test]
+async fn facets_answer_every_dimension_in_one_query() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+    // 一行，每个维度一列
+    fake.respond(
+        r#"{"host":[["h1",42],["h2",7]],"level":[["INFO",100]],"logger":[]}"#.to_owned() + "\n",
+    );
+
+    let (status, body) = get_json(
+        &app,
+        &format!(
+            "/api/logs/facets?from={MIDNIGHT_MS}&to={}&field=host,level,logger",
+            MIDNIGHT_MS + HOUR_MS
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let requests: Vec<_> = fake.requests().into_iter().skip(2).collect();
+    assert_eq!(requests.len(), 1, "三个维度一条查询");
+    assert!(requests[0].body.contains("approx_top_k"), "{}", requests[0].body);
+
+    let facets = body["facets"].as_array().unwrap();
+    // 顺序跟着请求里 field 的顺序走，前端按它对号入座
+    assert_eq!(
+        facets.iter().map(|f| f["field"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["host", "level", "logger"]
+    );
+    assert_eq!(facets[0]["values"][0]["value"], "h1");
+    assert_eq!(facets[0]["values"][0]["count"], 42);
+    assert_eq!(facets[1]["values"][0]["value"], "INFO");
+    assert!(facets[2]["values"].as_array().unwrap().is_empty(), "空维度也占一项");
+
+    // 不能筛的列要挡掉，别悄悄少一个下拉
+    let (status, body) = get_json(
+        &app,
+        &format!(
+            "/api/logs/facets?from={MIDNIGHT_MS}&to={}&field=host,message",
+            MIDNIGHT_MS + HOUR_MS
+        ),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = get_json(
+        &app,
+        &format!("/api/logs/facets?from={MIDNIGHT_MS}&to={}", MIDNIGHT_MS + HOUR_MS),
+    )
+    .await;
+    assert_eq!(status, 400, "一个维度都不给也是 400: {body}");
+}

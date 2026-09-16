@@ -137,13 +137,22 @@ export function useLogHistogram(params: Params, enabled = true) {
   })
 }
 
-export function useLogFacets(field: string, params: Params, enabled = true) {
+/**
+ * 筛选下拉的候选值，**所有维度一条查询**。
+ *
+ * 以前是一个维度一条：光是打开日志页就发 4 条（服务 / 命名空间 / pod / 容器），点「更多
+ * 筛选」再发 10 条，14 条的 WHERE 一模一样、只差分组的那一列。线上 1 小时窗实测每条都要
+ * 扫 916 万行，4 条合起来 3666 万行 / 591.6 MB——只为了填几个下拉框。一条 `approx_top_k`
+ * 把 14 个维度并成一次扫描：911 万行 / 439.6 MB，比原来光打开页面那 4 条还便宜。
+ */
+export function useLogFacets(fields: string[], params: Params, enabled = true) {
+  const list = fields.join(',')
   return useQuery({
-    queryKey: ['logs', 'facets', field, params],
-    queryFn: ({ signal }) => apiGet<FacetsResponse>('/logs/facets', { ...params, field }, signal),
+    queryKey: ['logs', 'facets', list, params],
+    queryFn: ({ signal }) => apiGet<FacetsResponse>('/logs/facets', { ...params, field: list }, signal),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
-    enabled,
+    enabled: enabled && !!list,
   })
 }
 

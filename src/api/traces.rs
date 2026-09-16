@@ -14,8 +14,8 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
-    AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, ENTRY_KINDS,
-    DETAIL_PROBE_WINDOWS, ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS,
+    AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, DETAIL_PROBE_WINDOWS,
+    ENTRY_KINDS, ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS,
     SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries,
     TraceSort, TraceSummary, ValueRow, candidate_range, dedup_by_trace, detail_probe_hit,
     normalize_kind, normalize_span_id, normalize_trace_id,

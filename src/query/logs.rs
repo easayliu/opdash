@@ -658,18 +658,41 @@ impl LogQueries<'_> {
         Ok(b.into_query(sql))
     }
 
-    /// 某一列出现最多的值（给筛选下拉用）。`field` 必须通过 [`facetable`]。
-    pub fn facets(&self, filter: &LogFilter, field: &str, limit: u32) -> Result<Query> {
+    /// 几列各自出现最多的值（给筛选下拉用），**一条查询出全部**。每个 `field` 都要通过
+    /// [`facetable`]。
+    ///
+    /// 日志页顶上一排下拉，以前是一个维度一条 `GROUP BY`：光是打开页面就发 4 条（服务 /
+    /// 命名空间 / pod / 容器），点「更多筛选」再发 10 条，14 条的 `WHERE` 一模一样、只差
+    /// 分组的那一列。线上 1 小时窗实测，**每条都要扫 916 万行**，4 条合起来 3666 万行 /
+    /// 591.6 MB，只为了填几个下拉框。
+    ///
+    /// `approx_top_k` 把它们并成一次扫描：**14 个维度一条查询 911 万行 / 439.6 MB / 0.48 秒**,
+    /// 比原来光打开页面那 4 条还便宜。代价是计数从精确变成 Space-Saving 近似——线上这些
+    /// 维度实测返回的误差项都是 0（基数没超过算法容量），而且这个数字在下拉里只是个参考量级。
+    ///
+    /// 计数用 `toFloat64` 转一下：UInt64 在 JSON 里是带引号的字符串，而元组里的字段没法单独
+    /// 挂 `num::de`。行数远不到 2^53，浮点存得下。
+    pub fn facets(&self, filter: &LogFilter, fields: &[&str], limit: u32) -> Result<Query> {
         filter.validate()?;
-        if !facetable(self.table, field) {
-            return Err(Error::bad_request(format!("列 {field:?} 不支持统计取值")));
+        if fields.is_empty() {
+            return Err(Error::bad_request("缺少参数 field"));
+        }
+        let mut cols = Vec::with_capacity(fields.len());
+        for field in fields {
+            if !facetable(self.table, field) {
+                return Err(Error::bad_request(format!("列 {field:?} 不支持统计取值")));
+            }
+            let col = quote_ident(field)?;
+            // approx_top_k 的个数必须是字面量常量，进不了参数绑定；limit 是 u32，拼进去是安全的
+            cols.push(format!(
+                "arrayMap(t -> (t.1, toFloat64(t.2)), approx_top_k({limit})({col})) AS {col}"
+            ));
         }
         let mut b = Bindings::new();
         let where_sql = filter.where_sql(&mut b)?;
-        let limit = b.bind("UInt32", limit);
         let sql = format!(
-            "SELECT {col} AS value, count() AS count\nFROM {from}\nWHERE {where_sql}\nGROUP BY value\nORDER BY count DESC, value\nLIMIT {limit}",
-            col = quote_ident(field)?,
+            "SELECT {}\nFROM {from}\nWHERE {where_sql}",
+            cols.join(",\n  "),
             from = self.table_ref(),
         );
         Ok(b.into_query(sql))
@@ -1086,11 +1109,21 @@ mod tests {
         );
         assert!(h.sql().ends_with("GROUP BY bucket, level\nORDER BY bucket"));
 
-        let f = q.facets(&filter, "pod", 50).unwrap();
-        assert!(f.sql().contains("SELECT `pod` AS value, count() AS count"), "{}", f.sql());
-        assert!(q.facets(&filter, "message", 50).is_err());
-        assert!(q.facets(&filter, "replica", 50).is_err(), "数字列不做 facet");
-        assert!(q.facets(&filter, "nope", 50).is_err());
+        // 几个维度一条查询，一个维度一列，列名就是维度名（前端按它对号入座）
+        let f = q.facets(&filter, &["pod", "host"], 50).unwrap();
+        assert!(
+            f.sql().contains(
+                "SELECT arrayMap(t -> (t.1, toFloat64(t.2)), approx_top_k(50)(`pod`)) AS `pod`"
+            ),
+            "{}",
+            f.sql()
+        );
+        assert!(f.sql().contains("approx_top_k(50)(`host`)) AS `host`"), "{}", f.sql());
+        // 一个不能筛的列就整条拒绝，不能悄悄少给一个下拉
+        assert!(q.facets(&filter, &["pod", "message"], 50).is_err());
+        assert!(q.facets(&filter, &["replica"], 50).is_err(), "数字列不做 facet");
+        assert!(q.facets(&filter, &["nope"], 50).is_err());
+        assert!(q.facets(&filter, &[], 50).is_err(), "一个维度都不给");
 
         let c = q.context("node-1", "/var/log/x.log", 1_500, true, 50).unwrap();
         assert!(

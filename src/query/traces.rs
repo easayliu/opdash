@@ -937,8 +937,7 @@ impl TraceQueries<'_> {
         let origin = b.bind("Int64", bucket.origin_ms);
         let width = b.bind("Int64", bucket.width_ms);
         // 桶表达式在 GROUP BY 里要原样再写一遍：GROUPING SETS 里引用不了 SELECT 的别名
-        let bucket_expr =
-            format!("intDiv(toUnixTimestamp64Milli(timestamp) - {origin}, {width})");
+        let bucket_expr = format!("intDiv(toUnixTimestamp64Milli(timestamp) - {origin}, {width})");
         let sql = format!(
             "SELECT service_name, grouping({bucket_expr}) AS is_total, {bucket_expr} AS bucket,\n  \
              count() AS requests, countIf(status_code = 'Error') AS errors,\n  \

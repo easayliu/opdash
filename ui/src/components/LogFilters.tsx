@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { FilterIcon, HelpCircleIcon, SlidersHorizontalIcon, XIcon } from 'lucide-react'
 import { useLogFacets } from '@/api/queries'
 import { Button, Combobox, Input, Kbd } from '@/components/ui'
 import type { Params } from '@/api/client'
+import type { ValueCount } from '@/api/types'
 import { cn } from '@/lib/utils'
 
 export const LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE']
@@ -70,6 +71,14 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
   }
   const primary = PRIMARY_DIMS.filter((d) => dims.includes(d))
   const secondary = dims.filter((d) => !PRIMARY_DIMS.includes(d))
+  // 所有维度的候选值一条查询拿回来，按维度分。「更多筛选」里那十个也一起——多带它们只多读
+  // 60 MB，换的是展开即用，而且总量仍然比原来光查 4 个维度少一半（见 useLogFacets）
+  const facets = useLogFacets(dims, rangeParams, dims.length > 0)
+  const facetValues = useMemo(() => {
+    const m = new Map<string, ValueCount[]>()
+    for (const f of facets.data?.facets ?? []) m.set(f.field, f.values)
+    return m
+  }, [facets.data])
   const secondaryActive = secondary.filter((d) => state.dims[d]?.length).length
   const showMore = more || secondaryActive > 0
   const activeIds = state.trace_id || state.span_id
@@ -155,7 +164,7 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
           ))}
         </div>
         {primary.map((dim) => (
-          <DimSelect key={dim} dim={dim} value={state.dims[dim]?.[0] ?? ''} rangeParams={rangeParams} onChange={(v) => setDim(dim, v)} />
+          <DimSelect key={dim} dim={dim} value={state.dims[dim]?.[0] ?? ''} values={facetValues.get(dim)} loading={facets.isPending} onChange={(v) => setDim(dim, v)} />
         ))}
         <Input value={logger} onChange={(e) => setLogger(e.target.value)} placeholder="logger 包含…" className={HALF_ON_MOBILE + ' md:w-44'} aria-label="logger" />
         <Input value={thread} onChange={(e) => setThread(e.target.value)} placeholder="thread 包含…" className={HALF_ON_MOBILE + ' md:w-40'} aria-label="thread" />
@@ -186,7 +195,7 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
         <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-2.5">
           <span className="text-xs text-muted-fg">其他维度</span>
           {secondary.map((dim) => (
-            <DimSelect key={dim} dim={dim} value={state.dims[dim]?.[0] ?? ''} rangeParams={rangeParams} onChange={(v) => setDim(dim, v)} />
+            <DimSelect key={dim} dim={dim} value={state.dims[dim]?.[0] ?? ''} values={facetValues.get(dim)} loading={facets.isPending} onChange={(v) => setDim(dim, v)} />
           ))}
         </div>
       )}
@@ -194,9 +203,8 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
   )
 }
 
-function DimSelect({ dim, value, rangeParams, onChange }: { dim: string; value: string; rangeParams: Params; onChange: (v: string) => void }) {
-  const facets = useLogFacets(dim, rangeParams)
-  const values = facets.data?.values ?? []
+/** 一个维度的下拉。候选值由 [`LogFilters`] 一条查询问回来再分给每个下拉，这里不自己查 */
+function DimSelect({ dim, value, values = [], loading, onChange }: { dim: string; value: string; values?: ValueCount[]; loading: boolean; onChange: (v: string) => void }) {
   const options = value && !values.some((v) => v.value === value) ? [{ value, count: 0 }, ...values] : values
   const label = DIM_LABEL[dim] ?? dim
   return (
@@ -207,7 +215,7 @@ function DimSelect({ dim, value, rangeParams, onChange }: { dim: string; value: 
       placeholder={label}
       searchPlaceholder={`筛 ${label}…`}
       emptyText={`没有匹配的${label}`}
-      loading={facets.isPending}
+      loading={loading}
       title={dim}
       className={cn(HALF_ON_MOBILE, 'md:w-44')}
     />

@@ -157,9 +157,7 @@ async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<Overv
     // 当前窗、对比窗各一条，每条同时带回整窗汇总和分桶（GROUPING SETS，见 service_stats）
     let (current, previous) = tokio::try_join!(
         state.client.rows::<ServiceRow>(queries.service_stats(&range, &dims, &bucket)?),
-        state
-            .client
-            .rows::<ServiceRow>(queries.service_stats(&prev_range, &dims, &prev_bucket)?),
+        state.client.rows::<ServiceRow>(queries.service_stats(&prev_range, &dims, &prev_bucket)?),
     )?;
     let mut stats = current.stats;
     stats.absorb(&previous.stats);
@@ -445,9 +443,7 @@ async fn operations_many(
         return Err(Error::bad_request("至少给一个 service"));
     }
     if services.len() > MAX_SERVICES_PER_QUERY {
-        return Err(Error::bad_request(format!(
-            "一次最多问 {MAX_SERVICES_PER_QUERY} 个服务"
-        )));
+        return Err(Error::bad_request(format!("一次最多问 {MAX_SERVICES_PER_QUERY} 个服务")));
     }
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
     let names: Vec<&str> = services.iter().map(String::as_str).collect();
