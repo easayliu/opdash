@@ -2,16 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { CopyIcon } from 'lucide-react'
 import { useMeta, useSpanAttrs, useTraceDetail, useTraceLogs } from '@/api/queries'
-import type { TraceDetailResponse } from '@/api/types'
-import { LogTable, sortLogRows, type LogSort } from '@/components/LogTable'
+import type { LogRow, TraceDetailResponse } from '@/api/types'
+import { LEVEL_RANK, LogTable, sortLogRows, type ColFilter, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
+import { Badge, Button, Combobox, EmptyState, ErrorBox, Spinner } from '@/components/ui'
 import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
 import { around, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { formatDuration, formatTs, formatTsMicro } from '@/lib/time'
 import { useFromState, useUrlState } from '@/lib/url-state'
-import { copyText } from '@/lib/utils'
+import { cn, copyText } from '@/lib/utils'
 
 /** 日志窗口在 span 跨度之外前后各放宽多少：给时钟偏差和写入延迟留余量 */
 const LOG_WINDOW_PAD_MS = 5 * 60_000
@@ -32,6 +32,11 @@ function truncatedHint(d: TraceDetailResponse, max = 5000): string {
   return d.narrowed
     ? `这条 trace 的 span 超过 ${max} 个，只显示 ${span} 这一段（以进来时的时刻为中心）${pinned}`
     : `超过 ${max} 个 span，按时间只显示最早的这些${pinned}`
+}
+
+/** 这一行是否过得了各列的筛选；`except` 那一列不算（给它自己算下拉选项时用） */
+function matchDims(r: LogRow, dims: string[], filter: Record<string, string>, except?: string): boolean {
+  return dims.every((d) => d === except || !filter[d] || String(r[d] ?? '') === filter[d])
 }
 
 export function TraceDetailPage() {
@@ -166,14 +171,59 @@ export function TraceDetailPage() {
   const sortedLogs = useMemo(() => (logs.data ? sortLogRows(logs.data.rows, sort) : []), [logs.data, sort])
   const selectedLogCount = useMemo(() => (selected ? sortedLogs.filter((r) => r.span_id === selected).length : 0), [sortedLogs, selected])
   // 「只看选中 span」在本地筛：整条 trace 的日志已经在手里了，为它再查一趟库是白扫一遍
-  const shownLogs = useMemo(
+  const spanLogs = useMemo(
     () => (logsOnlySpan && selected ? sortedLogs.filter((r) => r.span_id === selected) : sortedLogs),
     [sortedLogs, logsOnlySpan, selected],
   )
+  const dims = meta.data?.logs.dimensions ?? []
+  /**
+   * 表头上按级别 / 服务 / pod 筛，也在本地做。一条跨十几个服务的 trace 有上百条日志，人往往只想看
+   * 其中一个服务（或者滚动发布时只看新 pod）打了什么、只看 WARN 以上。选中值记在 URL 里，
+   * 链接发给同事看到的一样。
+   */
+  // 日志表上「服务」这一维叫什么（老表没有 service_name 就退回 container）
+  const serviceDim = dims.includes('service_name') ? 'service_name' : dims.includes('container') ? 'container' : null
+  const filterDims = useMemo(
+    () => ['level', serviceDim, dims.includes('pod') ? 'pod' : null].filter((d): d is string => !!d),
+    [dims, serviceDim],
+  )
+  // 每列当前选中的值（'' 是不筛）。params 每次渲染都是新对象，按值拼一个 key 让下面的 memo 稳定
+  const filterKey = filterDims.map((d) => params.get(`log_${d}`) ?? '').join('\u0000')
+  const dimFilter = useMemo(() => {
+    const vals = filterKey.split('\u0000')
+    return Object.fromEntries(filterDims.map((d, i) => [d, vals[i] ?? '']))
+  }, [filterDims, filterKey])
+  const shownLogs = useMemo(() => spanLogs.filter((r) => matchDims(r, filterDims, dimFilter)), [spanLogs, filterDims, dimFilter])
+  const colFilters = useMemo(() => {
+    const out: Record<string, ColFilter> = {}
+    for (const d of filterDims) {
+      // 选项和条数按「其他列的筛选都生效」算：选了服务之后 pod 的下拉只剩这个服务的 pod
+      const counts = new Map<string, number>()
+      for (const r of spanLogs) {
+        if (!matchDims(r, filterDims, dimFilter, d)) continue
+        const v = String(r[d] ?? '')
+        counts.set(v, (counts.get(v) ?? 0) + 1)
+      }
+      // 级别按严重程度排，其余按条数多的在前
+      const rank = (v: string) => (d === 'level' ? (LEVEL_RANK[v.toUpperCase()] ?? 9) : 0)
+      const options = [...counts]
+        .sort((a, b) => rank(a[0]) - rank(b[0]) || b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([value, n]) => ({ value, label: value || '（空）', note: `${n} 条` }))
+      out[d] = { value: dimFilter[d], options, onChange: (v) => set({ [`log_${d}`]: v || null }, { replace: true }) }
+    }
+    return out
+  }, [spanLogs, filterDims, dimFilter, set])
+  const dimFiltered = filterDims.some((d) => dimFilter[d])
+  // 页头的服务图例点一下就是按这个服务筛日志（再点取消），比在表头下拉里找快
+  const serviceFilter = serviceDim ? dimFilter[serviceDim] : ''
+  const toggleServiceFilter = (name: string) => {
+    if (!serviceDim) return
+    setShowLogs(true)
+    set({ [`log_${serviceDim}`]: serviceFilter === name ? null : name }, { replace: true })
+  }
   // 去日志页也把窗口带上：日志页按 id 查默认不裁时间，在这个规模的集群上会直接撞超时
   const logsRangeQuery =
     logWindow?.from && logWindow.to ? `&from=${logWindow.from}&to=${logWindow.to}` : ''
-  const dims = meta.data?.logs.dimensions ?? []
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -263,10 +313,21 @@ export function TraceDetailPage() {
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg md:ml-auto md:gap-x-4">
           {colors.entries().map(([name, color]) => (
-            <span key={name} className="inline-flex items-center gap-1">
+            <button
+              key={name}
+              type="button"
+              disabled={!serviceDim}
+              onClick={() => toggleServiceFilter(name)}
+              title={serviceFilter === name ? '取消只看这个服务的日志' : `只看 ${name} 的日志`}
+              className={cn(
+                'inline-flex cursor-pointer items-center gap-1 rounded px-1 -mx-1 hover:bg-muted hover:text-fg disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-fg',
+                serviceFilter === name && 'bg-accent-soft font-medium text-accent hover:text-accent',
+                serviceFilter && serviceFilter !== name && 'opacity-60',
+              )}
+            >
               <span className="inline-block h-3.5 w-1 rounded-sm" style={{ background: color }} />
               {name}
-            </span>
+            </button>
           ))}
           <StatsLine stats={detail.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
           {detail.data?.windowed && (
@@ -324,6 +385,21 @@ export function TraceDetailPage() {
                   只看选中 span<span className="hidden md:inline"> 的日志</span>
                 </Button>
               )}
+              {showLogs &&
+                logs.data &&
+                filterDims.map((d) => (
+                  // 手机上是卡片列表、没有表头，筛选放到这一行来
+                  <Combobox
+                    key={d}
+                    value={dimFilter[d]}
+                    options={colFilters[d].options}
+                    onChange={colFilters[d].onChange}
+                    placeholder={`全部 ${d}`}
+                    searchPlaceholder={`搜索 ${d}…`}
+                    className="w-32 shrink-0 md:hidden"
+                    title={`按 ${d} 筛选`}
+                  />
+                ))}
               {showLogs && logs.isFetching && <Spinner className="size-3.5" />}
               <span className="ml-auto flex items-center gap-3 text-2xs text-muted-fg">
                 <StatsLine stats={logs.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
@@ -343,9 +419,17 @@ export function TraceDetailPage() {
                     selectedSpanId={logsOnlySpan ? null : selected}
                     sort={sort}
                     onSort={onSort}
+                    colFilters={colFilters}
                     emptyText={
                       <span>
-                        没有带这个 trace id 的日志。{selected && logsOnlySpan ? '试试取消「只看选中 span」。' : '日志里要打 [TID:…] 才能关联；Go / nginx 这类不打 TID 的服务这里看不到。'}
+                        {dimFiltered
+                          ? '这个筛选下没有日志。'
+                          : `没有带这个 trace id 的日志。${selected && logsOnlySpan ? '试试取消「只看选中 span」。' : '日志里要打 [TID:…] 才能关联；Go / nginx 这类不打 TID 的服务这里看不到。'}`}
+                        {dimFiltered && (
+                          <button type="button" className="text-accent hover:underline" onClick={() => set(Object.fromEntries(filterDims.map((d) => [`log_${d}`, null])), { replace: true })}>
+                            清掉列上的筛选
+                          </button>
+                        )}
                       </span>
                     }
                   />

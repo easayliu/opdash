@@ -11,7 +11,7 @@ import {
   type ReactNode,
   type SelectHTMLAttributes,
 } from 'react'
-import { ChevronDownIcon, Loader2Icon, SearchIcon } from 'lucide-react'
+import { ChevronDownIcon, FilterIcon, Loader2Icon, SearchIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /** 下拉一次最多画多少行：服务 / 接口的候选能到几百，全画出来白费力气，让人接着敲 */
@@ -221,6 +221,8 @@ export function Combobox({
   loading,
   mono,
   clearable = true,
+  variant = 'default',
+  trigger,
 }: {
   value: string
   options: ComboOption[]
@@ -236,11 +238,21 @@ export function Combobox({
   /** 选项是等宽内容（指标名、属性值这类） */
   mono?: boolean
   clearable?: boolean
+  /**
+   * `inline`：嵌在表头 / 一行文字里用——触发器没有边框和高度，只是一个图标加当前值；
+   * 菜单按触发器在屏幕上的位置 fixed 定位，不受外层滚动容器裁切。
+   */
+  variant?: 'default' | 'inline'
+  /** inline 时触发器上的图标（默认漏斗） */
+  trigger?: ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [cursor, setCursor] = useState(0)
   const [alignRight, setAlignRight] = useState(false)
+  // inline 变体的菜单锚点：触发器的屏幕坐标（打开那一刻量的）
+  const [anchor, setAnchor] = useState<{ top: number; left: number; right: number } | null>(null)
+  const inline = variant === 'inline'
   const box = useRef<HTMLDivElement>(null)
   const listBox = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLInputElement>(null)
@@ -261,8 +273,16 @@ export function Combobox({
       if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
     }
     document.addEventListener('mousedown', onClick)
-    return () => document.removeEventListener('mousedown', onClick)
-  }, [open])
+    // fixed 定位的菜单跟不上外层滚动，滚了就收起来
+    const onScroll = (e: Event) => {
+      if (inline && !listBox.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('scroll', onScroll, true)
+    return () => {
+      document.removeEventListener('mousedown', onClick)
+      document.removeEventListener('scroll', onScroll, true)
+    }
+  }, [open, inline])
 
   // 键盘上下移动时把高亮那行带进视口；刚打开时也要滚到当前选中那行
   useEffect(() => {
@@ -274,6 +294,7 @@ export function Combobox({
     const rect = box.current?.getBoundingClientRect()
     // 靠右的下拉（页头那几个）往左展开，不然超出屏幕
     setAlignRight(!!rect && rect.left + COMBO_MENU_W > window.innerWidth)
+    setAnchor(rect ? { top: rect.bottom, left: rect.left, right: window.innerWidth - rect.right } : null)
     setQ('')
     // 清了搜索词，高亮直接按未筛选的列表算（clearable 的话前面还多一行「全部」）
     const idx = options.findIndex((o) => o.value === value) + (clearable ? 1 : 0)
@@ -311,23 +332,38 @@ export function Combobox({
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKey}
         className={cn(
-          'flex h-9 w-full items-center gap-1.5 rounded-md border border-input bg-card px-2.5 text-left text-sm text-fg outline-none focus:border-brand focus:ring-2 focus:ring-brand/25 disabled:cursor-not-allowed disabled:opacity-50',
-          value && 'border-accent text-accent',
+          inline
+            ? 'flex min-w-0 max-w-full items-center gap-0.5 rounded outline-none hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/25 disabled:cursor-not-allowed disabled:opacity-50'
+            : 'flex h-9 w-full items-center gap-1.5 rounded-md border border-input bg-card px-2.5 text-left text-sm text-fg outline-none focus:border-brand focus:ring-2 focus:ring-brand/25 disabled:cursor-not-allowed disabled:opacity-50',
+          value && (inline ? 'text-accent hover:text-accent' : 'border-accent text-accent'),
         )}
       >
-        <span className={cn('min-w-0 flex-1 truncate', mono && value && 'mono', !value && 'text-fg')}>
-          {value ? (current?.label ?? value) : placeholder}
-          {loading && '…'}
-        </span>
-        <ChevronDownIcon className="size-4 shrink-0 text-muted-fg" />
+        {inline ? (
+          <>
+            {trigger ?? <FilterIcon className="size-3 shrink-0" aria-hidden />}
+            {value && <span className={cn('min-w-0 truncate font-medium', mono && 'mono')}>{current?.label ?? value}</span>}
+          </>
+        ) : (
+          <>
+            <span className={cn('min-w-0 flex-1 truncate', mono && value && 'mono', !value && 'text-fg')}>
+              {value ? (current?.label ?? value) : placeholder}
+              {loading && '…'}
+            </span>
+            <ChevronDownIcon className="size-4 shrink-0 text-muted-fg" />
+          </>
+        )}
       </button>
       {open && (
         <div
           className={cn(
-            'absolute top-full z-30 mt-1 w-max min-w-full rounded-md border border-border bg-card shadow-lg',
-            alignRight ? 'right-0' : 'left-0',
+            'z-30 w-max rounded-md border border-border bg-card text-fg shadow-lg',
+            inline ? 'fixed min-w-56 text-xs' : 'absolute top-full mt-1 min-w-full',
+            !inline && (alignRight ? 'right-0' : 'left-0'),
           )}
-          style={{ maxWidth: `min(90vw, ${COMBO_MENU_W}px)` }}
+          style={{
+            maxWidth: `min(90vw, ${COMBO_MENU_W}px)`,
+            ...(inline && anchor ? { top: anchor.top + 4, ...(alignRight ? { right: anchor.right } : { left: anchor.left }) } : {}),
+          }}
         >
           <div className="border-b border-border p-1.5">
             <div className="relative">

@@ -13,6 +13,13 @@
 //! * `readonly=2`：禁止写，但允许在 URL 里改设置（`readonly=1` 连 `max_execution_time` 都不让传）；
 //! * `max_execution_time`：超时由 ClickHouse 自己掐，返回 159 错误码，比客户端断连干净；
 //! * `wait_end_of_query=1`：结果攒完再发，查询中途出错时能收到干净的 5xx，而不是 200 + 半截 JSON；
+//!   **导出也一样开着，别想着为了首字节把它关掉**——关掉之后查询是边算边往 socket 写的，
+//!   `max_execution_time` 会把**传输时间也算进查询**，下载一超过这个时限（默认 30 秒）就被掐断，
+//!   而且掐得很难看：HTTP 仍然是 200，gzip 流少了结束标记，用户拿到一个打不开的半截文件。
+//!   线上实测（1 小时窗 + 关键字，导出 2 万行、gzip 后 167 MB，下载约 110 秒）：
+//!   `wait_end_of_query=1` 首字节 10.8 s、完整读完；`=0` 首字节 2.2 s，但 30 秒超时那次读到
+//!   一半就断（把 `max_execution_time` 放到 300 秒才读得完，证明就是它掐的）。省下来的 8 秒
+//!   首字节，不值一个会坏文件的风险；
 //! * `output_format_json_quote_64bit_integers=0`：`UInt64`（duration_ns）按数字而不是字符串输出。
 
 use std::sync::Arc;

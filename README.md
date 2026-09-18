@@ -587,7 +587,7 @@ kubectl -n logging port-forward svc/opdash 4880:4880     # 没配 Ingress 先本
 日志跟随走 SSE 长连接（`/api/logs/tail`）：响应带 `X-Accel-Buffering: no` 且不压缩，nginx / ingress 一般不用改；
 每 15 秒有一次保活注释，闲着也不会被空闲超时掐掉。要是中间还有别的代理，确认它没开响应缓冲、读超时大于 15 秒。
 
-k8s 上 `OPDASH_MAX_READ_BYTES` 建议给个 20 GiB 左右的护栏，按集群规模调。readiness 探针打
+k8s 上 `OPDASH_MAX_READ_BYTES` 建议给个 100 GiB 左右的护栏，按集群规模调。readiness 探针打
 `/api/health`（不认证，会真的 ping ClickHouse），库挂了会摘流量；liveness 用 tcpSocket 就行，库挂了重启进程没用。对外暴露务必配 Keycloak 登录（`OPDASH_OIDC_*`，
 见上面「登录」）或至少 `OPDASH_BASIC_AUTH`：这个页面能翻全部线上日志。
 

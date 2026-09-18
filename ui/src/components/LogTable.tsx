@@ -1,9 +1,9 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
-import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon } from 'lucide-react'
+import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon, XIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
-import { Badge, Button, levelTone } from '@/components/ui'
+import { Badge, Button, Combobox, levelTone, type ComboOption } from '@/components/ui'
 import { messageTruncated, rowKey, truncationNote, useRowKeys } from '@/lib/log-row'
 import { useIsMobile } from '@/lib/media'
 import { useFrom } from '@/lib/url-state'
@@ -28,6 +28,19 @@ export interface LogTableProps {
   /** 给了就显示可点的表头（客户端排序，rows 已按它排好） */
   sort?: LogSort
   onSort?: (key: string) => void
+  /**
+   * 某几列的表头上带一个下拉筛选（按列名给，`level` 也算一列）。rows 已经是筛过的——筛选本身由外面做，
+   * 表只负责画个入口：链路详情里一条 trace 的日志都在手里，按服务再查一趟库是白扫。
+   */
+  colFilters?: Record<string, ColFilter>
+}
+
+export interface ColFilter {
+  /** 当前选中的值，'' 是不筛 */
+  value: string
+  /** 可选的值；`note` 一般放条数 */
+  options: ComboOption[]
+  onChange: (v: string) => void
 }
 
 export interface LogSort {
@@ -37,7 +50,7 @@ export interface LogSort {
 }
 
 /** 级别按严重程度排，认不出的排最后 */
-const LEVEL_RANK: Record<string, number> = { FATAL: 0, ERROR: 1, WARN: 2, WARNING: 2, INFO: 3, DEBUG: 4, TRACE: 5 }
+export const LEVEL_RANK: Record<string, number> = { FATAL: 0, ERROR: 1, WARN: 2, WARNING: 2, INFO: 3, DEBUG: 4, TRACE: 5 }
 
 /** 按 sort 排序（稳定，同值按时间再排一次），不改原数组。 */
 export function sortLogRows(rows: LogRow[], sort: LogSort): LogRow[] {
@@ -118,6 +131,33 @@ function SortHeader({ label, col, sort, onSort }: { label: string; col: string; 
   )
 }
 
+/**
+ * 表头里的下拉筛选：和筛选栏同一套带搜索的 Combobox，只是触发器缩成一个漏斗图标加当前值，
+ * 看起来是表头的一部分。菜单 fixed 定位，不会被表格的滚动容器裁掉。
+ */
+function HeaderFilter({ col, filter }: { col: string; filter: ColFilter }) {
+  const { value, options, onChange } = filter
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-0.5">
+      <Combobox
+        variant="inline"
+        value={value}
+        options={options}
+        onChange={onChange}
+        placeholder={`全部 ${col}`}
+        searchPlaceholder={`搜索 ${col}…`}
+        className="min-w-0 flex-1"
+        title={value ? `只看 ${col} = ${value}，点击换一个` : `按 ${col} 筛选`}
+      />
+      {value && (
+        <button type="button" onClick={() => onChange('')} title="取消筛选" className="shrink-0 text-muted-fg hover:text-fg">
+          <XIcon className="size-3" />
+        </button>
+      )}
+    </span>
+  )
+}
+
 /** 把命中的关键字用 <mark> 包起来（不分大小写，纯文本，不走 innerHTML）。 */
 export function Highlight({ text, terms }: { text: string; terms?: string[] }) {
   const keys = (terms ?? []).filter(Boolean)
@@ -159,7 +199,7 @@ export function visibleDims(dims: string[]): string[] {
   return out
 }
 
-export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, emptyText, sort, onSort }: LogTableProps) {
+export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, emptyText, sort, onSort, colFilters }: LogTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const isMobile = useIsMobile()
   const cols = visibleDims(dims)
@@ -203,6 +243,7 @@ export function LogTable({ rows, dims, highlight, anchorKey, selectedSpanId, onC
       compact={compact}
       sort={sort}
       onSort={onSort}
+      colFilters={colFilters}
       expanded={expanded}
       toggle={toggle}
     />
@@ -218,7 +259,7 @@ type RowsProps = Pick<LogTableProps, 'rows' | 'dims' | 'highlight' | 'anchorKey'
 /** sticky 表头的高度，滚到某行时让出来 */
 const THEAD_H = 30
 
-function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, sort, onSort, expanded, toggle }: RowsProps & Pick<LogTableProps, 'compact' | 'sort' | 'onSort'>) {
+function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, sort, onSort, colFilters, expanded, toggle }: RowsProps & Pick<LogTableProps, 'compact' | 'sort' | 'onSort' | 'colFilters'>) {
   const from = useFrom()
   const tableRef = useRef<HTMLTableElement>(null)
   const keys = useRowKeys(rows)
@@ -237,12 +278,26 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
           <th className="w-[12.5rem] px-1.5 py-2 text-left font-medium">
             <SortHeader label="时间" col="ts_ms" sort={sort} onSort={onSort} />
           </th>
-          <th className="w-16 px-1.5 py-2 text-left font-medium">
-            <SortHeader label="级别" col="level" sort={sort} onSort={onSort} />
+          <th className={cn('px-1.5 py-2 text-left font-medium', colFilters?.level ? 'w-24' : 'w-16')}>
+            {colFilters?.level ? (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <SortHeader label="级别" col="level" sort={sort} onSort={onSort} />
+                <HeaderFilter col="level" filter={colFilters.level} />
+              </span>
+            ) : (
+              <SortHeader label="级别" col="level" sort={sort} onSort={onSort} />
+            )}
           </th>
           {cols.map((c) => (
             <th key={c} className={cn('px-1.5 py-2 text-left font-medium', c === 'pod' ? 'w-56' : 'w-40')}>
-              <SortHeader label={c} col={c} sort={sort} onSort={onSort} />
+              {colFilters?.[c] ? (
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <SortHeader label={c} col={c} sort={sort} onSort={onSort} />
+                  <HeaderFilter col={c} filter={colFilters[c]} />
+                </span>
+              ) : (
+                <SortHeader label={c} col={c} sort={sort} onSort={onSort} />
+              )}
             </th>
           ))}
           {!compact && (
