@@ -78,6 +78,10 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
   const mcpCommand = created
     ? `claude mcp add --transport http opdash ${created.mcp_url} \\\n  --header "Authorization: Bearer ${created.key}"`
     : ''
+  // Codex 不用命令行加远程服务，直接写 ~/.codex/config.toml
+  const codexConfig = created
+    ? `[mcp_servers.opdash]\nurl = "${created.mcp_url}"\nhttp_headers = { Authorization = "Bearer ${created.key}" }`
+    : ''
   const keys = list.data?.keys ?? []
 
   return (
@@ -138,6 +142,7 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
               </p>
               <Secret label="API key" value={created.key} />
               <Secret label="接入 Claude Code（Streamable HTTP）" value={mcpCommand} />
+              <Secret label="接入 Codex（写进 ~/.codex/config.toml）" value={codexConfig} />
               <p className="text-2xs leading-5 text-muted-fg">
                 其它 MCP 客户端填地址 <span className="mono">{created.mcp_url}</span>，请求头{' '}
                 <span className="mono">Authorization: Bearer &lt;key&gt;</span>。

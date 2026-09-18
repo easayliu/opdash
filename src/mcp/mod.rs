@@ -1,7 +1,7 @@
 //! MCP（Model Context Protocol）服务端：把 opdash 的查询能力交给 AI 助手直接用。
 //!
 //! 挂在 `POST /mcp`，Streamable HTTP 传输、**无状态**：不发 `Mcp-Session-Id`，不开服务端到客户端的
-//! SSE 流，每个 JSON-RPC 请求独立处理、一次 POST 回一个 JSON。Claude Code / Claude Desktop / Cursor
+//! SSE 流，每个 JSON-RPC 请求独立处理、一次 POST 回一个 JSON。Claude Code / Codex / Cursor
 //! 这类客户端填一个地址就能接：
 //!
 //! ```text

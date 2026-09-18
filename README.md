@@ -290,7 +290,7 @@ key 长这样：`opdash_<12 位 hex id>.<32 位随机串>`。**服务端只存�
 ## 给 AI 用：MCP
 
 同一个二进制还开着一个 [MCP](https://modelcontextprotocol.io)（Model Context Protocol）端点 `POST /mcp`，
-Claude Code / Claude Desktop / Cursor 这类 AI 助手接上之后，「昨天下午 order 服务为什么慢」这种问题它自己
+Claude Code / Codex / Cursor 这类 AI 助手接上之后，「昨天下午 order 服务为什么慢」这种问题它自己
 会去查：先看服务总览谁不对，再看是哪个接口，拉错误分组，拿样本链路看瀑布图和异常堆栈，翻对应的日志。
 人只用问问题。
 
@@ -306,6 +306,20 @@ curl -s -H "Authorization: Bearer opdash_…" https://opdash.example.com/mcp \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
 ```
+
+Codex 不用命令行加远程服务，写进 `~/.codex/config.toml`（项目级是 `.codex/config.toml`）：
+
+```toml
+[mcp_servers.opdash]
+url = "https://opdash.example.com/mcp"
+http_headers = { Authorization = "Bearer opdash_…" }
+# 不想把 key 写进配置文件（比如它会进版本库）就改成从环境变量取：
+# bearer_token_env_var = "OPDASH_API_KEY"
+```
+
+别的客户端（Cursor、Claude Desktop、自己写的）填地址 `https://opdash.example.com/mcp`、请求头
+`Authorization: Bearer <key>` 就行——服务端是标准的 Streamable HTTP，没有任何客户端专属的东西。
+只支持 stdio 的老客户端用 `npx mcp-remote https://opdash.example.com/mcp --header "Authorization: Bearer opdash_…"` 桥一下。
 
 ### 有哪些工具
 
