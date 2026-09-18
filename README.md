@@ -298,6 +298,9 @@ Claude Code / Codex / Cursor 这类 AI 助手接上之后，「昨天下午 orde
 
 ```bash
 # Claude Code：Streamable HTTP 传输，API key 放在请求头里
+# add 碰上同名的直接报 already exists，所以前面带一条 remove：没装过它只在 stderr 说句找不到，
+# 不挡后面那条；装过就是换成新 key
+claude mcp remove opdash 2>/dev/null
 claude mcp add --transport http opdash https://opdash.example.com/mcp \
   --header "Authorization: Bearer opdash_…"
 
@@ -307,7 +310,8 @@ curl -s -H "Authorization: Bearer opdash_…" https://opdash.example.com/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
 ```
 
-Codex 不用命令行加远程服务，写进 `~/.codex/config.toml`（项目级是 `.codex/config.toml`）：
+Codex 不用命令行加远程服务，写进 `~/.codex/config.toml`（项目级是 `.codex/config.toml`）；
+已经有 `[mcp_servers.opdash]` 的把整段换掉：
 
 ```toml
 [mcp_servers.opdash]
@@ -319,6 +323,7 @@ http_headers = { Authorization = "Bearer opdash_…" }
 
 别的客户端（Cursor、Claude Desktop、自己写的）填地址 `https://opdash.example.com/mcp`、请求头
 `Authorization: Bearer <key>` 就行——服务端是标准的 Streamable HTTP，没有任何客户端专属的东西。
+换了 key（吊销重签、到期重签）就是把这一条里的 key 改掉，地址和其它都不用动。
 只支持 stdio 的老客户端用 `npx mcp-remote https://opdash.example.com/mcp --header "Authorization: Bearer opdash_…"` 桥一下。
 
 ### 有哪些工具

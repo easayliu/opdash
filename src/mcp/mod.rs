@@ -5,8 +5,9 @@
 //! 这类客户端填一个地址就能接：
 //!
 //! ```text
+//! claude mcp remove opdash 2>/dev/null                    # 装过就先删掉，换成新 key
 //! claude mcp add --transport http opdash https://opdash.example.com/mcp \
-//!   --header "Authorization: Bearer opdash_…"      # 页面右上角自己生成的 API key
+//!   --header "Authorization: Bearer opdash_…"             # 页面右上角自己生成的 API key
 //! ```
 //!
 //! 工具不直接碰查询层：每个工具把参数翻译成 `/api/*` 的查询串，在**进程内**走一遍同一个 axum

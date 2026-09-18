@@ -75,8 +75,10 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
     }
   }
 
+  // add 碰上同名的会直接报 already exists，所以前面带一条 remove：没装过时它只在 stderr 说句找不到，
+  // 不挡后面那条；装过就是换成这把新 key
   const mcpCommand = created
-    ? `claude mcp add --transport http opdash ${created.mcp_url} \\\n  --header "Authorization: Bearer ${created.key}"`
+    ? `claude mcp remove opdash 2>/dev/null\nclaude mcp add --transport http opdash ${created.mcp_url} \\\n  --header "Authorization: Bearer ${created.key}"`
     : ''
   // Codex 不用命令行加远程服务，直接写 ~/.codex/config.toml
   const codexConfig = created
@@ -141,11 +143,11 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
                 </span>
               </p>
               <Secret label="API key" value={created.key} />
-              <Secret label="接入 Claude Code（Streamable HTTP）" value={mcpCommand} />
-              <Secret label="接入 Codex（写进 ~/.codex/config.toml）" value={codexConfig} />
+              <Secret label="接入 Claude Code（Streamable HTTP，装过的会换成这把 key）" value={mcpCommand} />
+              <Secret label="接入 Codex（写进 ~/.codex/config.toml，已有的同名段落整段替换）" value={codexConfig} />
               <p className="text-2xs leading-5 text-muted-fg">
                 其它 MCP 客户端填地址 <span className="mono">{created.mcp_url}</span>，请求头{' '}
-                <span className="mono">Authorization: Bearer &lt;key&gt;</span>。
+                <span className="mono">Authorization: Bearer &lt;key&gt;</span>；之前接过的把旧 key 改掉就行。
               </p>
               <div className="flex justify-end">
                 <Button size="xs" onClick={() => setCreated(null)}>
