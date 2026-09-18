@@ -86,6 +86,11 @@ pub struct OverviewResponse {
 /// `service_name IN` 的列表和返回的行数都会失控，宁可让页面退回一个一个问。
 const MAX_SERVICES_PER_QUERY: usize = 24;
 
+/// 接口表每个服务最多返回多少行（见 [`TraceQueries::operations`]）。`span_name` 的基数是不可控的
+/// ——把 SQL 语句拼进 span 名的服务，`kind=client` 下一小时上千个名字——不封顶就是几万行的
+/// JSON。线上一个服务一小时的入口接口是几十到几百个，200 行足够看「是哪个接口变了」。
+const MAX_OPERATIONS_PER_SERVICE: u32 = 200;
+
 /// 迷你趋势的桶数。卡片上只有一两百像素宽，再多也看不出来。
 const SPARK_BUCKETS: i64 = 30;
 
@@ -283,6 +288,8 @@ pub struct OperationsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_to_ms: Option<i64>,
     pub operations: Vec<OperationStat>,
+    /// 有服务的接口数撞上了 `MAX_OPERATIONS_PER_SERVICE`，只返回了量最大的那些
+    pub truncated: bool,
     pub stats: Stats,
 }
 
@@ -301,6 +308,8 @@ struct Operations {
     stats: Stats,
     compare: String,
     prev_range: Option<TimeRange>,
+    /// 有服务的接口数被 [`MAX_OPERATIONS_PER_SERVICE`] 切过
+    truncated: bool,
 }
 
 /// 当前窗和对比窗各查一次，按 `(service, span_name, span_kind)` 对齐成一行，前端按变化排序。
@@ -316,10 +325,11 @@ async fn collect_operations(
     kinds: &[&str],
 ) -> Result<Operations> {
     let (compare, prev_range) = compare_window_opt(p.get("compare").unwrap_or("day"), range)?;
-    let current_query = queries.operations(range, services, kinds)?;
+    let per_service = MAX_OPERATIONS_PER_SERVICE;
+    let current_query = queries.operations(range, services, kinds, per_service)?;
     let (current, previous) = match &prev_range {
         Some(prev) => {
-            let prev_query = queries.operations(prev, services, kinds)?;
+            let prev_query = queries.operations(prev, services, kinds, per_service)?;
             let (current, previous) = tokio::try_join!(
                 state.client.rows::<OperationRow>(current_query),
                 state.client.rows::<OperationRow>(prev_query),
@@ -329,6 +339,15 @@ async fn collect_operations(
         None => (state.client.rows::<OperationRow>(current_query).await?, None),
     };
     let mut stats = current.stats;
+    // 接口数撞了上限的服务。它的接口表只剩量最大的那 `per_service` 个，下面「消失的接口」那段
+    // 就不能对它下结论——被切掉的接口在对比窗里有、在这一批里没有，不代表它真的不见了
+    let capped: std::collections::HashSet<String> = {
+        let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for row in &current.rows {
+            *counts.entry(row.service_name.as_str()).or_default() += 1;
+        }
+        counts.into_iter().filter(|(_, n)| *n >= per_service).map(|(s, _)| s.to_owned()).collect()
+    };
     let secs = (range.span_ms() as f64 / 1000.0).max(1.0);
     let prev_secs = prev_range.as_ref().map_or(1.0, |r| (r.span_ms() as f64 / 1000.0).max(1.0));
     type OpKey = (String, String, String);
@@ -381,8 +400,10 @@ async fn collect_operations(
         })
         .collect();
     // 对比窗口有、现在一次都没有的接口：整个接口不见了也是一种「哪些请求变了」，而且是最该被
-    // 看见的一种。补成 0 次的一行接在后面（按对比窗口的量排，输出才稳定）
-    let mut gone: Vec<(OpKey, PrevOp)> = prev_by_op.into_iter().collect();
+    // 看见的一种。补成 0 次的一行接在后面（按对比窗口的量排，输出才稳定）。
+    // 被上限切过的服务跳过，不然「排不进前 200」会被说成「接口没了」
+    let mut gone: Vec<(OpKey, PrevOp)> =
+        prev_by_op.into_iter().filter(|((service, _, _), _)| !capped.contains(service)).collect();
     gone.sort_by(|a, b| b.1.requests.cmp(&a.1.requests).then_with(|| a.0.cmp(&b.0)));
     rows.extend(gone.into_iter().map(|((service, span_name, kind), prev)| OperationStat {
         service,
@@ -398,7 +419,7 @@ async fn collect_operations(
         max_ms: 0.0,
         prev: Some(prev),
     }));
-    Ok(Operations { rows, stats, compare, prev_range })
+    Ok(Operations { rows, stats, compare, prev_range, truncated: !capped.is_empty() })
 }
 
 /// 一个服务的接口表。服务级的「比昨天慢了 3 倍」只说明有事，**是哪个接口**才是能动手的信息。
@@ -421,6 +442,7 @@ async fn operations(
         prev_from_ms: out.prev_range.as_ref().map(|r| r.from_ms),
         prev_to_ms: out.prev_range.as_ref().map(|r| r.to_ms),
         operations: out.rows,
+        truncated: out.truncated,
         stats: out.stats,
     }))
 }
@@ -457,6 +479,7 @@ async fn operations_many(
         prev_from_ms: out.prev_range.as_ref().map(|r| r.from_ms),
         prev_to_ms: out.prev_range.as_ref().map(|r| r.to_ms),
         operations: out.rows,
+        truncated: out.truncated,
         stats: out.stats,
     }))
 }

@@ -293,6 +293,7 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
                         ("limit", integer("默认 50，上限 200")),
                         ("offset", integer("翻页偏移")),
                         ("max_message_chars", integer("单条 message 保留多少字符，默认 2000")),
+                        ("count", boolean("顺带数一共多少条（默认不数）。没有关键字时它要多扫一遍整个时间范围，只想知道量用 log_histogram 更划算；只在第一页有效")),
                     ],
                     time_props("1h"),
                 ]
@@ -1253,6 +1254,13 @@ async fn service_operations(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
             format!("共 {total} 个接口，只返回了前 {limit} 个"),
         );
     }
+    // 服务端也封了顶（每个服务 200 个接口），这一批是量最大的那些，不是全部
+    if body["truncated"].as_bool() == Some(true) {
+        note(
+            out.as_object_mut().expect("json 对象"),
+            "有服务的接口数超过了服务端上限，只统计了量最大的那些；接口名里拼了 SQL / id 的服务会这样".to_owned(),
+        );
+    }
     Ok(out)
 }
 
@@ -1680,6 +1688,11 @@ async fn search_logs(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     let window = if by_id { a.window_opt("1h")? } else { Some(a.window("1h")?) };
     let limit = a.limit("limit", 50, 200)?;
     let max_chars = a.limit("max_message_chars", 2000, 200_000)? as usize;
+    // 默认不数总数。`/api/logs/search` 默认会并发一条 `count()`，而**没有关键字**时这条是整个
+    // 请求里最贵的一步：行那条按排序键读够 limit 就停，count 那条要扫完整个时间范围（线上一
+    // 小时窗 900 多万行）。日志页早就为此传 `count=0`，用直方图各桶之和顶（见 README
+    // 「共 N 条不单独跑 count()」），这条路以前漏了。要总数就用 log_histogram，或显式 count=true
+    let want_count = a.boolean("count")?.unwrap_or(false);
     let mut qs = Qs::new();
     if let Some(w) = window {
         qs.window(w);
@@ -1688,6 +1701,7 @@ async fn search_logs(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     qs.push_opt("trace_id", trace_id.as_deref())
         .push_opt("span_id", span_id.as_deref())
         .push_opt("order", a.string("order")?)
+        .push("count", if want_count { "1" } else { "0" })
         .push("limit", limit.to_string())
         .push_opt("offset", a.u32("offset")?.map(|v| v.to_string()));
     let body = mcp.get("/api/logs/search", &qs.finish()).await?;
@@ -1715,7 +1729,14 @@ async fn search_logs(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     if rows.len() as u32 >= limit {
         note(
             &mut out,
-            format!("满了 {limit} 行，可能还有更多：加 offset 翻页，或缩小时间范围 / 加筛选"),
+            format!(
+                "满了 {limit} 行，可能还有更多：加 offset 翻页，或缩小时间范围 / 加筛选{}",
+                if want_count {
+                    ""
+                } else {
+                    "。要知道一共多少条用 log_histogram（顺带给时间分布），或者 count=true"
+                }
+            ),
         );
     }
     out.insert("rows".into(), Value::Array(rows));

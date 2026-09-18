@@ -266,6 +266,11 @@ export function ServiceDetailPage() {
           }
           extra={
             <>
+              {ops.data?.truncated && (
+                <Badge tone="warn" title="这个服务的接口太多（常见于把 SQL / id 拼进了 span 名），只统计了量最大的那些">
+                  接口已截断
+                </Badge>
+              )}
               <StatsLine stats={ops.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
               {!isMobile && (
                 <span className="flex h-7 items-center rounded-md border border-input p-0.5" title="点表头是按这一列排；切到「变化」就按这一列和对比窗口的变化排">

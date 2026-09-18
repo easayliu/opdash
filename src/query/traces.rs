@@ -983,11 +983,22 @@ impl TraceQueries<'_> {
     /// 一次可以问好几个服务：总览页上每张异常卡都要写一句「主要是哪个接口」，一张卡各查一次
     /// 的话，一到故障、十几个服务同时报警就是十几条查询——而那正是最需要这一页的时候。
     /// `service_name` 是排序键第一列，`IN` 几个服务照样走排序键前缀，一条顶十条。
+    ///
+    /// `per_service` 是**每个服务**留几行（`LIMIT n BY service_name`，排序之后才切，所以留下的
+    /// 是这个服务量最大的那几个接口）。不封顶的话行数由 `span_name` 的基数说了算，而这一列的
+    /// 基数是不可控的：把 SQL 语句、表名拼进 span 名的服务，`kind=client` 下一小时能有上千个
+    /// 不同的名字（见 [`Self::detail_fetch`] 里 `MAX_NAMES_BYTES` 那段）。一次问 24 个服务、
+    /// 当前窗和对比窗各一条，放大之后就是几万行的 JSON 和同样多组 `quantilesTDigest` 状态。
+    ///
+    /// 行数是我们自己定的常量，不是用户输入，按 [`super::logs::LogQueries::facets`] 里
+    /// `approx_top_k` 的先例直接拼字面量（`LIMIT … BY` 的个数进不进得了参数绑定要看版本，
+    /// 不冒这个险）。
     pub fn operations(
         &self,
         range: &TimeRange,
         services: &[&str],
         kinds: &[&str],
+        per_service: u32,
     ) -> Result<Query> {
         if services.is_empty() {
             return Err(Error::internal("operations 需要至少一个服务"));
@@ -1000,7 +1011,8 @@ impl TraceQueries<'_> {
             "SELECT service_name, span_name, span_kind, count() AS requests, countIf(status_code = 'Error') AS errors,\n  \
              quantilesTDigest(0.5, 0.95, 0.99)(toFloat64(duration_ns) / 1e6) AS q, max(duration_ns) / 1e6 AS max_ms\n\
              FROM {from}\nWHERE {time}\n  AND service_name IN {services}\n  AND span_kind IN {kinds}\n\
-             GROUP BY service_name, span_name, span_kind\nORDER BY requests DESC, service_name, span_name",
+             GROUP BY service_name, span_name, span_kind\nORDER BY requests DESC, service_name, span_name\n\
+             LIMIT {per_service} BY service_name",
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))
@@ -1842,11 +1854,19 @@ mod tests {
             "{}",
             o.sql()
         );
-        let ops = q.operations(&range(), &["svc", "svc2"], CLIENT_KINDS).unwrap();
+        let ops = q.operations(&range(), &["svc", "svc2"], CLIENT_KINDS, 200).unwrap();
         assert_eq!(ops.params()[2].1, "['svc','svc2']");
         assert_eq!(ops.params()[3].1, "['Client','Producer']");
         assert!(ops.sql().contains("GROUP BY service_name, span_name, span_kind"), "{}", ops.sql());
-        assert!(q.operations(&range(), &[], CLIENT_KINDS).is_err());
+        // 每个服务封顶，且切在排序之后：留下的是这个服务量最大的那几个接口
+        assert!(
+            ops.sql().contains(
+                "ORDER BY requests DESC, service_name, span_name\nLIMIT 200 BY service_name"
+            ),
+            "{}",
+            ops.sql()
+        );
+        assert!(q.operations(&range(), &[], CLIENT_KINDS, 200).is_err());
         let ts = q
             .timeseries(
                 &range(),

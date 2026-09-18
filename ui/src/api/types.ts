@@ -377,6 +377,8 @@ export interface OperationsResponse {
   prev_from_ms?: number
   prev_to_ms?: number
   operations: OperationStat[]
+  /** 有服务的接口数撞上了服务端上限（每个服务 200 个），只返回了量最大的那些 */
+  truncated: boolean
   stats: Stats
 }
 

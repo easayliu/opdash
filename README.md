@@ -65,7 +65,11 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
 没法动手，「`POST /order/submit` 的 P95 从 120ms 变成 2.1s，这一小时多耗了 34 秒」才能。所以接口表
 当前窗和对比窗**各查一次**（`/api/services/{name}/operations?compare=day|week|prev|none`，两条并发，
 都锁定了 `service_name` 走排序键前缀，加一条的代价和第一条差不多），按 `(span_name, span_kind)`
-对齐成一行：
+对齐成一行。每个服务封顶 200 个接口（`LIMIT 200 BY service_name`，切在排序之后，留下的是量最大的
+那些）：`span_name` 的基数是不可控的——把 SQL 语句、表名拼进 span 名的服务，`kind=client` 下一小时
+上千个名字，一次问 24 个服务再乘两个窗口就是几万行 JSON 和同样多组 `quantilesTDigest` 状态。切过的
+服务响应里 `truncated=true`，页面标「接口已截断」，「接口没了」那一档也会跳过它（排不进前 200 不等
+于接口没了）：
 
 * **变化榜**（`ui/src/lib/compare.ts`）：一屏之内告诉你「变了的是这几个」。**按影响面排，不按百分比排**——
   一小时 20 次的接口从 10ms 变 40ms 是 +300%，会排在「5 万次的接口从 80ms 变 120ms」前面，但用户
@@ -350,7 +354,7 @@ http_headers = { Authorization = "Bearer opdash_…" }
 | `search_traces` | 按服务 / 接口 / span 类型 / 只看错误 / 耗时区间 / 属性筛链路 | `/traces` |
 | `get_trace` | 一条链路的全部 span，带层级 `depth`、相对开始的 `offset_ms`；太多时保留全部出错的和最慢的；`include_logs` 顺带取日志 | `/traces/:trace_id` |
 | `get_span` | 一个 span 的属性 / resource / events（异常堆栈）/ links | 详情页右侧面板 |
-| `search_logs` | 关键字 / 正则 / 级别 / 维度列 / trace_id / span_id 检索日志 | `/logs` |
+| `search_logs` | 关键字 / 正则 / 级别 / 维度列 / trace_id / span_id 检索日志（默认不数总数，要总数用 `log_histogram` 或 `count=true`） | `/logs` |
 | `log_histogram` | 日志条数按时间、按级别的分布——「错误从几点开始的」 | 日志页直方图 |
 | `log_facets` | 几个维度列各自最常见的取值——「报错集中在哪个 pod」 | 日志页下拉框 |
 | `log_context` | 某条日志前后几行 | 日志页上下文 |
@@ -540,6 +544,7 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
 * 「共 N 条」不单独跑 `count()`：直方图各桶之和就是总数（时间条件左闭右开、桶按同一原点切，每行都
   落在某个桶里），日志页给 `/logs/search` 传 `count=0` 关掉它，省下一条扫同样数据的查询。按 trace id
   查（没有直方图）时才回到 `count()`；关键字搜索那条路走 `exact_rows_before_limit=1`，一次扫描顺带出总数。
+MCP 的 `search_logs` 同样默认 `count=0`（模型要总数用 `log_histogram`，顺带还给时间分布，或者显式 `count=true`）。
 * 相对范围（`最近 N 分钟`）在前端解析成绝对毫秒后**固定到下次刷新**：翻页、改排序、切页面都不会让
   `to` 往前爬。否则每改一个参数 `from` / `to` 就变几毫秒，直方图和 facet 明明和翻页无关也得重扫一遍，
   而且第二页和第一页的窗口边界对不上、行会错位。点刷新（或重新选范围）才推进到当前时间。

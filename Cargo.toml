@@ -1,6 +1,6 @@
 [package]
 name = "opdash"
-version = "0.7.8"
+version = "0.7.9"
 edition = "2024"
 description = "Trace, log & metric query UI over ClickHouse (logpipe / tracepipe / metricpipe)"
 license = "MIT"

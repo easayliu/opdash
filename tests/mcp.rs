@@ -216,13 +216,13 @@ async fn mcp_takes_a_user_issued_api_key() {
 async fn search_logs_translates_into_the_logs_api() {
     let fake = FakeClickhouse::start().await;
     let app = app_with_schema(&fake, &[]).await;
-    // 检索 + count 并发，同一个响应体两边都能解
+    // 默认不数总数，所以只有检索那一条
     let row = concat!(
         r#"{"ts_ms":1767196800123,"level":"ERROR","trace_id":"","span_id":"0102030405060708","thread":"main","#,
         r#""logger":"a.B","message":"boom boom boom","file":"/log/a.log","host":"h1","pod":"p-1","count":7}"#,
         "\n"
     );
-    fake.respond(row).respond(row);
+    fake.respond(row);
 
     let (is_error, out) = call_tool(
         &app,
@@ -236,7 +236,7 @@ async fn search_logs_translates_into_the_logs_api() {
     assert!(!is_error, "{out}");
     assert_eq!(out["from"], "2026-01-01T00:00:00.000+08:00");
     assert_eq!(out["to"], "2026-01-01T01:00:00.000+08:00");
-    assert_eq!(out["total"], 7);
+    assert!(out.get("total").is_none(), "默认不数总数: {out}");
     assert_eq!(out["returned"], 1);
     let r = &out["rows"][0];
     assert_eq!(r["time"], "2026-01-01T00:00:00.123+08:00");
@@ -248,8 +248,9 @@ async fn search_logs_translates_into_the_logs_api() {
     assert!(r.get("ts_ms").is_none());
 
     let reqs: Vec<_> = fake.requests().into_iter().skip(2).collect();
-    assert_eq!(reqs.len(), 2, "检索 + count");
-    let search = reqs.iter().find(|r| !r.body.contains("count()")).expect("检索那条");
+    assert_eq!(reqs.len(), 1, "只有检索那一条，没有 count()");
+    let search = &reqs[0];
+    assert!(!search.body.contains("count()"), "{}", search.body);
     // 时间条件是位置参数（p0 / p1），按值找
     let bound: Vec<String> = search.query().into_iter().map(|(_, v)| v).collect();
     assert!(bound.contains(&MIDNIGHT_MS.to_string()), "{}", search.target);
@@ -258,6 +259,33 @@ async fn search_logs_translates_into_the_logs_api() {
     assert!(search.body.contains("level"), "{}", search.body);
     assert!(search.body.contains("LIMIT {p4:UInt32}"), "{}", search.body);
     assert_eq!(search.query_value("param_p4").as_deref(), Some("10"), "limit 是绑定参数");
+}
+
+#[tokio::test]
+async fn search_logs_counts_only_when_asked() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+    // count=true 才发第二条。没有关键字时那条 count() 要扫完整个时间范围，是整个请求里最贵的
+    // 一步（日志页为此传 count=0，用直方图各桶之和顶）
+    let row = concat!(
+        r#"{"ts_ms":1767196800123,"level":"ERROR","trace_id":"","span_id":"","thread":"main","#,
+        r#""logger":"a.B","message":"boom","file":"/log/a.log","host":"h1","count":7}"#,
+        "\n"
+    );
+    fake.respond(row).respond(row);
+
+    let (is_error, out) = call_tool(
+        &app,
+        "search_logs",
+        json!({ "to": "2026-01-01 01:00:00", "range": "1h", "limit": 10, "count": true }),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert_eq!(out["total"], 7);
+
+    let reqs: Vec<_> = fake.requests().into_iter().skip(2).collect();
+    assert_eq!(reqs.len(), 2, "检索 + count");
+    assert!(reqs.iter().any(|r| r.body.contains("count()")), "{}", reqs[0].body);
 }
 
 #[tokio::test]

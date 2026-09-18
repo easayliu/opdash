@@ -85,6 +85,35 @@ async fn operations_pairs_every_span_with_the_compare_window() {
     assert_eq!(ops.last().unwrap()["span_name"], "C", "没了的接在后面");
 }
 
+/// 接口表每个服务封顶 200 行（`MAX_OPERATIONS_PER_SERVICE`）：`span_name` 的基数不可控，
+/// 把 SQL 拼进 span 名的服务一小时上千个名字。切过之后「对比窗有、当前窗没有」这个判断对这个
+/// 服务就不成立了——排不进前 200 不等于接口没了——所以那一段要跳过它。
+#[tokio::test]
+async fn operations_are_capped_per_service_and_stop_claiming_gone() {
+    let fake = FakeClickhouse::start().await;
+    let app = serial_app(&fake).await;
+    // 当前窗：正好吐满上限
+    let full: String = (0..200).map(|i| op_row(&format!("op{i:03}"), 500 - i, 0, 10.0)).collect();
+    fake.respond(full);
+    // 对比窗：有一个当前窗这一批里没有的接口
+    fake.respond(op_row("op000", 500, 0, 10.0) + &op_row("cut", 400, 0, 30.0));
+
+    let (status, body) = get_json(
+        &app,
+        &format!("/api/services/svc/operations?from={MIDNIGHT_MS}&to={}", MIDNIGHT_MS + HOUR_MS),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["truncated"], true);
+    let ops = body["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 200, "没有补出第 201 行");
+    assert!(ops.iter().all(|o| o["span_name"] != "cut"), "被切过的服务不补「接口没了」的行");
+
+    // SQL 里确实带着每个服务的上限
+    let requests = data_requests(&fake);
+    assert!(requests[0].body.contains("LIMIT 200 BY service_name"), "{}", requests[0].body);
+}
+
 #[tokio::test]
 async fn operations_can_skip_the_compare_window() {
     let fake = FakeClickhouse::start().await;
