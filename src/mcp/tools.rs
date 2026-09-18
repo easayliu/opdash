@@ -77,19 +77,9 @@ fn schema(props: Vec<(&str, Value)>, required: &[&str]) -> Value {
 /// from / to / range 三个时间参数，几乎每个工具都有。
 fn time_props(default_range: &str) -> Vec<(&'static str, Value)> {
     vec![
-        (
-            "from",
-            string(
-                "开始时间。RFC3339 / 本地时间 / unix 秒或毫秒 / now-30m 这类相对写法。不给则 = to - range",
-            ),
-        ),
-        ("to", string("结束时间，写法同 from。不给则是现在")),
-        (
-            "range",
-            string(&format!(
-                "时间跨度，如 15m / 1h / 24h / 7d，只在没给 from 时生效。默认 {default_range}"
-            )),
-        ),
+        ("from", string("开始时间；不给 = to - range")),
+        ("to", string("结束时间，默认现在")),
+        ("range", string(&format!("时间跨度 15m / 1h / 7d，没给 from 时用，默认 {default_range}"))),
     ]
 }
 
@@ -99,22 +89,22 @@ fn log_filter_props() -> Vec<(&'static str, Value)> {
         (
             "q",
             string(
-                "关键字。空格分隔的多个词是 AND；`a OR b`；`-word` 排除；\"带 空格的短语\" 用引号。默认子串匹配、不分大小写；32 位 trace id / msgId 这类长标识符自动按整词走索引",
+                "关键字。空格分隔 = AND，`a OR b`，`-word` 排除，引号括短语；默认子串、不分大小写",
             ),
         ),
         ("regex", boolean("q 按 RE2 正则解释")),
-        ("level", strings("日志级别，如 [\"ERROR\", \"WARN\"]")),
+        ("level", strings("级别，如 [\"ERROR\"]")),
         (
             "filters",
             json!({
                 "type": "object",
-                "description": "按维度列筛，键是列名、值是一个或多个取值（多个是 OR），如 {\"service_name\": \"order\", \"pod\": [\"order-7c9-abc\", \"order-7c9-def\"]}。可用的列名见 get_meta 的 logs.dimensions（通常有 service_name / namespace / pod / container / cluster）",
+                "description": "按维度列筛，键是列名、值一个或多个（多个是 OR），如 {\"service_name\": \"order\", \"pod\": [\"a\", \"b\"]}。列名见 get_meta 的 logs.dimensions",
                 "additionalProperties": { "type": ["string", "array"], "items": { "type": "string" } },
             }),
         ),
-        ("logger", string("logger 名精确匹配")),
-        ("thread", string("线程名精确匹配")),
-        ("host", string("主机名精确匹配")),
+        ("logger", string("精确匹配")),
+        ("thread", string("精确匹配")),
+        ("host", string("精确匹配")),
     ]
 }
 
@@ -131,12 +121,8 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
             "name": name,
             "description": description,
             "inputSchema": input,
-            "annotations": {
-                "readOnlyHint": true,
-                "destructiveHint": false,
-                "idempotentHint": true,
-                "openWorldHint": false,
-            },
+            // 只留 readOnlyHint：另外几个 hint 在只读工具上没有意义，而目录是按轮计费的
+            "annotations": { "readOnlyHint": true },
         })
     };
     let mut tools = vec![
@@ -149,20 +135,20 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
             "list_services",
             "时间范围内有 span 上报的服务名列表（按 span 数排序）。不知道服务叫什么时先调它。",
             schema(
-                [time_props("1h"), vec![("limit", integer("最多几个，默认 200"))]].concat(),
+                [time_props("1h"), vec![("limit", integer("默认 200"))]].concat(),
                 &[],
             ),
         ),
         tool(
             "service_overview",
-            "服务总览：每个服务的请求量 / 错误率 / P50 / P95 / P99，以及和对比时段（默认昨天同时段）比的变化。health 字段是按全站统一阈值算出的结论（red / yellow / ok）：错误率 ≥5% 红、≥1% 黄；P95 ≥200ms 且是对比时段 3 倍红、1.5 倍黄（两边都要 ≥300 次请求）；对比时段零错误、现在开始出错也算黄。只看入口 span（Server / Consumer）。回答「现在谁不对」用这个。",
+            "每个服务的请求量 / 错误率 / P50-P99，以及和对比时段比的变化；health 是 red / yellow / ok 的结论（阈值见 instructions）。回答「现在谁不对」。只看入口 span（Server / Consumer）。",
             schema(
                 [
                     time_props("1h"),
                     vec![
-                        ("compare", enumeration("和哪个时段比：day 昨天同时段（默认，避开早晚高峰的自然涨跌）、week 上周同时段、prev 紧挨着的上一段", &["day", "week", "prev"])),
-                        ("only_unhealthy", boolean("只返回 health 不是 ok 的服务")),
-                        ("limit", integer("最多几个服务，默认 50；不健康的排在前面")),
+                        ("compare", enumeration("对比时段，默认 day（昨天同时段，避开早晚高峰）", &["day", "week", "prev"])),
+                        ("only_unhealthy", boolean("只要 health 不是 ok 的")),
+                        ("limit", integer("默认 50，不健康的排前面")),
                     ],
                 ]
                 .concat(),
@@ -171,7 +157,7 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "service_operations",
-            "一个服务的接口表：每个接口（span_name）的请求量 / 错误 / 错误率 / P50 / P95 / P99，以及和对比时段比的变化；对比时段有、现在没有的接口标 gone，反过来标 new。回答「这个服务是哪个接口不对」用这个。service 可以一次给多个（最多 24 个）横着比，那时每行会带 service。",
+            "一个服务（也可以一次给多个，最多 24 个，那时每行带 service）的接口表：每个 span_name 的量 / 错误率 / P50-P99 和对比变化；消失的标 gone、新增的标 new。回答「哪个接口不对」。",
             schema(
                 [
                     vec![
@@ -180,10 +166,10 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
                             "items": { "type": "string" },
                             "description": "服务名（service_name）；一次最多 24 个，多个时每行带 service",
                         })),
-                        ("kind", enumeration("entry = 对外提供的接口（Server / Consumer，默认）；client = 它调下游的（Client / Producer，如 HTTP 调用、SQL、Kafka 生产）", &["entry", "client"])),
-                        ("compare", enumeration("对比时段，见 service_overview；none 不查对比", &["day", "week", "prev", "none"])),
-                        ("sort", enumeration("排序：requests 请求量（默认）、errors 错误数、p95、p95_change 相对对比时段 P95 涨得最多的、errors_change 错误多出来最多的", &["requests", "errors", "p95", "p95_change", "errors_change"])),
-                        ("limit", integer("最多几行，默认 50")),
+                        ("kind", enumeration("默认 entry（对外的接口）；client = 它调下游的", &["entry", "client"])),
+                        ("compare", enumeration("对比时段，默认 day", &["day", "week", "prev", "none"])),
+                        ("sort", enumeration("默认 requests；*_change 是相对对比时段涨得最多的", &["requests", "errors", "p95", "p95_change", "errors_change"])),
+                        ("limit", integer("默认 50")),
                     ],
                     time_props("1h"),
                 ]
@@ -193,13 +179,13 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "service_timeseries",
-            "一个服务（可选：某个接口）的请求量 / 错误数 / P50 / P95 / P99 随时间的曲线，每个点带对比时段同一格的值。回答「是从什么时候开始变慢 / 开始报错的」用这个。",
+            "一个服务（可指定某个接口）的量 / 错误 / P50-P99 曲线，每个点带对比时段同一格的值。回答「从什么时候开始变慢 / 报错」。",
             schema(
                 [
                     vec![
                         ("service", string("服务名")),
                         ("span_name", string("只看这个接口")),
-                        ("compare", enumeration("对比时段，默认 day；none 不查", &["day", "week", "prev", "none"])),
+                        ("compare", enumeration("对比时段，默认 day", &["day", "week", "prev", "none"])),
                     ],
                     time_props("1h"),
                 ]
@@ -209,14 +195,14 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "error_groups",
-            "把出错的 span 按「同一种报错」归堆：异常类 + 消息 + 哪个服务哪个接口，一行一种，带次数 / 影响多少条链路 / 首次末次时间 / 一条样本链路（sample_trace + sample_span，拿去 get_trace / get_span 看堆栈）。回答「在报什么错」用这个。",
+            "出错的 span 按「同一种报错」归堆（异常类 + 消息 + 服务 + 接口），带次数 / 影响多少条链路 / 首末时间 / 一条样本链路（sample_trace 拿去 get_trace）。回答「在报什么错」。",
             schema(
                 [
                     vec![
                         ("service", string("只看这个服务")),
                         ("span_name", string("只看这个接口")),
-                        ("kind", enumeration("entry = 入口 span 的错（默认，和总览的错误率是同一口径）；client = 调下游的错；all = 全部", &["entry", "client", "all"])),
-                        ("limit", integer("最多几组，默认 30，按次数排")),
+                        ("kind", enumeration("默认 entry（和总览同口径）", &["entry", "client", "all"])),
+                        ("limit", integer("默认 30，按次数排")),
                     ],
                     time_props("1h"),
                 ]
@@ -226,21 +212,21 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "search_traces",
-            "检索链路：按服务、接口、span 类型、只看错误、耗时区间、span 属性（如 http.route=/orders、http.response.status_code=500）筛，按时间或耗时排序。返回每条 trace 的摘要（根 span、耗时、span 数、错误数、涉及的服务）。不选服务时时间范围最多 6 小时。",
+            "检索链路：按服务、接口、span 类型、只看错误、耗时区间、span / resource 属性筛，按时间或耗时排。返回每条 trace 的摘要。不选服务时范围最多 6 小时。",
             schema(
                 [
                     vec![
                         ("service", string("服务名")),
                         ("span_name", string("接口 / span 名")),
-                        ("kind", strings("span 类型：Server / Client / Producer / Consumer / Internal。sort=duration 且没给时默认只看入口（Server / Consumer）")),
+                        ("kind", strings("Server / Client / Producer / Consumer / Internal；sort=duration 时默认只看入口")),
                         ("error_only", boolean("只看出错的")),
                         ("min_ms", number("耗时下限（毫秒）")),
                         ("max_ms", number("耗时上限（毫秒）")),
-                        ("attr", strings("span 属性过滤，每项 key=value 精确匹配，只写 key 表示「有这个属性」")),
-                        ("rattr", strings("resource 属性过滤，写法同 attr，如 k8s.pod.name=xxx")),
-                        ("filters", json!({ "type": "object", "description": "span 表的维度列筛选（如 cluster），写法同 search_logs 的 filters", "additionalProperties": { "type": ["string", "array"], "items": { "type": "string" } } })),
-                        ("sort", enumeration("time 最新在前（默认）；duration 最慢在前", &["time", "duration"])),
-                        ("limit", integer("最多几条，默认 20，上限 100")),
+                        ("attr", strings("span 属性，每项 key=value；只写 key = 有这个属性")),
+                        ("rattr", strings("resource 属性，写法同 attr")),
+                        ("filters", json!({ "type": "object", "description": "span 表的维度列筛选，同 search_logs", "additionalProperties": { "type": ["string", "array"], "items": { "type": "string" } } })),
+                        ("sort", enumeration("默认 time（最新在前）", &["time", "duration"])),
+                        ("limit", integer("默认 20，上限 100")),
                     ],
                     time_props("1h"),
                 ]
@@ -250,16 +236,16 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "list_attrs",
-            "span / 指标上到底有哪些属性名，以及某个属性名有哪些取值。search_traces 的 attr / rattr、query_metric 的 by / attr / rattr 都要写属性名，别猜——先用它列一遍。on=span 看 span 表（要给 service），on=metric 看指标表（要给 metric）；scope=resource 看 resource 属性（k8s.pod.name 这类）。给了 key 就返回这个键最常见的取值和条数。统计只在最近的若干行上采样，count 是近似值。",
+            "列属性名，或某个属性名的取值分布（采样近似）。写 search_traces 的 attr / query_metric 的 by 之前先用它，别猜。on=span 要给 service，on=metric 要给 metric。",
             schema(
                 [
                     vec![
-                        ("on", enumeration("span = span 表的属性（默认）；metric = 指标表的属性", &["span", "metric"])),
-                        ("scope", enumeration("attributes = 数据点 / span 自己的属性（默认）；resource = 上报方的 resource 属性", &["attributes", "resource"])),
-                        ("service", string("哪个服务。on=span 时必填（属性名是按服务差别很大的）；on=metric 时可选")),
-                        ("metric", string("哪个指标，on=metric 时必填")),
-                        ("key", string("给了就返回这个属性键的取值分布，不给则返回属性键列表")),
-                        ("limit", integer("最多几个，列键时默认 200，列取值时默认 50")),
+                        ("on", enumeration("默认 span", &["span", "metric"])),
+                        ("scope", enumeration("默认 attributes（数据点 / span 自己的）；resource = 上报方的", &["attributes", "resource"])),
+                        ("service", string("on=span 必填")),
+                        ("metric", string("on=metric 必填")),
+                        ("key", string("给了就列这个键的取值，不给就列键名")),
+                        ("limit", integer("列键默认 200，列取值默认 50")),
                     ],
                     time_props("1h"),
                 ]
@@ -269,44 +255,44 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "get_trace",
-            "一条链路的全部 span，按开始时间排、带 depth（树的层级）、offset_ms（相对链路开始）、duration_ms、status。span 太多时保留全部出错的和最慢的那些。include_logs=true 顺带把这条 trace 的日志也取回来。",
+            "一条链路的全部 span：depth（层级）、offset_ms（相对开始）、duration_ms、status；span 太多时保留全部出错的和最慢的。include_logs 顺带取这条 trace 的日志。",
             schema(
                 vec![
-                    ("trace_id", string("32 位 hex 的 trace id")),
-                    ("at", string("这条链路大概在什么时候（从列表 / 日志 / 错误分组里拿到的时间）。带上能少扫很多数据；不带就扫全部分区")),
-                    ("max_spans", integer("最多返回几个 span，默认 200")),
-                    ("include_logs", boolean("同时返回这条 trace 的日志（按时间正序，最多 log_limit 条）")),
-                    ("log_limit", integer("include_logs 时最多几条日志，默认 100")),
+                    ("trace_id", string("32 位 hex")),
+                    ("at", string("这条链路大概什么时候（从别的结果里拿）；带上能少扫很多，不带扫全部分区")),
+                    ("max_spans", integer("默认 200")),
+                    ("include_logs", boolean("顺带取这条 trace 的日志")),
+                    ("log_limit", integer("include_logs 时几条，默认 100")),
                 ],
                 &["trace_id"],
             ),
         ),
         tool(
             "get_span",
-            "一个 span 的全部属性、resource 属性、events（异常堆栈就在 exception 事件里）和 links。get_trace 里看到出错的 span，用它看到底错在哪。",
+            "一个 span 的全部属性、resource 属性、events（异常堆栈在 exception 事件里）和 links。get_trace 里看到哪个 span 出错，用它看到底错在哪。",
             schema(
                 vec![
                     ("trace_id", string("32 位 hex")),
                     ("span_id", string("16 位 hex")),
-                    ("at", string("这个 span 大概的时间，带上更快")),
-                    ("max_chars", integer("单个属性值 / 事件属性最多保留多少字符（堆栈可能很长），默认 4000")),
+                    ("at", string("大概的时间，带上更快")),
+                    ("max_chars", integer("单个属性值保留多少字符，默认 4000")),
                 ],
                 &["trace_id", "span_id"],
             ),
         ),
         tool(
             "search_logs",
-            "检索日志：关键字 / 正则、级别、维度列（服务、namespace、pod……）、logger、线程、trace_id / span_id。默认最新在前。按 trace_id / span_id 查时可以不给时间范围（走索引）。message 超过 max_message_chars 会截断并注明原长，要全文用 log_context 或缩小范围。",
+            "检索日志：关键字 / 正则、级别、维度列、logger、线程、trace_id / span_id。默认最新在前。按 id 查可以不给时间范围（走索引）。message 超长会截断并注明原长。",
             schema(
                 [
                     log_filter_props(),
                     vec![
-                        ("trace_id", string("只看这条 trace 的日志（32 位 hex）")),
-                        ("span_id", string("只看这个 span 的日志（16 位 hex）")),
-                        ("order", enumeration("desc 最新在前（默认）；asc 最早在前", &["desc", "asc"])),
-                        ("limit", integer("最多几行，默认 50，上限 200")),
+                        ("trace_id", string("32 位 hex")),
+                        ("span_id", string("16 位 hex")),
+                        ("order", enumeration("默认 desc（最新在前）", &["desc", "asc"])),
+                        ("limit", integer("默认 50，上限 200")),
                         ("offset", integer("翻页偏移")),
-                        ("max_message_chars", integer("每条 message 最多保留多少字符，默认 2000")),
+                        ("max_message_chars", integer("单条 message 保留多少字符，默认 2000")),
                     ],
                     time_props("1h"),
                 ]
@@ -316,17 +302,17 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "log_histogram",
-            "日志条数随时间的分布，按级别分开（每个桶里 ERROR / WARN / INFO 各多少）。和 search_logs 用同一套筛选条件。回答「错误是从几点开始的、量有多大」用这个，比翻日志便宜得多。",
+            "日志条数随时间的分布，按级别分开。筛选条件同 search_logs。回答「错误几点开始的、量有多大」，比翻日志便宜得多。",
             schema([log_filter_props(), time_props("1h")].concat(), &[]),
         ),
         tool(
             "log_facets",
-            "几个维度列各自最常见的取值和条数（如 service_name / pod / level），近似计数。和 search_logs 用同一套筛选条件。回答「报错集中在哪个 pod」「这段时间有哪些服务在打日志」用这个。",
+            "几个维度列各自最常见的取值和条数（近似计数）。筛选条件同 search_logs。回答「报错集中在哪个 pod」。",
             schema(
                 [
                     vec![
-                        ("fields", strings("要统计的列，如 [\"service_name\", \"pod\", \"level\"]。可用列见 get_meta，另外 level / logger / host 也可以")),
-                        ("limit", integer("每个列最多几个取值，默认 20")),
+                        ("fields", strings("要统计的列，如 [\"pod\", \"level\"]；可用列见 get_meta，level / logger / host 也行")),
+                        ("limit", integer("每列几个取值，默认 20")),
                     ],
                     log_filter_props(),
                     time_props("1h"),
@@ -337,28 +323,28 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "log_context",
-            "某条日志前后的原文（同一台主机、同一个文件），时间正序。看一条报错前后发生了什么用这个。host / file / time 都从 search_logs 的结果行里拿。",
+            "某条日志前后的原文（同一台主机、同一个文件），时间正序。host / file / time 从 search_logs 的结果行里原样拿。",
             schema(
                 vec![
-                    ("host", string("日志行的 host")),
-                    ("file", string("日志行的 file")),
-                    ("time", string("日志行的 time（原样传回来即可）")),
+                    ("host", string("日志行里的 host")),
+                    ("file", string("日志行里的 file")),
+                    ("time", string("日志行里的 time，原样传")),
                     ("before", integer("往前几行，默认 30")),
                     ("after", integer("往后几行，默认 30")),
-                    ("max_message_chars", integer("每条 message 最多保留多少字符，默认 4000")),
+                    ("max_message_chars", integer("默认 4000")),
                 ],
                 &["host", "file", "time"],
             ),
         ),
         tool(
             "list_metrics",
-            "指标目录：时间范围内有数据的指标名、类型（Gauge / Sum / Histogram…）、单位、说明、哪些服务在报。只扫最近 6 小时。",
+            "指标目录：指标名、类型、单位、哪些服务在报。只扫最近 6 小时，很便宜。问 JVM / GC / 内存 / CPU / 线程 / 连接池 / 消息积压这类，先用它按 match 找名字，找到了再 query_metric。",
             schema(
                 [
                     vec![
-                        ("service", strings("只看这些服务报的指标")),
-                        ("match", string("指标名包含这个子串（不分大小写），如 http.server 或 jvm")),
-                        ("limit", integer("最多几个，默认 200")),
+                        ("service", strings("只看这些服务报的")),
+                        ("match", string("指标名包含这个子串，如 jvm.memory")),
+                        ("limit", integer("默认 200")),
                     ],
                     time_props("1h"),
                 ]
@@ -368,20 +354,20 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "query_metric",
-            "查一个指标的时间序列。不确定就别给 agg / field——服务端会先看这个指标是什么类型再挑（直方图→分位数 p95、counter→rate、gauge→avg），返回里的 metric_type 是它的实际类型。要自己给：counter 用 rate（每秒增量）/ increase；gauge 用 avg / max / last；直方图（如 http.server.request.duration、jvm.gc.duration）用 quantile（q 给分位数）或 mean + field=sum，次数用 rate + field=count。注意五种指标类型共用一张表，直方图的 value 列是空的，对直方图用 field=value 聚合出来是一片 0（服务端现在会直接报错而不是给你 0）。by 是分组维度：service_name 这类固定列直接写，数据点属性直接写属性名（如 http.route），resource 属性加 res: 前缀（如 res:k8s.pod.name）。",
+            "查一个上报指标（名字带点：jvm.* / process.* / http.server.*）的曲线。服务的请求量 / 错误率 / P95 不在这张表，那些用 service_*。agg / field 不给就按指标类型自动挑（直方图的 value 列是空的，别拿它聚合）。by 分组：固定列直接写，数据点属性写属性名，resource 属性加 res: 前缀。",
             schema(
                 [
                     vec![
                         ("metric", string("指标名，如 http.server.request.duration")),
-                        ("agg", enumeration("桶内聚合。不给就按指标类型自动挑", &["avg", "sum", "min", "max", "last", "count", "rate", "increase", "mean", "quantile"])),
-                        ("field", enumeration("取哪一列：Gauge / Sum 只有 value；Histogram / Summary 是 count / sum / min / max。不给就按指标类型和 agg 自动挑", &["value", "count", "sum", "min", "max"])),
+                        ("agg", enumeration("不给按类型自动挑", &["avg", "sum", "min", "max", "last", "count", "rate", "increase", "mean", "quantile"])),
+                        ("field", enumeration("取哪一列；不给按类型自动挑", &["value", "count", "sum", "min", "max"])),
                         ("by", strings("分组维度，如 [\"service_name\", \"http.route\"]")),
-                        ("q", strings("agg=quantile 时的分位数，如 [\"0.5\", \"0.95\", \"0.99\"]，默认 0.95，最多 5 个")),
+                        ("q", strings("agg=quantile 的分位数，默认 [\"0.95\"]，最多 5 个")),
                         ("service", strings("只看这些服务")),
-                        ("attr", strings("数据点属性过滤，key=value")),
-                        ("rattr", strings("resource 属性过滤，key=value，如 k8s.pod.name=xxx")),
-                        ("step", integer("桶宽（秒）。不给自动挑（最多 60 个点）")),
-                        ("limit", integer("最多几条时间线，默认 10，按量大的优先")),
+                        ("attr", strings("数据点属性，key=value")),
+                        ("rattr", strings("resource 属性，key=value")),
+                        ("step", integer("桶宽（秒），不给自动挑")),
+                        ("limit", integer("最多几条时间线，默认 10")),
                     ],
                     time_props("1h"),
                 ]
@@ -391,15 +377,15 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "metric_exemplars",
-            "指标点上挂的 trace id（exemplar）：直方图里最慢的那些请求分别是哪条链路，按值从大到小。从 query_metric 看到 P99 尖峰之后用它，不用再拿时间去 search_traces 撞——拿到 trace_id 直接 get_trace。只有埋点上报了 exemplar 的指标有（一般是 http.server.request.duration 这类直方图）。",
+            "指标点上挂的 trace id：尖峰直接换成一条链路，拿去 get_trace。query_metric 看到 P99 尖峰之后用它，不用再按时间去撞。只有上报了 exemplar 的指标（一般是直方图）有。",
             schema(
                 [
                     vec![
-                        ("metric", string("指标名，如 http.server.request.duration")),
+                        ("metric", string("指标名")),
                         ("service", strings("只看这些服务")),
-                        ("attr", strings("数据点属性过滤，key=value")),
-                        ("rattr", strings("resource 属性过滤，key=value")),
-                        ("limit", integer("最多几条，默认 20，上限 500")),
+                        ("attr", strings("数据点属性，key=value")),
+                        ("rattr", strings("resource 属性，key=value")),
+                        ("limit", integer("默认 20，上限 500")),
                     ],
                     time_props("1h"),
                 ]
@@ -409,13 +395,13 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "metric_events",
-            "进程重启 / pod 新启动的时刻：restart = 累积 counter 掉回去了（原地重启），start = 这个 pod 在窗口里第一次出现（发布 / 扩容）。「14:02 延迟尖峰」和「14:01 重启」对得上就不用再查了。metric 要给一个累积 counter，JVM 服务用 jvm.cpu.time 最干净；不给 service 就是全站的。",
+            "进程重启 / pod 新启动的时刻：restart = 累积 counter 掉回去了，start = 这个 pod 在窗口里第一次出现。metric 给一个累积 counter，JVM 服务用 jvm.cpu.time。",
             schema(
                 [
                     vec![
-                        ("metric", string("一个累积 counter 指标名，如 jvm.cpu.time / process.cpu.time")),
+                        ("metric", string("一个累积 counter，如 jvm.cpu.time")),
                         ("service", strings("只看这些服务")),
-                        ("field", enumeration("counter 的列，默认 value；直方图给 count", &["value", "count", "sum"])),
+                        ("field", enumeration("默认 value；直方图用 count", &["value", "count", "sum"])),
                     ],
                     time_props("1h"),
                 ]
@@ -427,7 +413,27 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
     if !metrics_enabled {
         tools.retain(|t| !METRIC_TOOLS.contains(&t["name"].as_str().unwrap_or("")));
     }
+    // 描述前面统一标一句数据来源，和 instructions 里的术语表对齐
+    for t in &mut tools {
+        let source = source_of(t["name"].as_str().unwrap_or(""));
+        let desc = t["description"].as_str().unwrap_or("").to_owned();
+        t["description"] = json!(format!("[{source}] {desc}"));
+    }
     tools
+}
+
+/// 每个工具吃的是哪张表。opdash 里「指标」是个重载的词：服务的请求量 / 错误率 / 延迟分位是
+/// **span 表**现算的，JVM / GC / CPU / 连接池那些是 metricpipe 上报到**指标表**的。两类工具的
+/// 描述里都有「请求量」「P95」「指标」这些字眼，模型光读描述分不出来，问「看指标」时经常走错
+/// 一边。来源标在描述最前面，配合 [`crate::mcp::instructions`] 里的术语表消歧。
+fn source_of(name: &str) -> &'static str {
+    match name {
+        "get_meta" => "元信息",
+        "search_logs" | "log_histogram" | "log_facets" | "log_context" => "日志表",
+        "list_metrics" | "query_metric" | "metric_exemplars" | "metric_events" => "指标表",
+        "list_attrs" => "span 表 / 指标表",
+        _ => "span 表",
+    }
 }
 
 /// 指标表没启用时要从目录里拿掉的工具。
@@ -703,7 +709,9 @@ impl Qs {
 /// 单次工具结果的字节上限。`search_logs` 最多能要 200 行 × 20 万字符的 message，真返回回去就是
 /// 几十 MB 灌进模型的上下文——API 那边的护栏管的是 ClickHouse 读多少行，管不到这一头。超了就
 /// 砍列表、再不行截长文本，并在 notes 里说清楚砍了什么。
-const MAX_TOOL_BYTES: usize = 256 << 10;
+///
+/// 64 KiB 大约是两万多 token：一次工具调用最多吃掉这么多上下文，正常的一页日志（50 行）远用不到。
+const MAX_TOOL_BYTES: usize = 64 << 10;
 
 /// 整份工具目录（含指标工具），校验参数名用。
 fn all_tools() -> &'static [Value] {
@@ -799,12 +807,28 @@ fn fit_budget(value: Value, budget: usize) -> Value {
     Value::Object(map)
 }
 
+/// 一次工具调用的结果：给模型的文本，外加一个「一条记录都没有」的标记——那既可能是范围不对，
+/// 也可能是选错了工具，日志里单独标出来才看得见这类问题有多少。
+pub struct ToolOutput {
+    pub text: String,
+    pub empty: bool,
+}
+
+/// 结果里一条记录都没有：顶层至少有一个列表，而且所有列表都是空的。
+fn is_empty_result(v: &Value) -> bool {
+    let Some(map) = v.as_object() else {
+        return false;
+    };
+    let mut lists = map.values().filter_map(Value::as_array).peekable();
+    lists.peek().is_some() && lists.all(Vec::is_empty)
+}
+
 /// 跑一个工具，返回给模型看的文本（紧凑 JSON）。
 pub async fn call(
     mcp: &Mcp,
     name: &str,
     arguments: &Map<String, Value>,
-) -> Result<String, ToolError> {
+) -> Result<ToolOutput, ToolError> {
     let Some(def) = all_tools().iter().find(|t| t["name"] == name) else {
         return Err(ToolError::Unknown);
     };
@@ -832,7 +856,9 @@ pub async fn call(
         _ => return Err(ToolError::Unknown),
     };
     let value = fit_budget(out.map_err(ToolError::Failed)?, MAX_TOOL_BYTES);
-    serde_json::to_string(&value).map_err(|e| ToolError::Internal(e.to_string()))
+    let empty = is_empty_result(&value);
+    let text = serde_json::to_string(&value).map_err(|e| ToolError::Internal(e.to_string()))?;
+    Ok(ToolOutput { text, empty })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1102,6 +1128,13 @@ async fn service_overview(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
             format!(
                 "共 {total} 个服务，只返回了前 {limit} 个；可以加 limit 或 only_unhealthy=true"
             ),
+        );
+    }
+    if total == 0 {
+        note(
+            out.as_object_mut().expect("json 对象"),
+            "这段时间没有入口 span。如果你要找的是 JVM / GC / 堆内存 / CPU 这类上报指标，             它们不在这张表里，用 list_metrics 找名字、query_metric 查曲线"
+                .to_owned(),
         );
     }
     Ok(out)
@@ -2044,9 +2077,26 @@ mod tests {
             for r in arr(&t["inputSchema"]["required"]) {
                 assert!(t["inputSchema"]["properties"].get(r.as_str().unwrap()).is_some(), "{t}");
             }
-            // 只读标注：客户端靠它决定要不要拦一下问人
-            assert_eq!(t["annotations"]["readOnlyHint"], true, "{t}");
-            assert_eq!(t["annotations"]["destructiveHint"], false, "{t}");
+            // 只读标注：客户端靠它决定要不要拦一下问人。只留这一个，别的 hint 在只读工具上
+            // 没有意义，而目录是每轮都要重发的
+            assert_eq!(t["annotations"], json!({ "readOnlyHint": true }), "{t}");
+            // 描述开头统一标数据来源，和 instructions 的术语表对上
+            assert!(t["description"].as_str().unwrap().starts_with('['), "{t}");
+        }
+    }
+
+    /// 工具目录在客户端那边是**每一轮**都要重发的（它在系统提示里），所以它的大小是按轮计费的。
+    /// 这个上限是拿来挡「描述随手越写越长」的：真要加，先想想能不能把哪段挪进 instructions
+    /// （那个只在握手时发一次）。
+    #[test]
+    fn the_tool_catalog_stays_within_its_token_budget() {
+        let json = serde_json::to_string(&list(true)).unwrap();
+        let chars = json.chars().count();
+        assert!(chars < 16_000, "工具目录 {chars} 字符，超预算了（约 {} token）", chars / 2);
+        // 单个工具别写成小作文
+        for t in list(true) {
+            let n = t["description"].as_str().unwrap().chars().count();
+            assert!(n < 500, "{} 的描述 {n} 字符，太长了", t["name"]);
         }
     }
 

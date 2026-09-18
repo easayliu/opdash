@@ -31,3 +31,6 @@ ui/tsconfig.tsbuildinfo
 
 # k8s 部署文件：带内部域名和密钥，只留本地
 deploy/
+
+# 给 Claude Code 看的约定，只留本地
+CLAUDE.md

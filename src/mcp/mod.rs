@@ -265,8 +265,11 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
                 Value::Object(m) => m,
                 _ => return Err(RpcError::new(INVALID_PARAMS, "arguments 应是 JSON 对象")),
             };
-            match tools::call(mcp, name, arguments).await {
-                Ok(text) => Ok(json!({
+            let started = std::time::Instant::now();
+            let out = tools::call(mcp, name, arguments).await;
+            log_tool_call(name, arguments, &out, started.elapsed().as_millis());
+            match out {
+                Ok(tools::ToolOutput { text, .. }) => Ok(json!({
                     "content": [{ "type": "text", "text": text }],
                     "isError": false,
                 })),
@@ -292,6 +295,47 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
         // 没声明 resources / prompts / logging 能力，客户端问了就按协议回「没有这个方法」
         other => Err(RpcError::new(METHOD_NOT_FOUND, format!("不支持的方法: {other}"))),
     }
+}
+
+/// 工具调用记一条 info 日志。`dispatch` 那条只有 `method`，而所有调用的 method 都是 `tools/call`
+/// ——看不出调了哪个工具、传了什么、回来是不是空的，「模型是不是老走错工具」这种问题就只能
+/// 靠感觉。这条是拿来数的：tool + 参数 + 空不空 + 耗时。
+fn log_tool_call(
+    name: &str,
+    arguments: &serde_json::Map<String, Value>,
+    out: &Result<tools::ToolOutput, tools::ToolError>,
+    elapsed_ms: u128,
+) {
+    // 参数原样记一份（截断）：排查「问指标却调了 service_overview」要的就是它
+    let args = truncate_for_log(&Value::Object(arguments.clone()).to_string());
+    match out {
+        Ok(o) => tracing::info!(
+            tool = name,
+            %args,
+            elapsed_ms,
+            bytes = o.text.len(),
+            empty = o.empty,
+            "MCP 工具调用"
+        ),
+        Err(tools::ToolError::Failed(msg)) => {
+            tracing::info!(tool = name, %args, elapsed_ms, error = %truncate_for_log(msg), "MCP 工具失败")
+        }
+        Err(tools::ToolError::Unknown) => {
+            tracing::info!(tool = name, %args, elapsed_ms, error = "没有这个工具", "MCP 工具失败")
+        }
+        Err(tools::ToolError::Internal(msg)) => {
+            tracing::warn!(tool = name, %args, elapsed_ms, error = %msg, "MCP 工具内部错误")
+        }
+    }
+}
+
+/// 日志里一行别太长：关键字搜索的 q 可能很长，取前面够认出是什么就行。
+fn truncate_for_log(s: &str) -> String {
+    const MAX: usize = 300;
+    if s.chars().count() <= MAX {
+        return s.to_owned();
+    }
+    s.chars().take(MAX).collect::<String>() + "…"
 }
 
 /// 这个部署有没有指标表。表结构是带缓存的（`initialize` 通常已经读过一遍），这里基本不会真去
@@ -334,6 +378,11 @@ async fn instructions(mcp: &Mcp) -> String {
          4. 指标：query_metric 看曲线，metric_exemplars 把尖峰直接换成 trace_id（省得拿时间去撞），metric_events 看这个时刻是不是有重启 / 发布。\n\
          \n\
          要按属性筛（search_traces 的 attr、query_metric 的 by / attr）之前先 list_attrs 列一遍属性名，别猜。\n\
+         \n\
+         【术语：「指标」在 opdash 里是两回事，别走错工具】\n\
+         * 服务指标（RED）= 请求量 / 错误率 / P50 / P95 / P99：**从 span 表现算的**，工具是 service_overview /          service_operations / service_timeseries。问「哪个服务不对」「这个接口是不是变慢了」「错误率涨了没」走这边。\n\
+         * 上报指标 = metricpipe 采上来的 OTel 指标，名字带点（jvm.gc.duration、jvm.memory.used、process.cpu.time、         http.server.request.duration）：**在指标表里**，工具是 list_metrics / query_metric / metric_exemplars / metric_events。         问 JVM、GC、堆 / 元空间、CPU、线程、连接池、消息积压、缓存命中率这类**进程和资源**的情况走这边。\n\
+         * 分不清就先 list_metrics(match=\"关键字\")：只扫最近 6 小时、很便宜。名字命中了就用指标工具，         一个都没命中才回到 service_* 或直接问清楚。用户说「指标」但给的是服务名 + 慢 / 报错 / 量，那是 RED。\n\
          \n\
          时间参数：from / to / at / time 接受 RFC3339（2026-09-18T10:00:00+08:00）、本地时间（2026-09-18 10:00:00，时区 {tz}）、\
          unix 秒或毫秒、相对写法（now-30m、-2h、now）。range 是时间跨度（15m / 1h / 24h / 7d）：不给 from 时 from = to - range，to 默认现在。\
