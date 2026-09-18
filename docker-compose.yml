@@ -25,6 +25,8 @@ services:
       - OPDASH_OIDC_REQUIRED_ROLE=${OPDASH_OIDC_REQUIRED_ROLE:-}
       - OPDASH_PUBLIC_URL=${OPDASH_PUBLIC_URL:-}
       - OPDASH_SESSION_SECRET=${OPDASH_SESSION_SECRET:-}
+      # 用户自己生成的 API key（MCP / 脚本用）最长有效期
+      - OPDASH_API_KEY_TTL=${OPDASH_API_KEY_TTL:-90d}
       - RUST_LOG=${RUST_LOG:-info}
     extra_hosts:
       - "host.docker.internal:host-gateway"

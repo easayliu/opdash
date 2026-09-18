@@ -55,11 +55,13 @@ pub fn api_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// 整个应用：API + 内嵌前端 + 可选认证（Basic / OIDC）。
+/// 整个应用：API + MCP 端点 + 内嵌前端 + 可选认证（Basic / OIDC）。
 ///
 /// `/api/health` 放在认证外面，k8s 探针不带密码；`/api/auth/*` 也在外面，不然没法登录。
+/// `/mcp`（给 AI 助手用的，见 [`crate::mcp`]）和 API 一样在认证里面。
 pub fn app(state: AppState, auth: Auth) -> Router {
     let mut protected = api_router(state.clone())
+        .merge(crate::mcp::router(state.clone()))
         .route("/", get(ui::fallback).post(ui::redirect_root_post))
         .fallback_service(get(ui::fallback));
     if auth.enabled() {

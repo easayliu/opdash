@@ -24,8 +24,25 @@ export interface TableMeta {
 export interface AuthMe {
   mode: 'none' | 'basic' | 'oidc'
   user: { name: string; email: string | null } | null
+  /** 这个请求是怎么认出来的；没认出来是 null */
+  identity: 'session' | 'basic' | 'api_key' | null
   login_url: string | null
   logout_url: string | null
+  /** 能不能生成 API key；没开认证是 null */
+  api_keys: { max_ttl: string; persistent: boolean } | null
+}
+
+/** POST /api/auth/keys：刚签出来的 API key，`key` 只给这一次。 */
+export interface ApiKeyCreated {
+  key: string
+  id: string
+  name: string
+  user: string
+  created_at: string
+  expires_at: string
+  expires_in: string
+  persistent: boolean
+  mcp_url: string
 }
 
 export interface Meta {

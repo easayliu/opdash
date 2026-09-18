@@ -387,6 +387,46 @@ pub async fn get_full(
     (status, headers, body)
 }
 
+/// 发一个 JSON 体的 POST，拿回 (状态码, 响应头, 响应体)。
+pub async fn post_full(
+    app: &axum::Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let mut req = axum::http::Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let response =
+        app.clone().oneshot(req.body(Body::from(body.to_owned())).unwrap()).await.unwrap();
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+        .collect();
+    let body = response.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, headers, body)
+}
+
+pub async fn post_json(
+    app: &axum::Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (u16, serde_json::Value) {
+    let (status, _, bytes) = post_full(app, uri, body, headers).await;
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
 pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }

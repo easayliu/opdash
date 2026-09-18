@@ -13,6 +13,7 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
   浏览器 ──▶ /api/*  axum ── 参数化 SQL、readonly=2 ──▶ ClickHouse HTTP（单机或 Distributed）
      ▲          │
      └── /  内嵌 SPA（rust-embed，ui/dist）
+  AI 助手 ──▶ /mcp   MCP 工具，在进程内复用同一套 /api/*（见「给 AI 用：MCP」）
 ```
 
 ## 页面
@@ -205,7 +206,8 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--oidc-scopes` | `OPDASH_OIDC_SCOPES` | `openid profile email` | 授权请求的 scope |
 | `--public-url` | `OPDASH_PUBLIC_URL` | 按请求头推 | 浏览器访问 opdash 的地址，拼 OIDC 回调用；在 Ingress 后面按 `X-Forwarded-Proto` / `Host` 推一般是对的，本地 vite 开发配 `http://localhost:5173` |
 | `--session-ttl` | `OPDASH_SESSION_TTL` | `12h` | 登录会话多久失效，到期重新跳一次 Keycloak |
-| `--session-secret` | `OPDASH_SESSION_SECRET` | 随机 | 会话 cookie 的签名密钥。不配则每次启动随机生成（重启后要重新登录）；多副本必须配同一个 |
+| `--session-secret` | `OPDASH_SESSION_SECRET` | 随机 | 会话 cookie 和 API key 的签名密钥。不配则每次启动随机生成（重启后要重新登录、发出去的 API key 全部失效）；多副本必须配同一个 |
+| `--api-key-ttl` | `OPDASH_API_KEY_TTL` | `90d` | 用户自己生成的 API key（给 MCP / 脚本用）最长有效多久，生成时可以选更短的。key 是签名 token、服务端不存也没法单个吊销，别给太长 |
 
 `RUST_LOG=opdash=debug` 能看到每条 SQL 和绑定的参数。
 
@@ -244,15 +246,101 @@ OPDASH_SESSION_SECRET=$(openssl rand -hex 32)            # 可选；多副本必
 所以 **issuer 必须是 https**。顶栏右侧显示用户名，退出会顺带结束 Keycloak 那边的 SSO 会话。
 
 ```text
-GET /api/auth/me        登录方式和当前用户；没登录也 200（前端据此跳登录）
-GET /api/auth/login     ?next=/logs   生成登录票，跳 Keycloak
-GET /api/auth/callback  Keycloak 跳回来的地址
-GET /api/auth/logout    清会话，跳 Keycloak 登出再回首页
+GET  /api/auth/me        登录方式和当前用户；没登录也 200（前端据此跳登录）
+GET  /api/auth/login     ?next=/logs   生成登录票，跳 Keycloak
+GET  /api/auth/callback  Keycloak 跳回来的地址
+GET  /api/auth/logout    清会话，跳 Keycloak 登出再回首页
+POST /api/auth/keys      登录用户给自己签一把 API key，见下面「API key」
 ```
+
+### API key：把登录「拿出来」给 MCP 客户端和脚本
+
+Claude Code 这类 MCP 客户端和 curl 不会跳浏览器登录，所以登录用户可以在页面右上角的钥匙图标里
+**给自己生成一把 API key**（`POST /api/auth/keys`，body 可选 `{"name": "claude-code", "ttl": "30d"}`），
+之后带 `Authorization: Bearer opdash_…` 访问任何接口，包括 `/mcp`。key 代表签发它的这个人，权限和他
+登录后一样（本来也只有「能看」一种权限），`/api/auth/me` 会告诉你这个请求是 `session` / `basic` /
+`api_key` 哪种身份进来的，日志里也记着 key 的 id 和名字。
+
+key 和会话 cookie 是同一种东西：一小段 JSON（谁、叫什么、什么时候发的）用 `--session-secret` 这把
+钥匙 HMAC 签名，带过期时间，**服务端不存**。opdash 是只读的、没有写库路径，为了一张 key 表去写
+ClickHouse 或挂一个文件卷不值得。代价是：
+
+* **没法单个吊销**：丢了只能等它过期，或者换 `--session-secret` 让全部作废（会话也一起作废）。
+  所以 `--api-key-ttl` 默认只有 90 天，页面上生成时可以选 7 / 30 / 90 天。
+* **没配 `--session-secret` 就别指望它跨重启**：密钥随机生成，opdash 一重启所有 key 失效；页面上会
+  提醒。多副本部署本来就必须配同一个。
+* **key 不能再签 key**：拿 API key 调 `POST /api/auth/keys` 是 403，一把泄露的 key 不该能给自己续命。
+* 不用审批：谁登录了谁就能给自己签。要限制谁能进 opdash，用 `--oidc-required-role`。
 
 没登录的请求：浏览器导航（Accept 带 `text/html`）302 去登录；API 和静态资源回
 `401 {"error":"需要登录","kind":"unauthenticated","login_url":"/api/auth/login"}`，前端拿到就整页跳登录。
 `/api/health` 和 `/api/auth/*` 不认证。
+
+## 给 AI 用：MCP
+
+同一个二进制还开着一个 [MCP](https://modelcontextprotocol.io)（Model Context Protocol）端点 `POST /mcp`，
+Claude Code / Claude Desktop / Cursor 这类 AI 助手接上之后，「昨天下午 order 服务为什么慢」这种问题它自己
+会去查：先看服务总览谁不对，再看是哪个接口，拉错误分组，拿样本链路看瀑布图和异常堆栈，翻对应的日志。
+人只用问问题。
+
+先在页面右上角的钥匙图标里给自己生成一把 API key（见上面「API key」），页面会把接入命令拼好：
+
+```bash
+# Claude Code：Streamable HTTP 传输，API key 放在请求头里
+claude mcp add --transport http opdash https://opdash.example.com/mcp \
+  --header "Authorization: Bearer opdash_…"
+
+# 试一下握手（不需要客户端）
+curl -s -H "Authorization: Bearer opdash_…" https://opdash.example.com/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+```
+
+### 有哪些工具
+
+| 工具 | 干什么 | 对应的页面 / 接口 |
+| --- | --- | --- |
+| `get_meta` | 版本、时区、当前时间、三张表各有哪些可筛的维度列、指标表是否启用 | `/api/meta` |
+| `list_services` | 时间范围内有 span 的服务名 | `/api/traces/values` |
+| `service_overview` | 每个服务的请求量 / 错误率 / P95 和对比时段的变化，`health` 字段按首页同一套阈值给出 red / yellow / ok；坏的排前面 | 首页 |
+| `service_operations` | 一个服务的接口表，每列带对比时段的变化，`gone` / `new` 标出消失和新出现的接口；可按 P95 涨幅、错误增量排 | `/services/:name` |
+| `service_timeseries` | 请求量 / 错误 / P50 / P95 / P99 随时间的曲线，叠对比时段 | `/services/:name` |
+| `error_groups` | 出错的 span 按「同一种报错」归堆，带样本链路 | `/errors` |
+| `search_traces` | 按服务 / 接口 / span 类型 / 只看错误 / 耗时区间 / 属性筛链路 | `/traces` |
+| `get_trace` | 一条链路的全部 span，带层级 `depth`、相对开始的 `offset_ms`；太多时保留全部出错的和最慢的；`include_logs` 顺带取日志 | `/traces/:trace_id` |
+| `get_span` | 一个 span 的属性 / resource / events（异常堆栈）/ links | 详情页右侧面板 |
+| `search_logs` | 关键字 / 正则 / 级别 / 维度列 / trace_id / span_id 检索日志 | `/logs` |
+| `log_histogram` | 日志条数按时间、按级别的分布——「错误从几点开始的」 | 日志页直方图 |
+| `log_facets` | 几个维度列各自最常见的取值——「报错集中在哪个 pod」 | 日志页下拉框 |
+| `log_context` | 某条日志前后几行 | 日志页上下文 |
+| `list_metrics` / `query_metric` | 指标目录；按 agg / field / by / 过滤查一个指标的时间序列 | `/metrics` 全部指标 |
+| `metric_events` | 进程重启 / pod 新启动的时刻 | 看板上的虚线 |
+
+工具不直接碰查询层：每个工具把参数翻译成 `/api/*` 的查询串，在进程内走一遍同一个 axum Router，
+拿到 JSON 再整理成给模型看的形状。所以参数校验、错误提示、读量护栏和页面是同一套——模型传了
+不存在的列名，看到的是和页面一样的那句「不认识的筛选列 x；可用的筛选列: …」，照着改就行。
+整理只做减法：时间戳一律转成 `--timezone` 的本地时间（模型不用自己算毫秒），空字段省掉，
+`stats` / sparkline / 空桶这类页面装饰不给，长 message 和堆栈按参数截断并注明原长，
+大列表的默认上限比页面小（日志 50 行、链路 20 条、错误 30 组）。
+
+时间参数宽松：`from` / `to` / `at` 认 RFC3339、不带时区的本地时间（按 `--timezone`）、unix 秒或毫秒、
+`now-30m` 这类相对写法；`range` 是跨度（`15m` / `1h` / `24h`），不给 `from` 时 `from = to - range`。
+`initialize` 的 `instructions` 里写了排障套路、这些写法、当前时间和表结构里实际可筛的列名，
+模型接上就知道该怎么用。
+
+### 传输和认证
+
+* **Streamable HTTP、无状态**：一次 POST 一个 JSON-RPC 请求（旧协议的批量数组也认），
+  回一个 JSON；不发 `Mcp-Session-Id`，`GET /mcp`（服务端推送流）和 `DELETE /mcp`（结束会话）回 405。
+  没有会话就没有要清理的东西，多副本部署也不用粘连接。
+* **认证和页面同一套**：`/mcp` 在认证中间件里面，认会话 cookie、Basic 和 API key 三种身份。
+  MCP 客户端不会跳浏览器登录，所以走 API key：每个人用自己的 key，日志里能看出是谁在查；
+  不要把 `--basic-auth` 的共享密码发给大家。没开认证的部署 `/mcp` 也不认证。
+* **Origin 校验**：请求带了 `Origin` 头就要和 `Host` 是同一个主机，否则 403（协议要求的防
+  DNS rebinding）。命令行客户端不带 Origin，不受影响。
+* 工具调用的失败（参数不对、查询超时、读量超限）作为**工具结果**回去（`isError: true`），
+  模型看得到原因、能自己改参数重试；只有「没有这个工具」「方法不存在」这类协议层的问题才是
+  JSON-RPC 错误。
 
 ## 表结构：程序知道什么、不知道什么
 
@@ -318,13 +406,23 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   扫的是时间范围内的全部行。
 * 关键字搜索择机走 **token 索引**。`app_log_local` 上有
   `INDEX idx_message_tokens lower(message) TYPE tokenbf_v1(131072, 3, 0) GRANULARITY 1`，
-  词是**纯 ASCII 字母数字且 ≥16 位**时（span id 16 位、trace id / msgId 32 位）发
-  `hasToken(lower(message), 小写词)`，能整块跳过不含它的 granule；其余仍是子串匹配。线上实测
-  一小时窗口查一个 msgId：**7.83 GB / 1063 ms → 0.030 GB / 140 ms，命中数一致**。
+  词按 tokenizer 同样的规则（非字母数字的 ASCII 字符，下划线也算）切开，**够长的（≥16 位）token**
+  才当 needle：
+
+  * 纯 id（span id 16 位、trace id / msgId 32 位）：发 `hasToken(lower(message), 小写词)`，单独就是
+    完整语义。线上实测一小时窗口查一个 msgId：**7.83 GB / 1063 ms → 0.030 GB / 140 ms，命中数一致**。
+  * 键加 id（`msgId:AC10…`、`traceId=…`）：id 那个 token 发 `hasToken` 跳 granule，再 AND 上原来的
+    子串条件保证键也对得上。2026-09-18 实测一小时窗 `msgId":"AC10…`（键加 32 位 id）：
+    **10.24 GB / 1.2 s → 0.02 GB / 0.2 s**（读 630 万行 → 4661 行，剩下的是 bloom filter 的误判）。
+  * `RESULT_CHANGE`、`im_enter_direct_msg` 这类切出来全是短词的复合标识符**不发**：2026-09-18 量过
+    （1 小时窗、3 分片），`change` / `result` 各命中 359 / 364 个 granule，一个都跳不掉，多出来的两个
+    `hasToken` 反而让墙钟多 10% ~ 40%（1320 → 1950 ms、1517 → 1655 ms）。常见词怎么组合都进不了索引，
+    原因见下面「跳数索引的上限」；这类词 24 小时的子串检索就是要读 250 ~ 290 GB（实测 10 ~ 12 GB /
+    小时），护栏按总量算，100 GiB 在十来个小时处必然触发。
 
   规则的边角，改之前先看清楚：
 
-  * 判断必须严格（`^[A-Za-z0-9]+$`）——`hasToken` 遇到带分隔符的 needle 会**抛异常**而不是返回空。
+  * needle 必须是切好的纯字母数字 token——`hasToken` 遇到带分隔符的 needle 会**抛异常**而不是返回空。
   * 排除词（`-词` / `NOT 词`）一律保持子串语义：整词比子串窄，取反之后变宽，会漏掉本该排除的行；
     否定条件本来也用不上 bloom filter。
   * OR 组仍走 `multiSearchAnyCaseInsensitiveUTF8`，不进索引。

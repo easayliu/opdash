@@ -3,8 +3,8 @@
 //! 排序键是 `(timestamp, level, trace_id)`：带时间范围的查询按这个顺序 `ORDER BY ... LIMIT n`
 //! 能倒着读、读够就停，不用把整段时间的日志都排一遍（排序键以外的列参与排序会退化，见 [`order_by`]）；
 //! 按 trace id 查走 `idx_trace_id`
-//! bloom filter，不带时间范围也不慢。`message` 没有全文索引，关键字是逐行扫时间范围内的
-//! 数据，所以时间范围是所有查询的第一道闸。
+//! bloom filter，不带时间范围也不慢。`message` 上只有 token 索引（够长的标识符才用得上，见
+//! [`token_needles`]），一般关键字是逐行扫时间范围内的数据，所以时间范围是所有查询的第一道闸。
 
 use serde::{Deserialize, Serialize};
 
@@ -34,11 +34,42 @@ pub enum Expr {
 /// 标识符才切过去——span id 16 位、trace id / msgId 32 位都覆盖得到。
 const TOKEN_MIN_LEN: usize = 16;
 
-/// 这个词能不能走 token 索引：纯 ASCII 字母数字、且够长。判断必须严格——`hasToken` 遇到带分隔符的
-/// needle 会直接抛异常，不是返回空。返回小写形式，因为索引建在 `lower(message)` 上。
-fn token_needle(term: &str) -> Option<String> {
-    let ok = term.len() >= TOKEN_MIN_LEN && term.chars().all(|c| c.is_ascii_alphanumeric());
-    ok.then(|| term.to_ascii_lowercase())
+/// 一个词里最多发几个 `hasToken`，多了只是把 WHERE 拉长。留最长的几个——越长越稀疏。
+const MAX_TOKENS_PER_TERM: usize = 4;
+
+/// 这个词能不能走 token 索引；能就给出要发 `hasToken` 的 needle（小写，索引建在 `lower(message)` 上）。
+///
+/// ClickHouse 的 tokenizer 按「非字母数字的 ASCII 字符」切词（下划线也算），`hasToken` 的 needle
+/// 只能是切好的纯字母数字 token，带分隔符会直接抛异常而不是返回空。所以这里先把词按同样的规则
+/// 切开，再只挑 **够长的（≥ [`TOKEN_MIN_LEN`]）** token 当 needle：
+///
+/// * 纯 id（`AC10…`）：一个 needle，`hasToken` 单独就是完整语义；
+/// * `msgId:AC10…`、`traceId=…` 这种键加 id：id 那个 token 当 needle 让索引跳 granule，调用方
+///   再 AND 上子串条件保证前面的键也对得上；
+/// * `RESULT_CHANGE`、`im_enter_direct_msg`：切出来全是短词，**不发**。线上量过（2026-09-18，
+///   1 小时窗、3 分片）：`change` / `result` 各命中 359 / 364 个 granule，一个都跳不掉，而多出来的
+///   两个 `hasToken` 让墙钟多 10% ~ 40%（1320 → 1950 ms、1517 → 1655 ms）。常见词无论怎么组合都
+///   进不了索引，见 README「跳数索引的上限」。
+///
+/// 只认全 ASCII 的词：中文字节在 tokenizer 里也算分隔符，但没必要在这条路上证明它。
+fn token_needles(term: &str) -> Option<Vec<String>> {
+    if !term.is_ascii() {
+        return None;
+    }
+    let mut ids: Vec<String> = term
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| t.len() >= TOKEN_MIN_LEN)
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    ids.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    ids.dedup();
+    ids.truncate(MAX_TOKENS_PER_TERM);
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// 单个纯字母数字的词（没有分隔符）：`hasToken` 自己就是完整语义，不用再 AND 子串条件。
+fn is_single_token(term: &str) -> bool {
+    !term.is_empty() && term.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 impl Expr {
@@ -96,13 +127,29 @@ impl Expr {
     fn message_sql(&self, b: &mut Bindings) -> String {
         match self {
             // 够长的整词走 tokenbf_v1，能整块跳过不含它的 granule（线上实测同一个 msgId
-            // 读取量 0.73 GB → 0.08 GB）；其余仍是子串匹配
-            Expr::Term(t) => match token_needle(t) {
-                Some(tok) => format!("hasToken(lower(message), {})", b.bind("String", &tok)),
-                None => {
-                    format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", t))
+            // 读取量 0.73 GB → 0.08 GB）；其余仍是子串匹配。见 [`token_needles`]
+            Expr::Term(t) => {
+                match token_needles(t) {
+                    Some(toks) if is_single_token(t) => {
+                        format!("hasToken(lower(message), {})", b.bind("String", &toks[0]))
+                    }
+                    Some(toks) => {
+                        // 子串条件写在前面：`and` 是短路求值，索引跳不掉的 granule 里先算它，
+                        // 稀有词基本不会走到后面的 hasToken；索引分析看的是整个 WHERE，顺序无关
+                        let mut parts = vec![format!(
+                            "positionCaseInsensitiveUTF8(message, {}) > 0",
+                            b.bind("String", t)
+                        )];
+                        parts.extend(toks.iter().map(|tok| {
+                            format!("hasToken(lower(message), {})", b.bind("String", tok))
+                        }));
+                        parts.join(" AND ")
+                    }
+                    None => {
+                        format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", t))
+                    }
                 }
-            },
+            }
             // 排除词一律保持子串语义：整词比子串窄，取反之后就变宽了，会漏掉本该排除的行；
             // 而且否定条件本来就用不上 bloom filter（它只能证明「可能有」）
             Expr::Not(inner) => match &**inner {
@@ -399,7 +446,7 @@ impl LogFilter {
         fn walk(e: &Expr, out: &mut Vec<String>) {
             match e {
                 Expr::Term(t) => {
-                    if token_needle(t).is_some() {
+                    if token_needles(t).is_some() {
                         out.push(t.clone());
                     }
                 }
@@ -962,14 +1009,45 @@ mod tests {
         assert_eq!(query.params()[2].1, "ac1062c800014a070cf02cd72b78e8ed");
         assert_eq!(filter.token_terms(), vec!["AC1062C800014A070CF02CD72B78E8ED"]);
 
-        // 短词、带分隔符的词、中文：都退回子串（hasToken 遇到分隔符会抛异常）
-        for q_str in
-            ["health", "WX_RECOGNIZE_SHADOW", "msgId:", "直播间主动触达", "CHANGE|私信手机号为空"]
-        {
+        // 短词、切出来全是短词的复合词、中文：都退回子串（hasToken 遇到分隔符会抛异常，
+        // needle 只能是切好的 token；而常见词不管怎么组合都跳不掉 granule，见 token_needles）
+        for q_str in [
+            "health",
+            "msgId:",
+            "RESULT_CHANGE",
+            "im_enter_direct_msg",
+            "WX_RECOGNIZE_SHADOW",
+            "直播间主动触达",
+            "CHANGE|私信手机号为空",
+            "订单AC1062C800014A070CF02CD72B78E8ED",
+        ] {
             let sql = sql_of(q_str);
             assert!(!sql.contains("hasToken"), "{q_str} 不该走索引: {sql}");
             assert!(sql.contains("positionCaseInsensitiveUTF8"), "{q_str}: {sql}");
         }
+
+        // 键加 id：id 那个 token 进索引跳 granule，子串条件保留在最前面保证键也对得上
+        let filter = LogFilter {
+            range: Some(range()),
+            q: "msgId:AC1062C800014A070CF02CD72B78E8ED".into(),
+            ..Default::default()
+        };
+        let query = q.search(&filter, Order::Desc, 10, 0).unwrap();
+        let sql = query.sql();
+        assert!(
+            sql.contains(
+                "AND positionCaseInsensitiveUTF8(message, {p2:String}) > 0 AND hasToken(lower(message), {p3:String})"
+            ),
+            "{sql}"
+        );
+        assert_eq!(query.params()[2].1, "msgId:AC1062C800014A070CF02CD72B78E8ED");
+        assert_eq!(query.params()[3].1, "ac1062c800014a070cf02cd72b78e8ed");
+        assert_eq!(filter.token_terms(), vec!["msgId:AC1062C800014A070CF02CD72B78E8ED"]);
+        // 两个 id 各一个 hasToken；复合词的排除仍是子串
+        let sql = sql_of("AC1062C800014A070CF02CD72B78E8ED/0123456789abcdef0123456789abcdef");
+        assert_eq!(sql.matches("hasToken").count(), 2, "{sql}");
+        let sql = sql_of("-msgId:AC1062C800014A070CF02CD72B78E8ED");
+        assert!(!sql.contains("hasToken"), "{sql}");
 
         // 排除词保持子串语义：整词取反会变宽，会漏掉本该排除的行
         let sql = sql_of("-AC1062C800014A070CF02CD72B78E8ED");

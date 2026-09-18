@@ -136,10 +136,15 @@ pub struct Config {
     #[arg(long, env = "OPDASH_SESSION_TTL", default_value = "12h", value_parser = parse_duration)]
     pub session_ttl: Duration,
 
-    /// 会话 cookie 的签名密钥（随便一串长随机字符）。不配则每次启动随机生成：重启后大家都要重新登录，
-    /// 多副本部署时必须配同一个
+    /// 会话 cookie 和 API key 的签名密钥（随便一串长随机字符）。不配则每次启动随机生成：重启后大家
+    /// 都要重新登录、发出去的 API key 也全部失效；多副本部署时必须配同一个
     #[arg(long, env = "OPDASH_SESSION_SECRET", hide_env_values = true)]
     pub session_secret: Option<String>,
+
+    /// 用户自己生成的 API key（给 MCP / 脚本用）最长有效多久；生成时可以选更短的。
+    /// key 是签名 token，服务端不存也没法单个吊销，所以有效期别给太长
+    #[arg(long, env = "OPDASH_API_KEY_TTL", default_value = "90d", value_parser = parse_duration)]
+    pub api_key_ttl: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +211,9 @@ impl Config {
         }
         if self.session_ttl.as_secs() < 60 {
             return Err("--session-ttl 至少 1 分钟".into());
+        }
+        if self.api_key_ttl.as_secs() < 3600 {
+            return Err("--api-key-ttl 至少 1 小时".into());
         }
         for (flag, name) in [
             ("--database", &self.database),

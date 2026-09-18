@@ -201,7 +201,46 @@ async fn full_login_flow_sets_session_and_logout_clears_it() {
     assert_eq!(status, 200);
     assert_eq!(me["user"]["name"], "alice");
     assert_eq!(me["user"]["email"], "alice@example.com");
+    assert_eq!(me["identity"], "session");
     assert_eq!(me["logout_url"], "/api/auth/logout");
+    assert_eq!(me["api_keys"]["max_ttl"], "90d");
+    assert_eq!(me["api_keys"]["persistent"], true, "配了 --session-secret");
+
+    // 4b. 登录用户给自己签一把 API key，拿它当 Bearer 访问 API 和 /mcp
+    let (status, key) = post_json(
+        &app,
+        "/api/auth/keys",
+        r#"{"name":"claude-code","ttl":"30d"}"#,
+        &[("cookie", &session)],
+    )
+    .await;
+    assert_eq!(status, 200, "{key}");
+    let token = key["key"].as_str().unwrap();
+    assert!(token.starts_with("opdash_"), "{token}");
+    assert_eq!(key["user"], "alice");
+    assert_eq!(key["name"], "claude-code");
+    assert_eq!(key["expires_in"], "30d");
+    assert_eq!(key["mcp_url"], "https://opdash.example.com/mcp");
+    let bearer = format!("Bearer {token}");
+    let (status, meta) = get_json_with(&app, "/api/meta", &[("authorization", &bearer)]).await;
+    assert_eq!(status, 200, "{meta}");
+    let (status, me) = get_json_with(&app, "/api/auth/me", &[("authorization", &bearer)]).await;
+    assert_eq!(status, 200);
+    assert_eq!(me["identity"], "api_key");
+    assert_eq!(me["user"]["name"], "alice", "key 代表签发它的人");
+    assert_eq!(me["user"]["email"], "alice@example.com");
+    let (status, _, _) = post_full(
+        &app,
+        "/mcp",
+        r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        &[("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(status, 200, "MCP 端点认 API key");
+    // 拿 key 再签 key 不行
+    let (status, body) =
+        post_json(&app, "/api/auth/keys", "{}", &[("authorization", &bearer)]).await;
+    assert_eq!(status, 403, "{body}");
     // 改过的 cookie 不认
     let tampered = format!("{}x", session);
     let (status, _) = get_raw(&app, "/api/meta", &[("cookie", &tampered)]).await;
@@ -280,6 +319,59 @@ async fn rejects_bad_id_token_and_missing_role() {
     .await;
     assert_eq!(status, 400);
     assert!(String::from_utf8_lossy(&body).contains("access_denied"));
+}
+
+#[tokio::test]
+async fn api_keys_without_oidc_and_their_edges() {
+    let fake = FakeClickhouse::start().await;
+    // 只开 Basic、没配 --session-secret：也能签 key，但 persistent = false
+    let app = app_with_schema(&fake, &["--basic-auth", "ops:secret", "--api-key-ttl", "48h"]).await;
+
+    // 没登录不给签
+    let (status, _, _) = post_full(&app, "/api/auth/keys", "{}", &[]).await;
+    assert_eq!(status, 401);
+
+    let basic = [("authorization", "Basic b3BzOnNlY3JldA==")];
+    let (status, me) = get_json_with(&app, "/api/auth/me", &basic).await;
+    assert_eq!(status, 200);
+    assert_eq!(me["identity"], "basic");
+    assert_eq!(me["api_keys"]["max_ttl"], "2d", "48h 能整除成天就按天写");
+    assert_eq!(me["api_keys"]["persistent"], false);
+
+    // 空请求体：默认名字、上限有效期
+    let (status, key) = post_json(&app, "/api/auth/keys", "", &basic).await;
+    assert_eq!(status, 200, "{key}");
+    assert_eq!(key["name"], "api-key");
+    assert_eq!(key["expires_in"], "2d");
+    assert_eq!(key["persistent"], false);
+    assert_eq!(key["id"].as_str().unwrap().len(), 8);
+    // 要得比上限长，按上限算
+    let (_, key2) = post_json(&app, "/api/auth/keys", r#"{"ttl":"365d"}"#, &basic).await;
+    assert_eq!(key2["expires_in"], "2d", "要得比上限长，按上限算");
+    // ttl 写错、JSON 写错都是 400
+    let (status, body) = post_json(&app, "/api/auth/keys", r#"{"ttl":"forever"}"#, &basic).await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = post_json(&app, "/api/auth/keys", "not json", &basic).await;
+    assert_eq!(status, 400, "{body}");
+
+    // key 能用；改一位不能用；没有 Bearer 前缀不能用
+    let token = key["key"].as_str().unwrap().to_owned();
+    let (status, _) =
+        get_raw(&app, "/api/meta", &[("authorization", &format!("Bearer {token}"))]).await;
+    assert_eq!(status, 200);
+    let (status, _) =
+        get_raw(&app, "/api/meta", &[("authorization", &format!("Bearer {token}x"))]).await;
+    assert_eq!(status, 401);
+    let (status, _) = get_raw(&app, "/api/meta", &[("authorization", &token)]).await;
+    assert_eq!(status, 401);
+
+    // 没开认证：签 key 没意义，400 说清楚
+    let app = app_with_schema(&fake, &[]).await;
+    let (status, body) = post_json(&app, "/api/auth/keys", "{}", &[]).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("不需要 API key"));
+    let (_, me) = get_json(&app, "/api/auth/me").await;
+    assert!(me["api_keys"].is_null());
 }
 
 #[tokio::test]

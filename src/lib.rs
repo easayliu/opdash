@@ -15,6 +15,7 @@ pub mod auth;
 pub mod clickhouse;
 pub mod config;
 pub mod error;
+pub mod mcp;
 pub mod query;
 pub mod schema;
 pub mod ui;

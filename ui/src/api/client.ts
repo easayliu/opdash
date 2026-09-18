@@ -61,6 +61,26 @@ export async function apiGet<T>(path: string, params: Params = {}, signal?: Abor
   throw new ApiError(res.status, message, kind, code)
 }
 
+/** JSON 体的 POST，错误处理和 apiGet 一样。 */
+export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  })
+  if (res.ok) return (await res.json()) as T
+  let message = `${res.status} ${res.statusText}`
+  let kind = 'internal'
+  try {
+    const parsed = await res.json()
+    if (typeof parsed?.error === 'string') message = parsed.error
+    if (typeof parsed?.kind === 'string') kind = parsed.kind
+  } catch {
+    if (res.status === 401) message = '需要登录'
+  }
+  throw new ApiError(res.status, message, kind)
+}
+
 let redirecting = false
 /** 带上当前路径跳登录页；登录成功后后端把人送回来。 */
 export function redirectToLogin(loginUrl = '/api/auth/login') {

@@ -1,6 +1,6 @@
 [package]
 name = "opdash"
-version = "0.6.10"
+version = "0.7.0"
 edition = "2024"
 description = "Trace, log & metric query UI over ClickHouse (logpipe / tracepipe / metricpipe)"
 license = "MIT"
@@ -36,10 +36,11 @@ form_urlencoded = "1"
 ring = "0.17"
 # 拼授权 / 登出跳转 URL；reqwest 已经带了
 url = "2"
+# MCP 工具在进程内走一遍自己的 API Router（`oneshot`）；axum 本来就依赖它
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 chrono = "0.4"
 form_urlencoded = "1"
