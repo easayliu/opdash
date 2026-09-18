@@ -199,7 +199,7 @@ impl KeyStore {
         // 文件里是按创建顺序追加的，先倒过来再稳定排序：同一秒建的两把也是新的在前
         let mut out: Vec<ApiKey> =
             st.keys.iter().rev().filter(|k| k.key.user == user).map(|k| k.key.clone()).collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|k| std::cmp::Reverse(k.created_at));
         out
     }
 
