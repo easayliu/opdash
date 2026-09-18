@@ -460,6 +460,10 @@ export interface MetricQueryResponse {
   series: MetricSeries[]
   /** 时间线太多，只返回了最大的那些 */
   truncated: boolean
+  /** 这个指标的实际类型；这段时间一个点都没有时不带 */
+  metric_type?: MetricType
+  /** 查回来是空的之类的情况下，给人看的一句话 */
+  note?: string
   stats: Stats
 }
 

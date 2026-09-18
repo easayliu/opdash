@@ -114,10 +114,15 @@ async fn handshake_lists_tools_and_answers_ping() {
         "search_traces",
         "get_trace",
         "search_logs",
+        "list_attrs",
         "query_metric",
+        "metric_exemplars",
     ] {
         assert!(names.contains(&want), "缺工具 {want}: {names:?}");
     }
+    // 只读标注：客户端据此免掉每次调用的确认
+    let first = &body["result"]["tools"][0];
+    assert_eq!(first["annotations"]["readOnlyHint"], true, "{first}");
 
     let (_, body) = rpc(&app, request(4, "ping", json!({}))).await;
     assert_eq!(body["result"], json!({}));
@@ -277,6 +282,14 @@ async fn bad_arguments_come_back_as_tool_errors_not_rpc_errors() {
     assert!(is_error);
     assert!(out.as_str().unwrap().contains("缺少参数 trace_id"), "{out}");
 
+    // 参数名写错（service 写成 service_name）不能被静默忽略：那样查回来的是全站的数
+    let (is_error, out) =
+        call_tool(&app, "service_operations", json!({ "service_name": "a" })).await;
+    assert!(is_error);
+    let text = out.as_str().unwrap();
+    assert!(text.contains("不认识的参数") && text.contains("service_name"), "{text}");
+    assert!(text.contains("compare"), "把认识的参数名列出来: {text}");
+
     // 没有这个工具才是 JSON-RPC 错误
     let (status, body) =
         rpc(&app, request(1, "tools/call", json!({ "name": "nope", "arguments": {} }))).await;
@@ -407,4 +420,67 @@ async fn service_overview_scores_health_and_puts_the_sick_first() {
     assert_eq!(services[1]["vs_prev"]["requests_change_pct"], 11.1);
     assert!(services[1].get("spark").is_none(), "页面才要的东西不给模型");
     assert_eq!(sql(&fake).len(), 2);
+}
+
+#[tokio::test]
+async fn attrs_are_listable_and_metrics_bridge_to_traces() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+
+    // span 属性名：别让模型猜 attr=http.route 这种写法
+    fake.respond("{\"key\":\"http.route\",\"count\":9}\n");
+    let (is_error, out) = call_tool(&app, "list_attrs", json!({ "service": "checkout" })).await;
+    assert!(!is_error, "{out}");
+    assert_eq!(out["items"][0]["name"], "http.route");
+    assert_eq!(out["items"][0]["count"], 9);
+    assert!(sql(&fake).last().unwrap().contains("span_attributes"), "{:?}", sql(&fake));
+
+    // 指标的属性取值走另一个端点，形状统一成 items
+    fake.respond("{\"name\":\"heap\",\"count\":3}\n");
+    let (is_error, out) = call_tool(
+        &app,
+        "list_attrs",
+        json!({ "on": "metric", "metric": "jvm.memory.used", "key": "jvm.memory.type" }),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert_eq!(out["key"], "jvm.memory.type");
+    assert_eq!(out["items"][0]["name"], "heap");
+
+    // 指标点上挂的 trace id：尖峰直接换成一条链路
+    fake.respond(concat!(
+        r#"{"t_ms":1767196800123,"value":1234.5,"trace_id":"a1b2","span_id":"c3d4","#,
+        "\"service_name\":\"checkout\"}\n",
+    ));
+    let (is_error, out) =
+        call_tool(&app, "metric_exemplars", json!({ "metric": "http.server.request.duration" }))
+            .await;
+    assert!(!is_error, "{out}");
+    let e = &out["exemplars"][0];
+    assert_eq!(e["trace_id"], "a1b2");
+    assert_eq!(e["time"], "2026-01-01T00:00:00.123+08:00");
+    assert_eq!(e["value"], 1234.5);
+    assert!(out["next"].as_str().unwrap().contains("get_trace"));
+}
+
+#[tokio::test]
+async fn without_a_metric_table_the_metric_tools_are_not_offered() {
+    let fake = FakeClickhouse::start().await;
+    fake.respond(columns_without("otel_metric")).respond(version_fixture());
+    let app = support::app(&fake, &[]).await;
+
+    let (_, body) = rpc(&app, request(1, "tools/list", json!({}))).await;
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"search_logs"), "{names:?}");
+    for gone in ["list_metrics", "query_metric", "metric_events", "metric_exemplars"] {
+        assert!(!names.contains(&gone), "指标表都没有，不该列 {gone}: {names:?}");
+    }
+    // 握手说明里也得提一句
+    let (_, body) = rpc(&app, request(2, "initialize", json!({}))).await;
+    assert!(body["result"]["instructions"].as_str().unwrap().contains("指标表未启用"));
 }

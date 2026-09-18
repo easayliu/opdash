@@ -13,6 +13,7 @@
 //! 类型（字符串 / 数组 / 布尔）和时间写法。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::OnceLock;
 
 use chrono_tz::Tz;
 use serde_json::{Map, Value, json};
@@ -118,9 +119,27 @@ fn log_filter_props() -> Vec<(&'static str, Value)> {
 }
 
 /// 工具目录。`inputSchema` 是 JSON Schema，客户端和模型都靠它知道能传什么。
-pub fn list() -> Vec<Value> {
-    let tool = |name: &str, description: &str, input: Value| json!({ "name": name, "description": description, "inputSchema": input });
-    vec![
+///
+/// `metrics_enabled = false`（部署没配指标表）时不列指标类工具：列出来模型也只会换来一个
+/// 「指标页未启用」，白占上下文。`initialize` 里 `listChanged` 仍然是 `false`——改变工具列表要发
+/// `notifications/tools/list_changed`，无状态端点没有服务端到客户端的流发不出去；指标表是部署时
+/// 定的，跑着跑着变的情况不存在。
+pub fn list(metrics_enabled: bool) -> Vec<Value> {
+    // 全是只读查询：标上 annotations，客户端（Claude Code / Cursor 这类）就不必每次调用都问人一遍
+    let tool = |name: &str, description: &str, input: Value| {
+        json!({
+            "name": name,
+            "description": description,
+            "inputSchema": input,
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        })
+    };
+    let mut tools = vec![
         tool(
             "get_meta",
             "opdash 的基本信息：版本、时区、当前时间、三张表各有哪些可筛的维度列、指标表是否启用、各项上限。开工前调一次，之后 filters 里的列名照这里的写。",
@@ -152,11 +171,15 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "service_operations",
-            "一个服务的接口表：每个接口（span_name）的请求量 / 错误 / 错误率 / P50 / P95 / P99，以及和对比时段比的变化；对比时段有、现在没有的接口标 gone，反过来标 new。回答「这个服务是哪个接口不对」用这个。",
+            "一个服务的接口表：每个接口（span_name）的请求量 / 错误 / 错误率 / P50 / P95 / P99，以及和对比时段比的变化；对比时段有、现在没有的接口标 gone，反过来标 new。回答「这个服务是哪个接口不对」用这个。service 可以一次给多个（最多 24 个）横着比，那时每行会带 service。",
             schema(
                 [
                     vec![
-                        ("service", string("服务名（service_name）")),
+                        ("service", json!({
+                            "type": ["string", "array"],
+                            "items": { "type": "string" },
+                            "description": "服务名（service_name）；一次最多 24 个，多个时每行带 service",
+                        })),
                         ("kind", enumeration("entry = 对外提供的接口（Server / Consumer，默认）；client = 它调下游的（Client / Producer，如 HTTP 调用、SQL、Kafka 生产）", &["entry", "client"])),
                         ("compare", enumeration("对比时段，见 service_overview；none 不查对比", &["day", "week", "prev", "none"])),
                         ("sort", enumeration("排序：requests 请求量（默认）、errors 错误数、p95、p95_change 相对对比时段 P95 涨得最多的、errors_change 错误多出来最多的", &["requests", "errors", "p95", "p95_change", "errors_change"])),
@@ -218,6 +241,25 @@ pub fn list() -> Vec<Value> {
                         ("filters", json!({ "type": "object", "description": "span 表的维度列筛选（如 cluster），写法同 search_logs 的 filters", "additionalProperties": { "type": ["string", "array"], "items": { "type": "string" } } })),
                         ("sort", enumeration("time 最新在前（默认）；duration 最慢在前", &["time", "duration"])),
                         ("limit", integer("最多几条，默认 20，上限 100")),
+                    ],
+                    time_props("1h"),
+                ]
+                .concat(),
+                &[],
+            ),
+        ),
+        tool(
+            "list_attrs",
+            "span / 指标上到底有哪些属性名，以及某个属性名有哪些取值。search_traces 的 attr / rattr、query_metric 的 by / attr / rattr 都要写属性名，别猜——先用它列一遍。on=span 看 span 表（要给 service），on=metric 看指标表（要给 metric）；scope=resource 看 resource 属性（k8s.pod.name 这类）。给了 key 就返回这个键最常见的取值和条数。统计只在最近的若干行上采样，count 是近似值。",
+            schema(
+                [
+                    vec![
+                        ("on", enumeration("span = span 表的属性（默认）；metric = 指标表的属性", &["span", "metric"])),
+                        ("scope", enumeration("attributes = 数据点 / span 自己的属性（默认）；resource = 上报方的 resource 属性", &["attributes", "resource"])),
+                        ("service", string("哪个服务。on=span 时必填（属性名是按服务差别很大的）；on=metric 时可选")),
+                        ("metric", string("哪个指标，on=metric 时必填")),
+                        ("key", string("给了就返回这个属性键的取值分布，不给则返回属性键列表")),
+                        ("limit", integer("最多几个，列键时默认 200，列取值时默认 50")),
                     ],
                     time_props("1h"),
                 ]
@@ -326,13 +368,13 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "query_metric",
-            "查一个指标的时间序列。agg 是桶内怎么聚：counter 用 rate（每秒增量）或 increase；gauge 用 avg / max / last；直方图（如 http.server.request.duration）用 quantile（q 给分位数，默认 0.95）或 mean。by 是分组维度：service_name 这类固定列直接写，数据点属性直接写属性名（如 http.route），resource 属性加 res: 前缀（如 res:k8s.pod.name）。",
+            "查一个指标的时间序列。不确定就别给 agg / field——服务端会先看这个指标是什么类型再挑（直方图→分位数 p95、counter→rate、gauge→avg），返回里的 metric_type 是它的实际类型。要自己给：counter 用 rate（每秒增量）/ increase；gauge 用 avg / max / last；直方图（如 http.server.request.duration、jvm.gc.duration）用 quantile（q 给分位数）或 mean + field=sum，次数用 rate + field=count。注意五种指标类型共用一张表，直方图的 value 列是空的，对直方图用 field=value 聚合出来是一片 0（服务端现在会直接报错而不是给你 0）。by 是分组维度：service_name 这类固定列直接写，数据点属性直接写属性名（如 http.route），resource 属性加 res: 前缀（如 res:k8s.pod.name）。",
             schema(
                 [
                     vec![
                         ("metric", string("指标名，如 http.server.request.duration")),
-                        ("agg", enumeration("桶内聚合，默认 avg", &["avg", "sum", "min", "max", "last", "count", "rate", "increase", "mean", "quantile"])),
-                        ("field", enumeration("取哪一列：Gauge / Sum 是 value（默认）；Histogram / Summary 是 count / sum / min / max", &["value", "count", "sum", "min", "max"])),
+                        ("agg", enumeration("桶内聚合。不给就按指标类型自动挑", &["avg", "sum", "min", "max", "last", "count", "rate", "increase", "mean", "quantile"])),
+                        ("field", enumeration("取哪一列：Gauge / Sum 只有 value；Histogram / Summary 是 count / sum / min / max。不给就按指标类型和 agg 自动挑", &["value", "count", "sum", "min", "max"])),
                         ("by", strings("分组维度，如 [\"service_name\", \"http.route\"]")),
                         ("q", strings("agg=quantile 时的分位数，如 [\"0.5\", \"0.95\", \"0.99\"]，默认 0.95，最多 5 个")),
                         ("service", strings("只看这些服务")),
@@ -340,6 +382,24 @@ pub fn list() -> Vec<Value> {
                         ("rattr", strings("resource 属性过滤，key=value，如 k8s.pod.name=xxx")),
                         ("step", integer("桶宽（秒）。不给自动挑（最多 60 个点）")),
                         ("limit", integer("最多几条时间线，默认 10，按量大的优先")),
+                    ],
+                    time_props("1h"),
+                ]
+                .concat(),
+                &["metric"],
+            ),
+        ),
+        tool(
+            "metric_exemplars",
+            "指标点上挂的 trace id（exemplar）：直方图里最慢的那些请求分别是哪条链路，按值从大到小。从 query_metric 看到 P99 尖峰之后用它，不用再拿时间去 search_traces 撞——拿到 trace_id 直接 get_trace。只有埋点上报了 exemplar 的指标有（一般是 http.server.request.duration 这类直方图）。",
+            schema(
+                [
+                    vec![
+                        ("metric", string("指标名，如 http.server.request.duration")),
+                        ("service", strings("只看这些服务")),
+                        ("attr", strings("数据点属性过滤，key=value")),
+                        ("rattr", strings("resource 属性过滤，key=value")),
+                        ("limit", integer("最多几条，默认 20，上限 500")),
                     ],
                     time_props("1h"),
                 ]
@@ -363,8 +423,16 @@ pub fn list() -> Vec<Value> {
                 &["metric"],
             ),
         ),
-    ]
+    ];
+    if !metrics_enabled {
+        tools.retain(|t| !METRIC_TOOLS.contains(&t["name"].as_str().unwrap_or("")));
+    }
+    tools
 }
+
+/// 指标表没启用时要从目录里拿掉的工具。
+const METRIC_TOOLS: &[&str] =
+    &["list_metrics", "query_metric", "metric_events", "metric_exemplars"];
 
 // ---------------------------------------------------------------------------------------------
 // 参数读取
@@ -632,12 +700,115 @@ impl Qs {
 // 调用入口
 // ---------------------------------------------------------------------------------------------
 
+/// 单次工具结果的字节上限。`search_logs` 最多能要 200 行 × 20 万字符的 message，真返回回去就是
+/// 几十 MB 灌进模型的上下文——API 那边的护栏管的是 ClickHouse 读多少行，管不到这一头。超了就
+/// 砍列表、再不行截长文本，并在 notes 里说清楚砍了什么。
+const MAX_TOOL_BYTES: usize = 256 << 10;
+
+/// 整份工具目录（含指标工具），校验参数名用。
+fn all_tools() -> &'static [Value] {
+    static ALL: OnceLock<Vec<Value>> = OnceLock::new();
+    ALL.get_or_init(|| list(true))
+}
+
+/// 模型偶尔会把参数名记错（`service` 写成 `service_name`）。`inputSchema` 里写了
+/// `additionalProperties: false`，但客户端基本不校验，写错的参数就被静默忽略——查回来的是全站
+/// 的数，看着还挺像回事，这种错最难发现。这里直接拒掉，顺手把认识的参数名列给它。
+fn check_arg_names(def: &Value, arguments: &Map<String, Value>) -> R<()> {
+    let props = &def["inputSchema"]["properties"];
+    let unknown: Vec<&str> =
+        arguments.keys().filter(|k| props.get(k.as_str()).is_none()).map(String::as_str).collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let known: Vec<&str> =
+        props.as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
+    Err(format!(
+        "不认识的参数: {}；{} 接受的参数是: {}",
+        unknown.join(", "),
+        def["name"].as_str().unwrap_or("这个工具"),
+        known.join(", "),
+    ))
+}
+
+fn map_len(m: &Map<String, Value>) -> usize {
+    serde_json::to_string(m).map(|s| s.len()).unwrap_or(0)
+}
+
+/// 把结果压进字节预算：反复把最长的那个顶层数组砍一半，还超就把长字符串截短。两样都做不到
+/// （比如单个 span 的一个属性就几 MB）时原样返回——宁可大一次，也不返回一个看不出被动过手脚的
+/// 结果。
+fn fit_budget(value: Value, budget: usize) -> Value {
+    let Value::Object(mut map) = value else {
+        return value;
+    };
+    if map_len(&map) <= budget {
+        return Value::Object(map);
+    }
+    let original: BTreeMap<String, usize> =
+        map.iter().filter_map(|(k, v)| v.as_array().map(|a| (k.clone(), a.len()))).collect();
+    let mut kept: BTreeMap<String, usize> = BTreeMap::new();
+    loop {
+        let len = map_len(&map);
+        if len <= budget {
+            break;
+        }
+        let longest = map
+            .iter()
+            .filter_map(|(k, v)| v.as_array().map(|a| (k.clone(), a.len())))
+            .max_by_key(|(_, n)| *n);
+        let Some((key, n)) = longest.filter(|(_, n)| *n > 1) else {
+            break;
+        };
+        // 按「超了多少」直接估该留几项，再至少砍掉一半保证每轮都在收敛：一次超大的结果
+        // 不值得为它反复序列化十几遍
+        let keep = (n * budget / len).min(n / 2).max(1);
+        if let Some(Value::Array(items)) = map.get_mut(&key) {
+            items.truncate(keep);
+        }
+        kept.insert(key, keep);
+    }
+    let mut shortened = false;
+    for max_chars in [2000_usize, 200] {
+        if map_len(&map) <= budget {
+            break;
+        }
+        if let Value::Object(m) = truncate_strings(&Value::Object(map.clone()), max_chars) {
+            map = m;
+            shortened = true;
+        }
+    }
+    if kept.is_empty() && !shortened {
+        return Value::Object(map);
+    }
+    let mut what: Vec<String> = kept
+        .iter()
+        .map(|(k, keep)| format!("{k} 只留了 {keep} 项（共 {}）", original.get(k).unwrap_or(keep)))
+        .collect();
+    if shortened {
+        what.push("长文本被截短".to_owned());
+    }
+    note(
+        &mut map,
+        format!(
+            "结果超过 {} KB，已截断：{}。想要全部：缩小时间范围、调小 limit / max_message_chars，或者分几次查",
+            budget >> 10,
+            what.join("，"),
+        ),
+    );
+    Value::Object(map)
+}
+
 /// 跑一个工具，返回给模型看的文本（紧凑 JSON）。
 pub async fn call(
     mcp: &Mcp,
     name: &str,
     arguments: &Map<String, Value>,
 ) -> Result<String, ToolError> {
+    let Some(def) = all_tools().iter().find(|t| t["name"] == name) else {
+        return Err(ToolError::Unknown);
+    };
+    check_arg_names(def, arguments).map_err(ToolError::Failed)?;
     let a = Args { map: arguments, now_ms: mcp.state.now_ms(), tz: mcp.tz() };
     let out = match name {
         "get_meta" => get_meta(mcp, &a).await,
@@ -653,12 +824,14 @@ pub async fn call(
         "log_histogram" => log_histogram(mcp, &a).await,
         "log_facets" => log_facets(mcp, &a).await,
         "log_context" => log_context(mcp, &a).await,
+        "list_attrs" => list_attrs(mcp, &a).await,
         "list_metrics" => list_metrics(mcp, &a).await,
         "query_metric" => query_metric(mcp, &a).await,
+        "metric_exemplars" => metric_exemplars(mcp, &a).await,
         "metric_events" => metric_events(mcp, &a).await,
         _ => return Err(ToolError::Unknown),
     };
-    let value = out.map_err(ToolError::Failed)?;
+    let value = fit_budget(out.map_err(ToolError::Failed)?, MAX_TOOL_BYTES);
     serde_json::to_string(&value).map_err(|e| ToolError::Internal(e.to_string()))
 }
 
@@ -986,15 +1159,24 @@ fn shape_operation(op: &Value, compare_on: bool) -> (Value, f64, f64) {
 }
 
 async fn service_operations(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
-    let service = a.required("service")?;
+    let services = a.list("service")?;
+    if services.is_empty() {
+        return Err("缺少参数 service".to_owned());
+    }
     let window = a.window("1h")?;
     let compare = a.string("compare")?.unwrap_or_else(|| "day".to_owned());
     let sort = a.string("sort")?.unwrap_or_else(|| "requests".to_owned());
     let limit = a.limit("limit", 50, 2000)? as usize;
     let mut qs = Qs::new();
     qs.window(window).push("compare", &compare).push_opt("kind", a.string("kind")?);
-    let path = format!("/api/services/{}/operations", encode_segment(&service));
-    let body = mcp.get(&path, &qs.finish()).await?;
+    // 多个服务走 /api/services/operations（一次查完），单个还是走原来的路径
+    let (path, query) = if let [only] = services.as_slice() {
+        (format!("/api/services/{}/operations", encode_segment(only)), qs.finish())
+    } else {
+        qs.push_all("service", &services);
+        ("/api/services/operations".to_owned(), qs.finish())
+    };
+    let body = mcp.get(&path, &query).await?;
     let compare_on = body["compare"].as_str() != Some("none");
     let mut rows: Vec<(Value, f64, f64)> =
         arr(&body["operations"]).iter().map(|op| shape_operation(op, compare_on)).collect();
@@ -1586,6 +1768,68 @@ async fn log_context(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     }))
 }
 
+/// span / 指标上有哪些属性名、某个属性名有哪些取值。两边的端点形状不一样（span 那边回
+/// `keys` / `values`，指标那边回 `names`），统一成 `items: [{name, count}]` 再给模型。
+async fn list_attrs(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let on = a.string("on")?.unwrap_or_else(|| "span".to_owned());
+    let scope = a.string("scope")?.unwrap_or_else(|| "attributes".to_owned());
+    let resource = match scope.as_str() {
+        "attributes" | "attribute" | "span" => false,
+        "resource" | "resource_attributes" => true,
+        other => return Err(format!("scope 只能是 attributes 或 resource，不是 {other:?}")),
+    };
+    let key = a.string("key")?;
+    let window = a.window("1h")?;
+    let limit = a.limit("limit", if key.is_some() { 50 } else { 200 }, 1000)?;
+    let mut qs = Qs::new();
+    qs.window(window).push("limit", limit.to_string()).push_opt("key", key.clone());
+    let path = match on.as_str() {
+        "span" => {
+            qs.push("scope", if resource { "resource" } else { "span" })
+                .push_opt("service", a.string("service")?);
+            if key.is_some() { "/api/traces/attr_values" } else { "/api/traces/attr_keys" }
+        }
+        "metric" => {
+            qs.push("column", if resource { "resource_attributes" } else { "attributes" })
+                .push_opt("metric", a.string("metric")?)
+                .push_all("service", &a.list("service")?);
+            if key.is_some() { "/api/metrics/label_values" } else { "/api/metrics/labels" }
+        }
+        other => return Err(format!("on 只能是 span 或 metric，不是 {other:?}")),
+    };
+    let body = mcp.get(path, &qs.finish()).await?;
+    // keys（span 属性名）/ values（span 属性值）/ names（指标两种都叫这个）
+    let rows = [&body["keys"], &body["values"], &body["names"]]
+        .into_iter()
+        .find(|v| v.is_array())
+        .unwrap_or(&Value::Null);
+    let items: Vec<Value> = arr(rows)
+        .iter()
+        .map(|r| {
+            let name = [r.get("key"), r.get("value"), r.get("name")]
+                .into_iter()
+                .flatten()
+                .find(|v| v.is_string())
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({ "name": name, "count": r["count"] })
+        })
+        .collect();
+    let mut out = json!({
+        "on": on,
+        "scope": if resource { "resource" } else { "attributes" },
+        "from": fmt_time(window.0, a.tz),
+        "to": fmt_time(window.1, a.tz),
+        "count": items.len(),
+        "items": items,
+        "sampled": "count 是在最近若干行上采样统计的，看相对大小，别当准确条数",
+    });
+    if let Some(k) = key {
+        out["key"] = json!(k);
+    }
+    Ok(out)
+}
+
 async fn list_metrics(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     let window = a.window("1h")?;
     let needle = a.string("match")?.map(|s| s.to_ascii_lowercase());
@@ -1682,6 +1926,8 @@ async fn query_metric(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
         .collect();
     let mut out = json!({
         "metric": body["metric"],
+        // agg / field 可能是服务端按类型挑的，原样回给模型，它才知道自己看的是什么
+        "metric_type": body["metric_type"],
         "agg": body["agg"],
         "field": body["field"],
         "by": body["by"],
@@ -1696,6 +1942,53 @@ async fn query_metric(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
         note(
             out.as_object_mut().expect("json 对象"),
             format!("时间线超过 {limit} 条，只返回了量最大的那些；加 limit 或加过滤"),
+        );
+    }
+    if let Some(n) = body["note"].as_str() {
+        note(out.as_object_mut().expect("json 对象"), n.to_owned());
+    }
+    Ok(out)
+}
+
+/// 指标点上挂的 trace id：从「这个指标现在很高」直接跳到「是这几条链路慢」。
+async fn metric_exemplars(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let metric = a.required("metric")?;
+    let window = a.window("1h")?;
+    let limit = a.limit("limit", 20, 500)?;
+    let mut qs = Qs::new();
+    qs.window(window)
+        .push("metric", &metric)
+        .push_all("service", &a.list("service")?)
+        .push_all("attr", &a.list("attr")?)
+        .push_all("rattr", &a.list("rattr")?)
+        .push("limit", limit.to_string());
+    let body = mcp.get("/api/metrics/exemplars", &qs.finish()).await?;
+    // 端点已经按值从大到小排了：最慢 / 最大的那些请求排在前面
+    let exemplars: Vec<Value> = arr(&body["exemplars"])
+        .iter()
+        .take(limit as usize)
+        .map(|e| {
+            json!({
+                "time": fmt_time(i64_of(e, "t_ms"), a.tz),
+                "value": round(f64_of(e, "value"), 4),
+                "service": e["service"],
+                "trace_id": e["trace_id"],
+                "span_id": e["span_id"],
+            })
+        })
+        .collect();
+    let mut out = json!({
+        "metric": body["metric"],
+        "from": fmt_time(window.0, a.tz),
+        "to": fmt_time(window.1, a.tz),
+        "count": exemplars.len(),
+        "exemplars": exemplars,
+        "next": "拿 trace_id 调 get_trace（把这里的 time 当 at 传过去会快很多）",
+    });
+    if arr(&body["exemplars"]).is_empty() {
+        note(
+            out.as_object_mut().expect("json 对象"),
+            "这个指标在这段时间没有 exemplar：埋点没开 exemplar，或者这个指标本来就不挂 trace（一般只有直方图有）。改用 query_metric 看曲线、再按时间去 search_traces".to_owned(),
         );
     }
     Ok(out)
@@ -1740,8 +2033,8 @@ mod tests {
 
     #[test]
     fn every_tool_has_an_object_schema() {
-        let tools = list();
-        assert!(tools.len() >= 16);
+        let tools = list(true);
+        assert!(tools.len() >= 18);
         let mut names = BTreeSet::new();
         for t in &tools {
             assert_eq!(t["inputSchema"]["type"], "object", "{t}");
@@ -1751,7 +2044,59 @@ mod tests {
             for r in arr(&t["inputSchema"]["required"]) {
                 assert!(t["inputSchema"]["properties"].get(r.as_str().unwrap()).is_some(), "{t}");
             }
+            // 只读标注：客户端靠它决定要不要拦一下问人
+            assert_eq!(t["annotations"]["readOnlyHint"], true, "{t}");
+            assert_eq!(t["annotations"]["destructiveHint"], false, "{t}");
         }
+    }
+
+    #[test]
+    fn metric_tools_disappear_without_a_metric_table() {
+        let names = |on| {
+            list(on).iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>()
+        };
+        let (with, without) = (names(true), names(false));
+        assert!(with.contains("query_metric") && with.contains("metric_exemplars"));
+        assert!(!without.contains("query_metric"), "{without:?}");
+        assert_eq!(
+            with.difference(&without).cloned().collect::<BTreeSet<_>>(),
+            METRIC_TOOLS.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
+        );
+        // 目录里的每个工具都得有对应的分支，否则调用时会莫名其妙地「没有这个工具」
+        assert!(with.contains("list_attrs"));
+    }
+
+    #[test]
+    fn unknown_argument_names_are_rejected_not_ignored() {
+        let def = all_tools().iter().find(|t| t["name"] == "service_operations").unwrap();
+        let ok = args(json!({ "service": "order", "range": "15m" }));
+        assert!(check_arg_names(def, &ok).is_ok());
+        let typo = args(json!({ "service_name": "order" }));
+        let err = check_arg_names(def, &typo).unwrap_err();
+        assert!(err.contains("service_name"), "{err}");
+        assert!(err.contains("service"), "把认识的参数名列出来: {err}");
+    }
+
+    #[test]
+    fn oversized_results_get_trimmed_and_say_so() {
+        let row = |i: usize| json!({ "message": "x".repeat(2000), "i": i });
+        let big = json!({ "count": 200, "logs": (0..200).map(row).collect::<Vec<_>>() });
+        let out = fit_budget(big, 64 << 10);
+        let logs = out["logs"].as_array().unwrap();
+        assert!(logs.len() < 200 && !logs.is_empty(), "砍了一半又一半: {}", logs.len());
+        assert!(serde_json::to_string(&out).unwrap().len() <= (64 << 10) + 512);
+        let note = out["notes"][0].as_str().unwrap();
+        assert!(note.contains("logs") && note.contains("200"), "{note}");
+
+        // 没超预算的原样返回，不带 notes
+        let small = json!({ "logs": [row(1)] });
+        assert!(fit_budget(small.clone(), 64 << 10).get("notes").is_none());
+
+        // 砍光数组也压不下去时截长文本
+        let one = json!({ "attributes": { "stack": "y".repeat(200_000) } });
+        let out = fit_budget(one, 8 << 10);
+        assert!(serde_json::to_string(&out).unwrap().len() <= 8 << 10);
+        assert!(out["notes"][0].as_str().unwrap().contains("长文本"));
     }
 
     #[test]

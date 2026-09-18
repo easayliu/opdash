@@ -354,8 +354,15 @@ http_headers = { Authorization = "Bearer opdash_…" }
 | `log_histogram` | 日志条数按时间、按级别的分布——「错误从几点开始的」 | 日志页直方图 |
 | `log_facets` | 几个维度列各自最常见的取值——「报错集中在哪个 pod」 | 日志页下拉框 |
 | `log_context` | 某条日志前后几行 | 日志页上下文 |
-| `list_metrics` / `query_metric` | 指标目录；按 agg / field / by / 过滤查一个指标的时间序列 | `/metrics` 全部指标 |
+| `list_attrs` | span / 指标上有哪些属性名、某个属性名有哪些取值——`attr` / `by` 该写什么，列一遍而不是猜 | 链路页 / 指标页的属性下拉 |
+| `list_metrics` / `query_metric` | 指标目录；按 agg / field / by / 过滤查一个指标的时间序列。不给 agg / field 时按指标类型自动挑 | `/metrics` 全部指标 |
+| `metric_exemplars` | 指标点上挂的 trace id：P99 尖峰直接换成一条链路，拿去 `get_trace` | 图上点一个点 |
 | `metric_events` | 进程重启 / pod 新启动的时刻 | 看板上的虚线 |
+
+工具都标了 `readOnlyHint`（全是只读查询），客户端据此可以免掉每次调用的确认。没配指标表的部署
+不列指标那几个工具。单次工具结果超过 256 KB 会先砍列表、再截长文本，并在 `notes` 里说清楚砍了
+什么——模型的上下文不该被一次 `search_logs` 灌满。参数名写错（`service` 写成 `service_name`）会
+直接报「不认识的参数」并列出认识的，不会被静默忽略后拿一份全站的数当答案。
 
 工具不直接碰查询层：每个工具把参数翻译成 `/api/*` 的查询串，在进程内走一遍同一个 axum Router，
 拿到 JSON 再整理成给模型看的形状。所以参数校验、错误提示、读量护栏和页面是同一套——模型传了
@@ -673,6 +680,14 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   最后在服务端从桶计数和 `explicit_bounds` 插值。分位数不能对多条时间线取平均——那是把 p95 又平均了
   一次，没有意义。桶边界不一样的时间线合不到一起，`explicit_bounds` 因此进了分组键：真出现两套边界
   就是两条线，而不是悄悄算错。
+* **查之前先问一句这个指标是什么类型。** 五种类型共用一张表、用不上的列留默认值，所以直方图行的
+  `value` 是 0：拿 gauge 那套「`avg` + `value`」去查 `jvm.gc.duration` 不会报错，只会安安静静地回一片 0
+  ——线上照着这个结论说过「整个集群没有 GC」。`/api/metrics/query` 现在先发一条 `LIMIT 1`（和主查询
+  同一个 WHERE 前缀，几乎不花钱）拿到 `metric_type` / `is_monotonic` / 有没有 `explicit_bounds`：
+  `agg` / `field` 没给就按类型挑（和页面上 `aggOptions` 的第一项一致：带桶的直方图→分位数、
+  指数直方图 / Summary→`mean` + `sum`、counter→`rate`、gauge→`avg`），给了但必然查空的组合
+  （直方图 `field=value`、非直方图 `agg=quantile`、指数直方图算分位数）直接回 400 并写清楚该怎么查。
+  拒在主查询之前，那一趟也省了。
 * 时间线太多时只画最大的 N 条：聚合完之后 `dense_rank() OVER (ORDER BY total DESC)` 截断，`total` 是
   `sum(abs(v)) OVER (PARTITION BY keys)`。换成两次往返（先查 top N 的键、再查它们的点）反而要多扫一遍表。
   截断了响应里 `truncated = true`，页面提示加过滤条件。
@@ -794,11 +809,14 @@ GET /api/traces/attr_keys     ?service&scope=span|resource
 GET /api/traces/attr_values   ?key&service&scope
 GET /api/metrics              ?from&to&service          指标目录（只扫最近 6 小时，见下）
 GET /api/metrics/query        ?from&to&metric&service&agg&field&by&attr=k=v&rattr=k=v&q&step&limit
+                              agg / field 不给就按指标类型挑（直方图→分位数、counter→rate、
+                              gauge→avg）；按类型必然查空的组合（如直方图 field=value）回 400
 GET /api/metrics/labels       ?metric&column=attributes|resource_attributes
 GET /api/metrics/label_values ?metric&key&column
 GET /api/metrics/exemplars    ?metric&service&attr&limit
 GET /api/errors               ?from&to&kind=entry|client|all&service&span_name   错误分组，默认 entry
 GET /api/services             ?from&to&compare=day|week|prev&<维度列>
+GET /api/services/operations          ?service=a&service=b&...   一次最多 24 个服务
 GET /api/services/{name}/operations   ?from&to&kind=entry|client&compare=day|week|prev|none
 GET /api/services/{name}/timeseries   ?from&to&span_name&compare=day|week|prev|none
 ```

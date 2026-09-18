@@ -12,12 +12,12 @@ use std::collections::BTreeMap;
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
-use super::{AppState, params::Params};
+use super::{AppState, MetricKind, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::metrics::{
     Agg, CatalogRow, EventRow, ExemplarRow, Field, GroupKey, HistogramRow, MAX_SERIES,
-    MetricFilter, MetricQueries, NameCountRow, SeriesRow, quantile_from_histogram,
+    MetricFilter, MetricKindRow, MetricQueries, NameCountRow, SeriesRow, quantile_from_histogram,
 };
 use crate::query::traces::AttrFilter;
 use crate::query::{Bucket, TimeRange, parse_tz};
@@ -241,7 +241,113 @@ pub struct QueryResponse {
     pub series: Vec<SeriesOut>,
     /// 时间线超过 `limit` 条，只返回了最大的那些
     pub truncated: bool,
+    /// 这个指标的类型（`Gauge` / `Sum` / `Histogram`…）。这段时间一个点都没有时是 null
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metric_type: Option<String>,
+    /// 结果为空之类的情况下，给人 / 给模型看的一句话
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub stats: Stats,
+}
+
+/// 直方图那一族：取值不在 `value` 列上，而在 `count` / `sum` / `bucket_counts` 里。
+fn is_bucketed(metric_type: &str) -> bool {
+    metric_type.ends_with("Histogram") || metric_type == "Summary"
+}
+
+fn field_name(field: Field) -> &'static str {
+    match field {
+        Field::Value => "value",
+        Field::Count => "count",
+        Field::Sum => "sum",
+        Field::Min => "min",
+        Field::Max => "max",
+    }
+}
+
+/// 没给 `agg` 时按类型挑一个，和页面上 `aggOptions` 的第一项一致：直方图看分位数，counter 看
+/// 速率，up-down counter 看当前值，gauge 看平均。
+fn default_agg(kind: &MetricKind) -> Agg {
+    match kind.metric_type.as_str() {
+        "Histogram" if kind.has_bounds == 1 => Agg::Quantile,
+        // 指数直方图 / Summary 插不出分位数，只有 sum / count 能看
+        t if is_bucketed(t) => Agg::Mean,
+        "Sum" if kind.is_monotonic == 1 => Agg::Rate,
+        "Sum" => Agg::Last,
+        _ => Agg::Avg,
+    }
+}
+
+/// 没给 `field` 时按类型和 `agg` 挑一列。
+fn default_field(kind: &MetricKind, agg: Agg) -> Field {
+    if !is_bucketed(&kind.metric_type) {
+        return Field::Value;
+    }
+    match agg {
+        Agg::Rate | Agg::Increase | Agg::Count => Field::Count,
+        Agg::Min => Field::Min,
+        Agg::Max => Field::Max,
+        // mean 要 sum ÷ count；quantile 根本不看这一列
+        _ => Field::Sum,
+    }
+}
+
+/// 这个类型 + 这个组合查出来必然没意义时的说明。五种类型共用一张表、用不上的列留默认值，
+/// 所以查错列不会报错，只会安安静静地回一片 0——线上真按这个误判过「集群没有 GC」。
+fn combo_problem(kind: &MetricKind, agg: Agg, field: Field) -> Option<String> {
+    let ty = &kind.metric_type;
+    if is_bucketed(ty) {
+        if field == Field::Value && agg != Agg::Quantile {
+            return Some(format!(
+                "{ty} 的 value 列是空的（五种指标类型共用一张表，用不上的列留默认值），                 按 value 聚合出来只会是一片 0。分位数用 agg=quantile（q=0.95），                 平均值用 agg=mean&field=sum，次数用 agg=rate&field=count"
+            ));
+        }
+        if agg == Agg::Quantile && kind.has_bounds == 0 {
+            return Some(format!(
+                "{ty} 没有 explicit_bounds（指数直方图的桶是 base^i 编码的，Summary 的分位数是                 采集端算好的），插不出分位数。用 agg=mean&field=sum 看平均、                 agg=rate&field=count 看次数、field=max 看最大值"
+            ));
+        }
+    } else {
+        if agg == Agg::Quantile {
+            return Some(format!(
+                "{ty} 不是直方图，没有桶可以插值。gauge 用 avg / max / last，counter 用 rate / increase"
+            ));
+        }
+        if field != Field::Value {
+            return Some(format!(
+                "{ty} 只有 value 列，field={} 是直方图才有的列，查出来是 0",
+                field_name(field)
+            ));
+        }
+    }
+    None
+}
+
+/// 这个指标是什么类型：一行就够，而且缓存起来——一个服务面板十几块图，每块图都问一次就是
+/// 十几趟多余的往返。查不到（这段时间没有数据点）不缓存：下次换个时间范围可能就有了。
+///
+/// 缓存键带上限定的服务：同一个指标名在不同服务上报成不同类型是可能的（目录就是按
+/// `(metric_name, metric_type)` 分组的），按名字一把缓存会张冠李戴。
+pub async fn metric_kind(
+    state: &AppState,
+    table: &Table,
+    f: &MetricFilter,
+) -> Result<Option<MetricKind>> {
+    let key = format!("{}\u{1}{}", f.metric, f.services.join(","));
+    if let Some(kind) = state.metric_kinds.get(&key) {
+        return Ok(Some(kind));
+    }
+    let result = state.client.rows::<MetricKindRow>(queries(state, table).metric_kind(f)?).await?;
+    let Some(row) = result.rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let kind = MetricKind {
+        metric_type: row.metric_type,
+        is_monotonic: row.is_monotonic,
+        has_bounds: row.has_bounds,
+    };
+    state.metric_kinds.put(key, kind.clone());
+    Ok(Some(kind))
 }
 
 /// 分组维度的取值 → 每个桶的值。按分组键收集，保持「一条时间线一行」。
@@ -334,23 +440,41 @@ async fn query(State(state): State<AppState>, p: Params) -> Result<Json<QueryRes
     let range = range(&state, &p)?;
     let bucket = bucket(&state, &range, &p)?;
     let f = filter(range, &p)?;
-    let agg = Agg::parse(p.get("agg"))?;
-    let field = Field::parse(p.get("field"))?;
+    let (asked_agg, asked_field) = (p.get("agg").is_some(), p.get("field").is_some());
+    let mut agg = Agg::parse(p.get("agg"))?;
+    let mut field = Field::parse(p.get("field"))?;
     let by: Vec<GroupKey> =
         p.get_list("by").iter().map(|k| GroupKey::parse(k)).collect::<Result<_>>()?;
     let limit = p.get_limit("limit", 20, MAX_SERIES)?;
     let q = queries(&state, table);
+
+    // 先问一句这个指标是什么类型（`LIMIT 1`，和主查询同一个 WHERE 前缀，很便宜），再决定
+    // 取哪一列怎么聚：五种类型共用一张表、用不上的列留默认值，「avg + value」这套 gauge 的
+    // 默认查法用在直方图上不会报错，只会安静地回一片 0。没给的参数按类型挑，给了但查出来
+    // 必然没意义的组合直接拒掉——拒在主查询之前，也省了那一趟。
+    let kind = metric_kind(&state, table, &f).await?;
+    if let Some(k) = &kind {
+        if !asked_agg {
+            agg = default_agg(k);
+        }
+        if !asked_field {
+            field = default_field(k, agg);
+        }
+        if let Some(msg) = combo_problem(k, agg, field) {
+            return Err(Error::bad_request(format!("{}：{msg}", f.metric)));
+        }
+    }
     let mut collector = Collector::new(&by, &bucket, &range);
+    let quantiles = if agg == Agg::Quantile { Some(quantiles(&p)?) } else { None };
 
     // 多要一条时间线，好知道是不是被截断了
-    let stats = if agg == Agg::Quantile {
-        let quantiles = quantiles(&p)?;
+    let stats = if let Some(quantiles) = &quantiles {
         let result =
             state.client.rows::<HistogramRow>(q.histogram(&f, &by, &bucket, limit + 1)?).await?;
         // 一个分组 × 一个分位数 = 一条线，分位数作为最后一个标签
         collector.by.push("quantile".to_owned());
         for row in result.rows {
-            for (label, quantile) in &quantiles {
+            for (label, quantile) in quantiles {
                 let mut keys = row.keys.clone();
                 keys.push(label.clone());
                 let v = quantile_from_histogram(&row.counts, &row.bounds, *quantile);
@@ -368,6 +492,13 @@ async fn query(State(state): State<AppState>, p: Params) -> Result<Json<QueryRes
         }
         result.stats
     };
+    let note = match &kind {
+        None => Some(format!(
+            "{} 在这段时间里一个数据点都没有：指标名写错了？换个时间范围、或者用 /api/metrics 看目录",
+            f.metric
+        )),
+        Some(_) => None,
+    };
 
     let first = bucket.first_index(&range);
     let t_ms: Vec<i64> = (0..collector.count as i64).map(|i| bucket.start_ms(first + i)).collect();
@@ -384,6 +515,8 @@ async fn query(State(state): State<AppState>, p: Params) -> Result<Json<QueryRes
         t_ms,
         series,
         truncated: over || cut,
+        metric_type: kind.map(|k| k.metric_type),
+        note,
         stats,
     }))
 }
@@ -531,7 +664,21 @@ async fn events(State(state): State<AppState>, p: Params) -> Result<Json<EventsR
     let schema = metrics_table(&state).await?;
     let table = schema.metrics.as_ref().expect("metrics_table 已检查");
     let f = filter(range(&state, &p)?, &p)?;
-    let field = Field::parse(p.get("field"))?;
+    let mut field = Field::parse(p.get("field"))?;
+    // 和 `query` 一样：直方图的 value 列是空的，照 value 找「累计值掉回去」永远一个都找不到，
+    // 看着就像「这段时间没有任何重启」。没给 field 就按类型挑，给错了直接说
+    if let Some(kind) = metric_kind(&state, table, &f).await?
+        && is_bucketed(&kind.metric_type)
+    {
+        if p.get("field").is_none() {
+            field = Field::Count;
+        } else if field == Field::Value {
+            return Err(Error::bad_request(format!(
+                "{}：{} 的 value 列是空的，重启看不出来。直方图用 field=count",
+                f.metric, kind.metric_type
+            )));
+        }
+    }
     let q = queries(&state, table);
     let (restarts, starts) = tokio::try_join!(
         state.client.rows::<EventRow>(q.restarts(&f, field, MAX_EVENTS)?),

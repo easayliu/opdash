@@ -135,12 +135,14 @@ async fn handle(State(mcp): State<Arc<Mcp>>, headers: HeaderMap, body: Bytes) ->
                     error_message(Value::Null, INVALID_REQUEST, "空的批量请求"),
                 );
             }
-            let mut out = Vec::new();
-            for item in items {
-                if let Some(r) = dispatch(&mcp, item).await {
-                    out.push(r);
-                }
-            }
+            // 一批里的请求互不相干，并发跑（并发上限由 ClickHouse 客户端自己的信号量兜着）；
+            // join_all 保序，回应的顺序还是请求的顺序
+            let out: Vec<Value> =
+                futures_util::future::join_all(items.into_iter().map(|item| dispatch(&mcp, item)))
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .collect();
             if out.is_empty() {
                 accepted()
             } else {
@@ -252,7 +254,7 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
     match method {
         "initialize" => Ok(initialize(mcp, params).await),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::list() })),
+        "tools/list" => Ok(json!({ "tools": tools::list(metrics_enabled(mcp).await) })),
         "tools/call" => {
             let name = params["name"]
                 .as_str()
@@ -277,7 +279,7 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
                     INVALID_PARAMS,
                     format!(
                         "没有叫 {name:?} 的工具；可用: {}",
-                        tools::list()
+                        tools::list(metrics_enabled(mcp).await)
                             .iter()
                             .filter_map(|t| t["name"].as_str())
                             .collect::<Vec<_>>()
@@ -289,6 +291,16 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
         }
         // 没声明 resources / prompts / logging 能力，客户端问了就按协议回「没有这个方法」
         other => Err(RpcError::new(METHOD_NOT_FOUND, format!("不支持的方法: {other}"))),
+    }
+}
+
+/// 这个部署有没有指标表。表结构是带缓存的（`initialize` 通常已经读过一遍），这里基本不会真去
+/// 连库；读不到就当有——真没有的话工具调用时会报「指标页未启用」，总比因为库抖了一下就把
+/// 半个工具目录藏起来好。
+async fn metrics_enabled(mcp: &Mcp) -> bool {
+    match mcp.state.schema.get().await {
+        Ok(schema) => schema.metrics.is_some(),
+        Err(_) => true,
     }
 }
 
@@ -318,7 +330,10 @@ async fn instructions(mcp: &Mcp) -> String {
          排障套路：\n\
          1. 先 service_overview 看「谁不对」（错误率 / P95 和对比时段比，health 字段是结论），再 service_operations 看是哪个接口变了；\n\
          2. error_groups 看在报什么错；拿 sample_trace 用 get_trace 看整条链路，get_span 看某个 span 的属性和异常堆栈；\n\
-         3. search_logs 按 trace_id / 关键字翻日志，log_histogram 看错误是从什么时候开始的，log_context 看某条日志前后几行。\n\
+         3. search_logs 按 trace_id / 关键字翻日志，log_histogram 看错误是从什么时候开始的，log_context 看某条日志前后几行；\n\
+         4. 指标：query_metric 看曲线，metric_exemplars 把尖峰直接换成 trace_id（省得拿时间去撞），metric_events 看这个时刻是不是有重启 / 发布。\n\
+         \n\
+         要按属性筛（search_traces 的 attr、query_metric 的 by / attr）之前先 list_attrs 列一遍属性名，别猜。\n\
          \n\
          时间参数：from / to / at / time 接受 RFC3339（2026-09-18T10:00:00+08:00）、本地时间（2026-09-18 10:00:00，时区 {tz}）、\
          unix 秒或毫秒、相对写法（now-30m、-2h、now）。range 是时间跨度（15m / 1h / 24h / 7d）：不给 from 时 from = to - range，to 默认现在。\

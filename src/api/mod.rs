@@ -29,17 +29,63 @@ pub struct AppState {
     /// 跟随连接的名额。每条连接在整个生命周期里都握着一个，长期占着 ClickHouse 的查询频率，
     /// 和单条查询的并发（[`Client`] 自己的信号量）不是一回事，所以单独限。
     pub tails: Arc<Semaphore>,
+    /// 指标名 → 这个指标是什么类型，见 [`metrics::metric_kind`]。
+    pub metric_kinds: Arc<MetricKinds>,
 }
 
 impl AppState {
     pub fn new(config: Config, client: Client, schema: Arc<SchemaCache>) -> Self {
         let tails = Arc::new(Semaphore::new(config.max_tail_streams.max(1)));
-        Self { config: Arc::new(config), client, schema, tails }
+        Self {
+            config: Arc::new(config),
+            client,
+            schema,
+            tails,
+            metric_kinds: Arc::new(MetricKinds::default()),
+        }
     }
 
     /// 当前时间，unix 毫秒。集中一处方便测试替换。
     pub fn now_ms(&self) -> i64 {
         chrono::Utc::now().timestamp_millis()
+    }
+}
+
+/// 指标类型的小缓存。类型是指标自身的属性（同一个 `metric_name` 不会今天是直方图明天是
+/// gauge），但每次查图之前都要问一次；一个服务面板十几块图，不缓存就是十几趟多余的往返。
+/// 过期只是为了认得出「表重建、指标换了类型」这种事，正常永远命中。
+#[derive(Default)]
+pub struct MetricKinds {
+    map: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, MetricKind)>>,
+}
+
+/// 缓存里存的东西，[`crate::query::metrics::MetricKindRow`] 的一份拷贝。
+#[derive(Clone)]
+pub struct MetricKind {
+    pub metric_type: String,
+    pub is_monotonic: u8,
+    pub has_bounds: u8,
+}
+
+/// 缓存多久。指标类型基本不变，长一点没关系；换了类型最多这么久之后认出来。
+const METRIC_KIND_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// 最多缓存多少个指标名。线上指标名两千上下，超了整个清空重来——这是防内存无限涨的兜底，
+/// 不是淘汰策略。
+const METRIC_KIND_MAX: usize = 8192;
+
+impl MetricKinds {
+    pub fn get(&self, key: &str) -> Option<MetricKind> {
+        let map = self.map.lock();
+        let (at, kind) = map.get(key)?;
+        (at.elapsed() < METRIC_KIND_TTL).then(|| kind.clone())
+    }
+
+    pub fn put(&self, key: String, kind: MetricKind) {
+        let mut map = self.map.lock();
+        if map.len() >= METRIC_KIND_MAX {
+            map.clear();
+        }
+        map.insert(key, (std::time::Instant::now(), kind));
     }
 }
 

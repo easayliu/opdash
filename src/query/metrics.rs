@@ -289,6 +289,16 @@ pub struct EventRow {
     pub service_name: String,
 }
 
+/// [`MetricQueries::metric_kind`] 的一行。
+#[derive(Debug, Deserialize)]
+pub struct MetricKindRow {
+    pub metric_type: String,
+    #[serde(deserialize_with = "num::de")]
+    pub is_monotonic: u8,
+    #[serde(deserialize_with = "num::de")]
+    pub has_bounds: u8,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ExemplarRow {
     #[serde(deserialize_with = "num::de")]
@@ -331,6 +341,23 @@ impl MetricQueries<'_> {
 
     /// 有哪些指标。`metric_description` 只取一个代表值——同名指标不同服务的描述理应一样。
     /// `services` 取到 100 个：页面要靠它列出「有指标的服务」，截断了就会少几个服务。
+    /// 这个指标是什么类型：一行就够（同名指标的类型不会变）。五种类型共用一张表、用不上的列
+    /// 留默认值，所以「取哪一列」全看类型——直方图的 `value` 是 0，照 Gauge 的默认查法查回来
+    /// 是一片 0，看着像「没有 GC」，其实是查错了列。
+    pub fn metric_kind(&self, filter: &MetricFilter) -> Result<Query> {
+        let mut b = Bindings::new();
+        let where_sql = filter.where_sql(&mut b)?;
+        let sql = format!(
+            "SELECT metric_type, toUInt8(is_monotonic) AS is_monotonic,
+               notEmpty(explicit_bounds) AS has_bounds
+             FROM {from}
+WHERE {where_sql}
+LIMIT 1",
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
     pub fn catalog(&self, range: &TimeRange, services: &[String], limit: u32) -> Result<Query> {
         let mut b = Bindings::new();
         let mut where_sql = b.time_predicate("timestamp", range);
