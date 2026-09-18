@@ -16,6 +16,10 @@ const TTL_OPTIONS = [
   { value: '365d', label: '1 年' },
 ]
 
+/** 到期前多少天开始提醒。7 天够换一把了 */
+const EXPIRING_SOON_DAYS = 7
+const DAY_MS = 86_400_000
+
 function ttlDays(s: string): number {
   const m = /^(\d+)(d|h|m)$/.exec(s.trim())
   if (!m) return Infinity
@@ -23,7 +27,29 @@ function ttlDays(s: string): number {
   return m[2] === 'd' ? n : m[2] === 'h' ? n / 24 : n / 1440
 }
 
-const fmt = (iso: string) => new Date(iso).toLocaleString(undefined, { hour12: false })
+const pad = (n: number) => String(n).padStart(2, '0')
+
+/** `2026-09-18 15:01`。固定写法，不跟浏览器 locale 走（`2026/9/18` 这种宽度会飘） */
+function fmt(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * 「还有 89 天」「3 分钟前」。表格里真正要看的是**还能用多久**、**多久没用了**，
+ * 绝对时间挪到 title 里 —— 顺带把行宽压下来，窄屏不再横向滚。
+ */
+function rel(iso: string): string {
+  const diff = new Date(iso).getTime() - Date.now()
+  const abs = Math.abs(diff)
+  const [unit, ms] =
+    abs < 60_000 ? (['秒', 1000] as const)
+    : abs < 3_600_000 ? (['分钟', 60_000] as const)
+    : abs < DAY_MS ? (['小时', 3_600_000] as const)
+    : (['天', DAY_MS] as const)
+  const n = Math.max(1, Math.round(abs / ms))
+  return diff >= 0 ? `还有 ${n} ${unit}` : `${n} ${unit}前`
+}
 
 /**
  * 管理自己的 API key：MCP 客户端（Claude Code 等）和脚本用它当 `Authorization: Bearer`。
@@ -55,7 +81,7 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
     setBusy(true)
     setError(null)
     try {
-      setCreated(await apiPost<ApiKeyCreated>('/auth/keys', { name, ttl }))
+      setCreated(await apiPost<ApiKeyCreated>('/auth/keys', { name: name.trim(), ttl }))
       await refresh()
     } catch (err) {
       setError((err as Error).message)
@@ -85,6 +111,8 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
     ? `[mcp_servers.opdash]\nurl = "${created.mcp_url}"\nhttp_headers = { Authorization = "Bearer ${created.key}" }`
     : ''
   const keys = list.data?.keys ?? []
+  const live = keys.filter((k) => !k.expired).length
+  const user = me.user
 
   return (
     <>
@@ -93,29 +121,42 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
         role="dialog"
         aria-modal="true"
         aria-labelledby="api-key-title"
-        className="fixed inset-x-3 top-16 z-50 mx-auto flex max-h-[calc(100dvh-5rem)] max-w-2xl flex-col rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[42rem] md:-translate-x-1/2"
+        className="fixed inset-x-3 top-16 z-50 mx-auto flex max-h-[calc(100dvh-5rem)] max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[44rem] md:-translate-x-1/2"
       >
-        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
-          <KeyRoundIcon className="size-4 text-muted-fg" />
-          <h2 id="api-key-title" className="flex-1 text-sm font-semibold">
-            API key · 给 AI 助手和脚本用
-          </h2>
+        <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3">
+          <KeyRoundIcon className="mt-0.5 size-4 shrink-0 text-muted-fg" />
+          <div className="min-w-0 flex-1">
+            <h2 id="api-key-title" className="text-sm font-semibold">
+              API key · 给 AI 助手和脚本用
+            </h2>
+            {user && (
+              <p className="mt-0.5 truncate text-2xs text-muted-fg" title={user.email ?? undefined}>
+                当前登录 <span className="font-medium text-fg">{user.name}</span> —— key 归在你名下，只有你自己看得到
+              </p>
+            )}
+          </div>
           <Button variant="ghost" className="px-2" onClick={onClose} title="关闭 (Esc)">
             <XIcon className="size-4" />
           </Button>
         </header>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
-          <p className="text-xs leading-5 text-muted-fg">
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto p-4">
+          <p className="text-2xs leading-5 text-muted-fg">
             key 代表你本人，能看的和你登录后能看的一样。Claude Code 这类 MCP 客户端不会跳浏览器登录，所以靠 key 接{' '}
-            <span className="mono">/mcp</span>；curl / 脚本也可以拿它当 <span className="mono">Authorization: Bearer</span>。
-            服务端只存哈希，key 只在生成时显示一次；不要了随时吊销。
+            <span className="mono">/mcp</span>；curl / 脚本也能拿它当 <span className="mono">Authorization: Bearer</span>。
+            服务端只存哈希，key 只在生成时显示一次；不要了随时吊销，立刻失效。
           </p>
 
           <form onSubmit={submit} className="flex flex-wrap items-end gap-2 rounded-md border border-border bg-muted/40 p-3">
             <label className="flex min-w-40 flex-1 flex-col gap-1 text-2xs text-muted-fg">
-              名字（只是标签）
-              <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder="claude-code" className="h-8 text-xs" />
+              名字（只是标签，方便以后认出是哪台机器 / 哪个客户端）
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={64}
+                placeholder="claude-code"
+                className="h-8 text-xs"
+              />
             </label>
             <label className="flex flex-col gap-1 text-2xs text-muted-fg">
               有效期
@@ -128,7 +169,7 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
                 {!options.some((o) => o.value === ttl) && <option value={ttl}>{ttl}（上限）</option>}
               </Select>
             </label>
-            <Button type="submit" variant="primary" size="sm" disabled={busy}>
+            <Button type="submit" variant="primary" size="sm" disabled={busy || !name.trim()}>
               {busy ? '生成中…' : '生成新 key'}
             </Button>
           </form>
@@ -157,35 +198,46 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
             </div>
           )}
 
-          {error && <p className="text-xs text-danger">{error}</p>}
+          {error && (
+            <p className="rounded-md border border-danger/40 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>
+          )}
 
-          <section className="flex flex-col gap-1">
-            <div className="flex items-center justify-between text-xs text-muted-fg">
-              <span>我的 key</span>
+          <section className="flex min-w-0 flex-col gap-1.5">
+            <div className="flex items-center gap-2 text-xs text-muted-fg">
+              <span className="font-medium text-fg">我的 key</span>
+              {keys.length > 0 && (
+                <span>
+                  {live} 把在用
+                  {keys.length > live && ` · ${keys.length - live} 把已过期`}
+                </span>
+              )}
               {list.isFetching && <Spinner className="size-3" />}
             </div>
             {list.isError && <p className="text-xs text-danger">{(list.error as Error).message}</p>}
             {list.data && keys.length === 0 && (
-              <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-fg">还没有 key，上面生成一把</p>
+              <p className="rounded-md border border-dashed border-border px-3 py-8 text-center text-xs text-muted-fg">
+                还没有 key，上面生成一把
+              </p>
             )}
             {keys.length > 0 && (
-              <table className="w-full text-xs">
-                <thead className="text-left text-2xs text-muted-fg">
-                  <tr>
-                    <th className="py-1 pr-2 font-medium">名字</th>
-                    <th className="py-1 pr-2 font-medium">key</th>
-                    <th className="hidden py-1 pr-2 font-medium sm:table-cell">创建</th>
-                    <th className="py-1 pr-2 font-medium">到期</th>
-                    <th className="hidden py-1 pr-2 font-medium md:table-cell">最近使用</th>
-                    <th className="py-1" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {keys.map((k) => (
-                    <KeyRow key={k.id} k={k} highlight={created?.id === k.id} onRevoke={() => revoke(k)} />
-                  ))}
-                </tbody>
-              </table>
+              <div className="min-w-0 overflow-x-auto rounded-md border border-border">
+                <table className="w-full min-w-[34rem] text-xs">
+                  <thead className="bg-muted/60 text-left text-2xs text-muted-fg">
+                    <tr>
+                      <th className="px-2.5 py-1.5 font-medium">名字</th>
+                      <th className="px-2.5 py-1.5 font-medium">key</th>
+                      <th className="px-2.5 py-1.5 font-medium">到期</th>
+                      <th className="hidden px-2.5 py-1.5 font-medium sm:table-cell">最近使用</th>
+                      <th className="w-10 px-2.5 py-1.5" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {keys.map((k) => (
+                      <KeyRow key={k.id} k={k} highlight={created?.id === k.id} onRevoke={() => revoke(k)} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
         </div>
@@ -202,23 +254,38 @@ function KeyRow({ k, highlight, onRevoke }: { k: ApiKeyInfo; highlight: boolean;
     const t = setTimeout(() => setArm(false), 4000)
     return () => clearTimeout(t)
   }, [arm])
+  const soon = !k.expired && new Date(k.expires_at).getTime() - Date.now() < EXPIRING_SOON_DAYS * DAY_MS
   return (
-    <tr className={highlight ? 'bg-brand/5' : undefined}>
-      <td className="max-w-40 truncate py-1.5 pr-2 font-medium" title={k.name}>
+    <tr className={highlight ? 'border-t border-border bg-brand/5' : 'row-hover border-t border-border'}>
+      <td className="max-w-40 truncate px-2.5 py-1.5 font-medium" title={`${k.name}（创建于 ${fmt(k.created_at)}）`}>
         {k.name}
       </td>
-      <td className="mono py-1.5 pr-2 text-2xs text-muted-fg" title="key 的前半段，后半段服务端也没存">
+      <td className="mono px-2.5 py-1.5 text-2xs text-muted-fg" title="key 的前半段，后半段服务端也没存">
         {k.prefix}…
       </td>
-      <td className="hidden py-1.5 pr-2 whitespace-nowrap text-muted-fg sm:table-cell">{fmt(k.created_at)}</td>
-      <td className="py-1.5 pr-2 whitespace-nowrap text-muted-fg">
-        {k.expired ? <Badge tone="danger">已过期</Badge> : fmt(k.expires_at)}
+      <td className="px-2.5 py-1.5 whitespace-nowrap" title={fmt(k.expires_at)}>
+        {k.expired ?
+          <Badge tone="danger">已过期</Badge>
+        : soon ?
+          <Badge tone="warn">{rel(k.expires_at)}</Badge>
+        : <span className="text-muted-fg">{rel(k.expires_at)}</span>}
       </td>
-      <td className="hidden py-1.5 pr-2 whitespace-nowrap text-muted-fg md:table-cell">{k.last_used_at ? fmt(k.last_used_at) : '从没用过'}</td>
-      <td className="py-1.5 text-right">
-        <Button size="xs" variant={arm ? 'danger' : 'ghost'} onClick={() => (arm ? onRevoke() : setArm(true))} title="吊销后立刻失效">
+      <td
+        className="hidden px-2.5 py-1.5 whitespace-nowrap text-muted-fg sm:table-cell"
+        title={k.last_used_at ? fmt(k.last_used_at) : '签出来之后一次都没用过'}
+      >
+        {k.last_used_at ? rel(k.last_used_at) : '从没用过'}
+      </td>
+      <td className="px-1.5 py-1.5 text-right">
+        <Button
+          size="xs"
+          variant={arm ? 'danger' : 'ghost'}
+          className="px-1.5"
+          onClick={() => (arm ? onRevoke() : setArm(true))}
+          title={arm ? '再点一下就真的吊销了' : '吊销后立刻失效'}
+        >
           <Trash2Icon className="size-3.5" />
-          {arm ? '确认吊销' : '吊销'}
+          {arm && '确认'}
         </Button>
       </td>
     </tr>

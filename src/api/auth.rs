@@ -47,6 +47,7 @@ struct Me {
 
 #[derive(Serialize)]
 struct User {
+    /// 给人看的名字：OIDC 给的姓名（中文名优先），其它身份就是账号名
     name: String,
     email: Option<String>,
 }
@@ -65,8 +66,10 @@ async fn me(State(auth): State<Auth>, headers: HeaderMap) -> Response {
         return unauthorized(&auth);
     }
     let kind = identity.as_ref().map(Identity::kind);
-    let user = identity
-        .map(|id| User { name: id.user().to_owned(), email: id.email().map(str::to_owned) });
+    let user = identity.map(|id| User {
+        name: id.display_name().to_owned(),
+        email: id.email().map(str::to_owned),
+    });
     let oidc = auth.oidc().is_some();
     Json(Me {
         mode: auth.mode(),

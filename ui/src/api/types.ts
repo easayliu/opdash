@@ -23,6 +23,7 @@ export interface TableMeta {
 /** GET /api/auth/me：登录方式和当前用户。`mode === 'oidc'` 且 `user` 为空 = 该去登录了。 */
 export interface AuthMe {
   mode: 'none' | 'basic' | 'oidc'
+  /** `name` 是给人看的名字：OIDC 给的姓名（中文名优先） */
   user: { name: string; email: string | null } | null
   /** 这个请求是怎么认出来的；没认出来是 null */
   identity: 'session' | 'basic' | 'api_key' | null

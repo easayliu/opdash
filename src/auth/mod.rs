@@ -61,12 +61,21 @@ pub enum Identity {
 }
 
 impl Identity {
-    /// 给日志 / 页面看的名字。
+    /// 认人用的账号名：API key 归在它名下，日志也记它。**不要拿显示名代替它** ——
+    /// OIDC 的显示名会跟着 IdP 改（比如换成中文姓名），换一次老的 key 就全认不回来了。
     pub fn user(&self) -> &str {
         match self {
             Identity::Basic { user } => user,
-            Identity::Session(s) => &s.name,
+            Identity::Session(s) => s.account(),
             Identity::ApiKey(k) => &k.user,
+        }
+    }
+
+    /// 页面上显示的名字。OIDC 会话优先用 IdP 给的姓名（中文名），其它身份就是账号名。
+    pub fn display_name(&self) -> &str {
+        match self {
+            Identity::Session(s) => &s.name,
+            _ => self.user(),
         }
     }
 

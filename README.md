@@ -246,6 +246,12 @@ OPDASH_SESSION_SECRET=$(openssl rand -hex 32)            # 可选；多副本必
 它是 opdash 自己走 TLS 直连 token 端点拿的，链路已经证明了签发方（OIDC Core 3.1.3.7 允许这么做），
 所以 **issuer 必须是 https**。顶栏右侧显示用户名，退出会顺带结束 Keycloak 那边的 SSO 会话。
 
+页面上显示的名字优先取 `name` claim —— Keycloak 里填了姓和名的话它就是**中文姓名**，比
+`preferred_username`（登录用的英文账号）好认；`name` 空了就退回账号名、邮箱。Keycloak 里要让
+`name` 进 id_token，client 的 scope 留着 `profile` 就行（默认就有）。**认人的仍然是账号名**
+（`preferred_username`）：API key 归在它名下、日志里记的也是它，所以 IdP 那边改个显示名，
+谁的 key 都不会突然「不见了」。
+
 ```text
 GET  /api/auth/me        登录方式和当前用户；没登录也 200（前端据此跳登录）
 GET  /api/auth/login     ?next=/logs   生成登录票，跳 Keycloak

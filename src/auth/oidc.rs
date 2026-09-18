@@ -56,8 +56,21 @@ pub struct LoginTicket {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
     pub sub: String,
+    /// 账号名（`preferred_username`，没有就 sub）。**API key 的归属和审计日志按它认人**，
+    /// 所以它不跟着显示名走：显示名换成中文姓名之后，之前签出去的 key 还得认得回来。
+    #[serde(default)]
+    pub user: String,
+    /// 给人看的名字，中文姓名优先（`name` claim）。
     pub name: String,
     pub email: Option<String>,
+}
+
+impl Session {
+    /// 认人用的账号名。老的会话 cookie 里没有 `user` 字段，那时候 `name` 存的就是账号名，
+    /// 退回去用它 —— 不然升级之后大家的 key 一下子全「不见了」。
+    pub fn account(&self) -> &str {
+        if self.user.is_empty() { &self.name } else { &self.user }
+    }
 }
 
 /// token 端点响应里用得到的字段。
@@ -77,6 +90,7 @@ pub struct Claims {
     pub nonce: Option<String>,
     pub sub: Option<String>,
     pub preferred_username: Option<String>,
+    /// 显示名。中文姓名一般在这里（Keycloak 的「姓 + 名」、企业 IdP 的 `name`）。
     pub name: Option<String>,
     pub email: Option<String>,
     /// Keycloak：realm 角色在 `realm_access.roles`
@@ -259,12 +273,9 @@ impl Oidc {
             return Err(OidcError::Invalid("id_token 的 nonce 对不上".into()));
         }
         let sub = id.sub.clone().ok_or_else(|| OidcError::Invalid("id_token 没有 sub".into()))?;
-        let name = id
-            .preferred_username
-            .clone()
-            .or_else(|| id.name.clone())
-            .or_else(|| id.email.clone())
-            .unwrap_or_else(|| sub.clone());
+        // 账号名认人（key 归属、审计日志），显示名给人看，两者分开
+        let account = id.preferred_username.clone().unwrap_or_else(|| sub.clone());
+        let name = display_name(&id, &account);
 
         if let Some(role) = &self.required_role {
             // Keycloak 默认只把角色放进 access_token（realm roles 映射器的「Add to ID token」默认关），
@@ -278,7 +289,7 @@ impl Oidc {
                 return Err(OidcError::Forbidden { user: name, role: role.clone() });
             }
         }
-        Ok(Session { sub, name, email: id.email })
+        Ok(Session { sub, user: account, name, email: id.email })
     }
 
     /// Keycloak 的登出地址：结束 SSO 会话后跳回 `post_logout`。没有 end_session 端点就返回 None。
@@ -294,6 +305,20 @@ impl Oidc {
     pub fn seal_ticket(&self, sealer: &Sealer, ticket: &LoginTicket) -> String {
         sealer.seal(KIND_LOGIN, ticket, LOGIN_TICKET_TTL)
     }
+}
+
+/// 页面上显示哪个名字：`name` -> 账号名 -> `email`。
+///
+/// 中文姓名一般在 `name` 里（Keycloak 里填了姓和名就有），而 `preferred_username`
+/// 往往是登录用的英文账号 —— 以前是后者优先，所以页面上看到的是英文。
+fn display_name(c: &Claims, account: &str) -> String {
+    [c.name.as_deref(), Some(account), c.email.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or(account)
+        .to_owned()
 }
 
 fn has_role(c: &Claims, client_id: &str, role: &str) -> bool {
@@ -342,5 +367,39 @@ mod tests {
         assert!(c.aud.contains("opdash"));
         assert!(decode_claims("not.a").is_err());
         assert!(decode_claims("a.!!!.c").is_err());
+    }
+
+    fn claims(payload: serde_json::Value) -> Claims {
+        decode_claims(&jwt(payload)).unwrap()
+    }
+
+    /// 页面上要的是中文姓名，不是登录用的英文账号。
+    #[test]
+    fn display_name_prefers_the_name_claim() {
+        let c = claims(serde_json::json!({
+            "sub": "u1", "preferred_username": "easayliu", "name": "刘易", "email": "e@x"
+        }));
+        assert_eq!(display_name(&c, "easayliu"), "刘易");
+
+        // 没有 name（或者只有空白）就还是账号名，再没有才是邮箱
+        let c = claims(serde_json::json!({"preferred_username": "easayliu", "name": "  "}));
+        assert_eq!(display_name(&c, "easayliu"), "easayliu");
+        let c = claims(serde_json::json!({"email": "e@x"}));
+        assert_eq!(display_name(&c, "u1"), "u1");
+    }
+
+    /// 显示名换成中文之后，账号名不能跟着变：API key 是按它认归属的。
+    #[test]
+    fn account_stays_the_login_name_and_old_cookies_still_work() {
+        let fresh =
+            Session {
+                sub: "u1".into(), user: "easayliu".into(), name: "刘易".into(), email: None
+            };
+        assert_eq!(fresh.account(), "easayliu");
+
+        // 升级前签的会话 cookie 里没有 user 字段，那时 name 存的就是账号名
+        let old: Session =
+            serde_json::from_str(r#"{"sub":"u1","name":"easayliu","email":null}"#).unwrap();
+        assert_eq!(old.account(), "easayliu", "老 cookie 的 key 还得认得回来");
     }
 }
