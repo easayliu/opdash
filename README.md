@@ -246,11 +246,16 @@ OPDASH_SESSION_SECRET=$(openssl rand -hex 32)            # 可选；多副本必
 它是 opdash 自己走 TLS 直连 token 端点拿的，链路已经证明了签发方（OIDC Core 3.1.3.7 允许这么做），
 所以 **issuer 必须是 https**。顶栏右侧显示用户名，退出会顺带结束 Keycloak 那边的 SSO 会话。
 
-页面上显示的名字优先取 `name` claim —— Keycloak 里填了姓和名的话它就是**中文姓名**，比
-`preferred_username`（登录用的英文账号）好认；`name` 空了就退回账号名、邮箱。Keycloak 里要让
-`name` 进 id_token，client 的 scope 留着 `profile` 就行（默认就有）。**认人的仍然是账号名**
-（`preferred_username`）：API key 归在它名下、日志里记的也是它，所以 IdP 那边改个显示名，
-谁的 key 都不会突然「不见了」。
+页面上显示的名字优先取 `name` claim —— Keycloak 里填了 First / Last name 的话它就是**中文姓名**，
+比 `preferred_username`（登录用的拼音账号）好认；没有 `name` 就拿 `given_name` + `family_name`
+自己拼，再没有才退回账号名、邮箱。Keycloak 是用空格把两栏拼成 `name` 的（中文习惯是 First name
+填姓、Last name 填名，拼出来中间就多一个空格），**全是汉字时那个空格会去掉**，英文名
+（`Jane Doe`）保持原样。要让这几个 claim 进 id_token，client 的 scope 留着 `profile` 就行（默认就有）；
+**两栏都没填的用户仍然显示账号名**。
+
+**认人的始终是账号名**（`preferred_username`）：API key 归在它名下、日志里记的也是它，所以
+IdP 那边改个显示名，谁的 key 都不会突然「不见了」。名字是登录那一刻写进会话 cookie 的，
+改完要**退出重新登录**（或等 `--session-ttl` 到期）才会变。
 
 ```text
 GET  /api/auth/me        登录方式和当前用户；没登录也 200（前端据此跳登录）

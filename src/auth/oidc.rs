@@ -90,8 +90,12 @@ pub struct Claims {
     pub nonce: Option<String>,
     pub sub: Option<String>,
     pub preferred_username: Option<String>,
-    /// 显示名。中文姓名一般在这里（Keycloak 的「姓 + 名」、企业 IdP 的 `name`）。
+    /// 显示名。中文姓名一般在这里（Keycloak 把 First + Last name 拼起来给）。
     pub name: Option<String>,
+    /// Keycloak 的 First name。中文用户这一栏填的通常是**姓**
+    pub given_name: Option<String>,
+    /// Keycloak 的 Last name，中文用户这一栏填的通常是**名**
+    pub family_name: Option<String>,
     pub email: Option<String>,
     /// Keycloak：realm 角色在 `realm_access.roles`
     #[serde(default)]
@@ -307,18 +311,51 @@ impl Oidc {
     }
 }
 
-/// 页面上显示哪个名字：`name` -> 账号名 -> `email`。
+/// 页面上显示哪个名字：`name` -> `given_name` + `family_name` -> 账号名 -> `email`。
 ///
-/// 中文姓名一般在 `name` 里（Keycloak 里填了姓和名就有），而 `preferred_username`
-/// 往往是登录用的英文账号 —— 以前是后者优先，所以页面上看到的是英文。
+/// 中文姓名一般在 `name` 里（Keycloak 里填了 First / Last name 就有），而
+/// `preferred_username` 往往是登录用的英文账号 —— 以前是后者优先，所以页面上看到的是拼音。
+/// 两栏都空的用户没有 `name` claim，那就还是账号名。
 fn display_name(c: &Claims, account: &str) -> String {
-    [c.name.as_deref(), Some(account), c.email.as_deref()]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .unwrap_or(account)
-        .to_owned()
+    c.name
+        .as_deref()
+        .map(tidy_name)
+        .filter(|s| !s.is_empty())
+        .or_else(|| full_name(c))
+        .or_else(|| {
+            [Some(account), c.email.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .find(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| account.to_owned())
+}
+
+/// 没有 `name` claim（IdP 没配 full name 映射器）时自己拼。
+fn full_name(c: &Claims) -> Option<String> {
+    let part = |v: &Option<String>| {
+        v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)
+    };
+    match (part(&c.given_name), part(&c.family_name)) {
+        // Keycloak 的 name 就是这个顺序（First 在前），中文那边 First 填的是姓，拼出来正好
+        (Some(given), Some(family)) => Some(tidy_name(&format!("{given} {family}"))),
+        (Some(one), None) | (None, Some(one)) => Some(one),
+        (None, None) => None,
+    }
+}
+
+/// 中文姓名里的空格去掉：Keycloak 把 First + Last name 用空格拼，中文姓填 First、名填 Last，
+/// 拼出来中间就多一个空格 —— 那是英文名的习惯。全是汉字才去，`Jane Doe` 这种原样保留。
+fn tidy_name(raw: &str) -> String {
+    let name = raw.trim();
+    let cjk = |c: char| matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}' | '\u{f900}'..='\u{faff}');
+    if !name.is_empty() && name.chars().all(|c| c.is_whitespace() || cjk(c)) {
+        return name.chars().filter(|c| !c.is_whitespace()).collect();
+    }
+    // 英文名只把多余的空白压掉
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn has_role(c: &Claims, client_id: &str, role: &str) -> bool {
@@ -386,6 +423,32 @@ mod tests {
         assert_eq!(display_name(&c, "easayliu"), "easayliu");
         let c = claims(serde_json::json!({"email": "e@x"}));
         assert_eq!(display_name(&c, "u1"), "u1");
+    }
+
+    /// Keycloak 把 First + Last name 用空格拼，中文填进去中间就多一个空格。
+    #[test]
+    fn chinese_name_loses_the_keycloak_space() {
+        let c = claims(serde_json::json!({
+            "preferred_username": "zhangsan", "name": "张 三丰",
+            "given_name": "张", "family_name": "三丰"
+        }));
+        assert_eq!(display_name(&c, "zhangsan"), "张三丰");
+
+        // 英文名的空格要留着
+        let c = claims(serde_json::json!({"name": "Jane  Doe"}));
+        assert_eq!(display_name(&c, "janedoe"), "Jane Doe", "只压掉多余的空白");
+    }
+
+    /// IdP 没给 name claim 时自己拿 given_name + family_name 拼。
+    #[test]
+    fn falls_back_to_given_and_family_name() {
+        let c = claims(serde_json::json!({"given_name": "张", "family_name": "三丰"}));
+        assert_eq!(display_name(&c, "zhangsan"), "张三丰");
+        let c = claims(serde_json::json!({"given_name": "Jane", "family_name": "Doe"}));
+        assert_eq!(display_name(&c, "janedoe"), "Jane Doe");
+        // 只填了一栏
+        let c = claims(serde_json::json!({"given_name": "张"}));
+        assert_eq!(display_name(&c, "zhangsan"), "张");
     }
 
     /// 显示名换成中文之后，账号名不能跟着变：API key 是按它认归属的。
