@@ -4,14 +4,13 @@
 //! 浏览器导航（Accept 带 text/html）在 OIDC 模式下直接 302 去登录，其余（API、静态资源）回 401 JSON——
 //! JS 拿到 401 自己跳登录页，静态资源被 302 到登录页只会变成一堆坏掉的脚本。
 //!
-//! **API key** 是登录用户自己生成的、给 MCP 客户端和脚本用的凭证（`POST /api/auth/keys`）。它和会话
-//! cookie 是同一种东西：一小段 JSON（谁、叫什么、什么时候发的）用同一把钥匙 HMAC 签名，带过期时间，
-//! 服务端不存。代价是**没法单个吊销**——丢了只能等它过期，或者换 `--session-secret` 让全部作废——
-//! 所以 `--api-key-ttl` 默认只有 90 天。opdash 是只读的、没有写库路径，为了一张 key 表去写 ClickHouse
-//! 或挂一个文件卷不值得。
+//! **API key** 是登录用户自己生成的、给 MCP 客户端和脚本用的凭证（`POST /api/auth/keys`）。
+//! 每个人只能列出、吊销自己的；key 代表签发它的那个人，权限和他登录后一样。存储见 [`apikey`]：
+//! 一个只存哈希的 JSON 文件。
 //!
 //! HTTP 处理器在 [`crate::api::auth`]，这里是状态和中间件。
 
+pub mod apikey;
 pub mod basic;
 pub mod oidc;
 pub mod session;
@@ -26,23 +25,13 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::config::{BasicAuth, Config};
+pub use apikey::{API_KEY_PREFIX, ApiKey, KeyStore};
 pub use oidc::{Oidc, Session};
 pub use session::Sealer;
 
 pub const SESSION_COOKIE: &str = "opdash_session";
 pub const LOGIN_COOKIE: &str = "opdash_login";
-
-/// API key 的前缀：一眼认得出、secret 扫描器也好写规则。前缀后面是 [`Sealer`] 签出来的 token。
-pub const API_KEY_PREFIX: &str = "opdash_";
-/// API key 在 [`Sealer`] 里的 kind，和会话 / 登录票分开，互相冒充不了。
-pub const KIND_API_KEY: &str = "apikey";
-/// API key 有效期的下限。
-pub const API_KEY_MIN_TTL_SECS: i64 = 60;
-/// key 的名字最长多少字符（只是给人认的标签）。
-const API_KEY_NAME_MAX: usize = 64;
 
 #[derive(Clone)]
 pub struct Auth {
@@ -56,8 +45,8 @@ struct Inner {
     public_url: Option<String>,
     session_ttl_secs: i64,
     api_key_ttl_secs: i64,
-    /// `--session-secret` 配了没有。没配的话密钥是随机的，重启后 API key 全失效，页面上要提醒
-    persistent_secret: bool,
+    /// 开了认证才有；不认证的部署不需要 key
+    keys: Option<Arc<KeyStore>>,
 }
 
 /// 请求是谁发的。
@@ -99,40 +88,34 @@ impl Identity {
     }
 }
 
-/// 签在 API key 里的内容。过期时间在 [`Sealer`] 的信封上，这里不重复。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ApiKey {
-    /// 随机 id，日志里认 key 用（key 本身不进日志）
-    pub id: String,
-    /// 用户给它起的名字，如 `claude-code`
-    pub name: String,
-    /// 签发它的人（OIDC 用户名，或 Basic 的账号名）
-    pub user: String,
-    pub email: Option<String>,
-    /// 签发时间，unix 秒
-    pub iat: i64,
-}
-
-/// 刚签出来的 key：`token` 只在这一刻给用户看一次。
-#[derive(Debug, Clone)]
-pub struct IssuedKey {
-    pub token: String,
-    pub key: ApiKey,
-    /// 过期时间，unix 秒
-    pub exp: i64,
-}
-
-/// 为什么没签出来。
+/// 为什么没签 / 没列 / 没吊销成。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueError {
     /// 没开认证：什么都不用带，也就不需要 key
     AuthDisabled,
-    /// 拿着 API key 再签 API key：一把泄露的 key 不该能无限续命
-    KeyCannotMintKey,
+    /// 拿着 API key 来管理 API key：一把泄露的 key 不该能给自己续命、也不该能删别的
+    KeyCannotManage,
+    /// 文件读写失败
+    Store(String),
+}
+
+impl std::fmt::Display for IssueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueError::AuthDisabled => {
+                write!(f, "没有开启认证，访问不需要带任何凭证，也就不需要 API key")
+            }
+            IssueError::KeyCannotManage => {
+                write!(f, "API key 不能管理 API key，请用浏览器登录后操作")
+            }
+            IssueError::Store(e) => write!(f, "API key 文件读写失败: {e}"),
+        }
+    }
 }
 
 impl Auth {
-    pub fn from_config(cfg: &Config) -> Self {
+    /// 开了认证就顺手打开 API key 文件；打不开（目录不可写、文件不是我们的格式）启动直接失败。
+    pub fn from_config(cfg: &Config) -> Result<Self, String> {
         let oidc = cfg.oidc_issuer.clone().zip(cfg.oidc_client_id.clone()).map(|(issuer, id)| {
             Oidc::new(
                 issuer,
@@ -142,7 +125,11 @@ impl Auth {
                 cfg.oidc_required_role.clone(),
             )
         });
-        Self {
+        let keys = match (&cfg.basic_auth, &oidc) {
+            (None, None) => None,
+            _ => Some(Arc::new(KeyStore::open(&cfg.api_key_file)?)),
+        };
+        Ok(Self {
             inner: Arc::new(Inner {
                 basic: cfg.basic_auth.clone(),
                 oidc,
@@ -150,9 +137,9 @@ impl Auth {
                 public_url: cfg.public_url.clone(),
                 session_ttl_secs: cfg.session_ttl.as_secs() as i64,
                 api_key_ttl_secs: cfg.api_key_ttl.as_secs() as i64,
-                persistent_secret: cfg.session_secret.as_deref().is_some_and(|s| !s.is_empty()),
+                keys,
             }),
-        }
+        })
     }
 
     /// 测试 / 无认证用。
@@ -165,7 +152,7 @@ impl Auth {
                 public_url: None,
                 session_ttl_secs: 3600,
                 api_key_ttl_secs: 90 * 86_400,
-                persistent_secret: false,
+                keys: None,
             }),
         }
     }
@@ -175,36 +162,41 @@ impl Auth {
         self.inner.api_key_ttl_secs
     }
 
-    /// 签名密钥是不是配置里给的（否则重启后 key 全失效）。
-    pub fn secret_is_persistent(&self) -> bool {
-        self.inner.persistent_secret
+    /// API key 文件；不认证的部署没有。`main` 拿它起后台落盘任务。
+    pub fn key_store(&self) -> Option<&Arc<KeyStore>> {
+        self.inner.keys.as_ref()
+    }
+
+    /// 只有真人（会话 / Basic）能管理 key；拿 key 来管 key 不行。
+    fn keys_for(&self, who: &Identity) -> Result<&KeyStore, IssueError> {
+        let store = self.inner.keys.as_deref().ok_or(IssueError::AuthDisabled)?;
+        if matches!(who, Identity::ApiKey(_)) {
+            return Err(IssueError::KeyCannotManage);
+        }
+        Ok(store)
     }
 
     /// 给 `who` 签一把 API key。`ttl_secs` 超过 `--api-key-ttl` 就按上限算，短于 1 分钟按 1 分钟。
+    /// 返回的第一项是完整的 key，只在这一刻给用户看一次。
     pub fn issue_api_key(
         &self,
         who: &Identity,
         name: &str,
         ttl_secs: i64,
-    ) -> Result<IssuedKey, IssueError> {
-        if !self.enabled() {
-            return Err(IssueError::AuthDisabled);
-        }
-        if matches!(who, Identity::ApiKey(_)) {
-            return Err(IssueError::KeyCannotMintKey);
-        }
-        let ttl = ttl_secs.clamp(API_KEY_MIN_TTL_SECS, self.inner.api_key_ttl_secs);
-        let name: String = name.trim().chars().take(API_KEY_NAME_MAX).collect();
-        let now = session::now_secs();
-        let key = ApiKey {
-            id: session::random_token(6),
-            name: if name.is_empty() { "api-key".to_owned() } else { name },
-            user: who.user().to_owned(),
-            email: who.email().map(str::to_owned),
-            iat: now,
-        };
-        let token = format!("{API_KEY_PREFIX}{}", self.inner.sealer.seal(KIND_API_KEY, &key, ttl));
-        Ok(IssuedKey { token, key, exp: now + ttl })
+    ) -> Result<(String, ApiKey), IssueError> {
+        let store = self.keys_for(who)?;
+        let ttl = ttl_secs.clamp(apikey::API_KEY_MIN_TTL_SECS, self.inner.api_key_ttl_secs);
+        store.create(who.user(), who.email(), name, ttl).map_err(IssueError::Store)
+    }
+
+    /// `who` 自己的 key。
+    pub fn list_api_keys(&self, who: &Identity) -> Result<Vec<ApiKey>, IssueError> {
+        Ok(self.keys_for(who)?.list(who.user()))
+    }
+
+    /// 吊销 `who` 自己的一把 key；不是他的 / 不存在返回 `Ok(false)`。
+    pub fn revoke_api_key(&self, who: &Identity, id: &str) -> Result<bool, IssueError> {
+        self.keys_for(who)?.revoke(who.user(), id).map_err(IssueError::Store)
     }
 
     pub fn enabled(&self) -> bool {
@@ -245,8 +237,9 @@ impl Auth {
         {
             return Some(Identity::Basic { user: b.user.clone() });
         }
-        if let Some(token) = bearer(headers).and_then(|t| t.strip_prefix(API_KEY_PREFIX))
-            && let Some(k) = self.inner.sealer.open::<ApiKey>(KIND_API_KEY, token)
+        if let Some(store) = &self.inner.keys
+            && let Some(token) = bearer(headers)
+            && let Some(k) = store.authenticate(token)
         {
             return Some(Identity::ApiKey(k));
         }
@@ -372,46 +365,53 @@ mod tests {
     }
 
     #[test]
-    fn api_keys_roundtrip_and_cannot_mint_more_keys() {
+    fn api_keys_are_capped_and_only_real_people_manage_them() {
         use clap::Parser;
+        let path = std::env::temp_dir().join(format!(
+            "opdash-auth-keys-{}-{}.json",
+            std::process::id(),
+            session::now_secs()
+        ));
         let cfg = crate::config::Config::try_parse_from([
             "opdash",
             "--basic-auth",
             "ops:pw",
-            "--session-secret",
-            "k",
             "--api-key-ttl",
             "2h",
+            "--api-key-file",
+            path.to_str().unwrap(),
         ])
         .unwrap();
-        let auth = Auth::from_config(&cfg);
-        assert!(auth.secret_is_persistent());
+        let auth = Auth::from_config(&cfg).unwrap();
         let me = Identity::Basic { user: "ops".into() };
-        let issued = auth.issue_api_key(&me, "  claude-code ", 10 * 86_400).unwrap();
-        assert!(issued.token.starts_with(API_KEY_PREFIX));
-        assert_eq!(issued.key.name, "claude-code");
-        assert_eq!(issued.key.user, "ops");
-        assert_eq!(issued.exp - issued.key.iat, 7200, "超过 --api-key-ttl 按上限算");
+        let (token, key) = auth.issue_api_key(&me, "  claude-code ", 10 * 86_400).unwrap();
+        assert!(token.starts_with(API_KEY_PREFIX));
+        assert_eq!(key.name, "claude-code");
+        assert_eq!(key.user, "ops");
+        assert_eq!(key.expires_at - key.created_at, 7200, "超过 --api-key-ttl 按上限算");
 
         let mut h = HeaderMap::new();
-        h.insert(header::AUTHORIZATION, format!("Bearer {}", issued.token).parse().unwrap());
+        h.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         let id = auth.identify(&h).expect("key 要认得");
         assert_eq!(id.kind(), "api_key");
         assert_eq!(id.user(), "ops");
-        // 拿 key 再签 key 不行
-        assert!(matches!(auth.issue_api_key(&id, "x", 60), Err(IssueError::KeyCannotMintKey)));
-        // 改一位、去掉前缀、换 scheme 都不认
-        h.insert(header::AUTHORIZATION, format!("Bearer {}x", issued.token).parse().unwrap());
+        // 拿 key 管 key 不行
+        assert_eq!(auth.issue_api_key(&id, "x", 60).err(), Some(IssueError::KeyCannotManage));
+        assert_eq!(auth.list_api_keys(&id).err(), Some(IssueError::KeyCannotManage));
+        assert_eq!(auth.revoke_api_key(&id, &key.id).err(), Some(IssueError::KeyCannotManage));
+        // 本人能列、能吊销，吊销后就不认了
+        assert_eq!(auth.list_api_keys(&me).unwrap().len(), 1);
+        assert_eq!(auth.revoke_api_key(&me, &key.id), Ok(true));
         assert!(auth.identify(&h).is_none());
-        h.insert(header::AUTHORIZATION, format!("Bearer {}", &issued.token[7..]).parse().unwrap());
+        // 换 scheme 不认
+        h.insert(header::AUTHORIZATION, format!("Basic {token}").parse().unwrap());
         assert!(auth.identify(&h).is_none());
-        h.insert(header::AUTHORIZATION, format!("Basic {}", issued.token).parse().unwrap());
-        assert!(auth.identify(&h).is_none());
-        // 没开认证就不发 key
-        assert!(matches!(
-            Auth::disabled().issue_api_key(&me, "x", 60),
-            Err(IssueError::AuthDisabled)
-        ));
+        // 没开认证就没有 key 这回事
+        assert_eq!(
+            Auth::disabled().issue_api_key(&me, "x", 60).err(),
+            Some(IssueError::AuthDisabled)
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

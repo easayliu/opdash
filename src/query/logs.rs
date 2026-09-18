@@ -1,7 +1,9 @@
 //! 日志表（logpipe 的 `app_log`）的 SQL。
 //!
-//! 排序键是 `(timestamp, level, trace_id)`：带时间范围的查询按这个顺序 `ORDER BY ... LIMIT n`
-//! 能倒着读、读够就停，不用把整段时间的日志都排一遍（排序键以外的列参与排序会退化，见 [`order_by`]）；
+//! 排序键是 `(service_name, timestamp, level, trace_id)`（2026-09-18 起服务打头，之前是时间打头）：
+//! 锁定一个服务时按 `ORDER BY timestamp, level, trace_id LIMIT n` 只读这个服务的那一段；不锁服务时要把
+//! 范围内各服务的排序列读出来排一遍，排序列很窄，实测墙钟没变差（见 README「排序键」一节）。
+//! 排序键以外的列参与排序会退化，见 [`order_by`]；
 //! 按 trace id 查走 `idx_trace_id`
 //! bloom filter，不带时间范围也不慢。`message` 上只有 token 索引（够长的标识符才用得上，见
 //! [`token_needles`]），一般关键字是逐行扫时间范围内的数据，所以时间范围是所有查询的第一道闸。
@@ -567,8 +569,8 @@ pub const CONTEXT_WINDOW_MS: i64 = 3_600_000;
 
 /// 检索 / 上下文 / 导出共用同一套排序，三处看到的顺序才一致。
 ///
-/// 排的就是表自己的排序键 `(timestamp, level, trace_id)`——只有这样 ClickHouse 才能纯按顺序读、
-/// 读够 LIMIT 就停。以前后面还跟着 host / file / thread / logger / message 让同毫秒的行有确定顺序，
+/// 排的就是表排序键去掉服务那一截 `(timestamp, level, trace_id)`——锁定单个服务时这正是该服务数据段
+/// 的物理顺序，ClickHouse 才能纯按顺序读、读够 LIMIT 就停。以前后面还跟着 host / file / thread / logger / message 让同毫秒的行有确定顺序，
 /// 但这些列不在排序键里，执行计划上会多出 `PartialSorting` + `FinishSorting`：线上实测一小时窗口
 /// 取 200 行，3.03 GB / 4240 ms vs 现在的 0.14 GB / 166 ms，带关键字时 9.19 GB / 20.8 s vs 6.00 GB / 4.7 s。
 ///

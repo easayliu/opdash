@@ -6,15 +6,15 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::get,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
-    Auth, Identity, IssueError, LOGIN_COOKIE, cookie,
+    API_KEY_PREFIX, ApiKey, Auth, Identity, IssueError, LOGIN_COOKIE, cookie,
     oidc::{KIND_LOGIN, LoginTicket, OidcError},
     set_cookie, unauthorized,
 };
@@ -26,7 +26,8 @@ pub fn routes(auth: Auth) -> Router {
         .route("/api/auth/login", get(login))
         .route("/api/auth/callback", get(callback))
         .route("/api/auth/logout", get(logout))
-        .route("/api/auth/keys", post(create_key))
+        .route("/api/auth/keys", get(list_keys).post(create_key))
+        .route("/api/auth/keys/{id}", axum::routing::delete(revoke_key))
         .with_state(auth)
 }
 
@@ -39,7 +40,8 @@ struct Me {
     identity: Option<&'static str>,
     login_url: Option<&'static str>,
     logout_url: Option<&'static str>,
-    /// 能不能生成 API key、最长多久。没开认证时是 null（什么都不用带，也就不需要 key）
+    /// 这个身份能不能管理 API key（列出 / 生成 / 吊销自己的）、最长多久。没开认证、或者本身就是
+    /// 拿 API key 进来的，都是 null
     api_keys: Option<ApiKeysInfo>,
 }
 
@@ -53,8 +55,6 @@ struct User {
 struct ApiKeysInfo {
     /// `--api-key-ttl`，如 `90d`
     max_ttl: String,
-    /// 签名密钥来自配置。false = 每次重启随机，发出去的 key 重启就作废，页面上要提醒
-    persistent: bool,
 }
 
 /// 当前登录状态。没登录也回 200（前端据此决定要不要跳登录），除非是 Basic 模式下没带密码——
@@ -74,9 +74,8 @@ async fn me(State(auth): State<Auth>, headers: HeaderMap) -> Response {
         identity: kind,
         login_url: oidc.then_some("/api/auth/login"),
         logout_url: oidc.then_some("/api/auth/logout"),
-        api_keys: auth.enabled().then(|| ApiKeysInfo {
+        api_keys: (auth.enabled() && kind.is_some_and(|k| k != "api_key")).then(|| ApiKeysInfo {
             max_ttl: crate::mcp::fmt_duration(auth.api_key_max_ttl_secs() * 1000),
-            persistent: auth.secret_is_persistent(),
         }),
     })
     .into_response()
@@ -90,35 +89,104 @@ struct CreateKey {
     ttl: Option<String>,
 }
 
+/// 一把 key 给页面看的形状：没有 key 本身（服务端也没存）。
 #[derive(Serialize)]
-struct CreatedKey {
-    /// 完整的 key，**只在这里给一次**，服务端不存
-    key: String,
+struct KeyView {
     id: String,
     name: String,
     user: String,
+    /// `opdash_<id>.` ——用户拿它和自己配置里的 key 对号
+    prefix: String,
     /// RFC3339
     created_at: String,
     expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<String>,
+    expired: bool,
+}
+
+impl KeyView {
+    fn from(k: ApiKey) -> Self {
+        Self {
+            prefix: format!("{API_KEY_PREFIX}{}.", k.id),
+            created_at: rfc3339(k.created_at),
+            expires_at: rfc3339(k.expires_at),
+            last_used_at: k.last_used_at.map(rfc3339),
+            expired: k.expired(),
+            id: k.id,
+            name: k.name,
+            user: k.user,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CreatedKey {
+    /// 完整的 key，**只在这里给一次**，服务端只存哈希
+    key: String,
+    #[serde(flatten)]
+    view: KeyView,
     /// 有效多久，如 `90d`
     expires_in: String,
-    /// 签名密钥来自配置；false 时重启后这把 key 就失效
-    persistent: bool,
     /// MCP 端点的完整地址，页面上拼接入命令用
     mcp_url: String,
+}
+
+#[derive(Serialize)]
+struct KeyList {
+    keys: Vec<KeyView>,
+}
+
+fn rfc3339(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0).map(|t| t.to_rfc3339()).unwrap_or_default()
+}
+
+/// 管理 key 的三个接口共用的身份检查：没登录 401；没开认证 400 说清楚。
+#[allow(clippy::result_large_err)] // 只在拒绝时才有 Response，调用处直接 return
+fn manager(auth: &Auth, headers: &HeaderMap) -> Result<Identity, Response> {
+    match auth.identify(headers) {
+        Some(who) => Ok(who),
+        None if !auth.enabled() => {
+            Err(Error::bad_request(IssueError::AuthDisabled.to_string()).into_response())
+        }
+        None => Err(unauthorized(auth)),
+    }
+}
+
+fn issue_error(e: IssueError) -> Response {
+    match e {
+        IssueError::AuthDisabled => Error::bad_request(e.to_string()).into_response(),
+        IssueError::KeyCannotManage => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": e.to_string(), "kind": "forbidden" })),
+        )
+            .into_response(),
+        IssueError::Store(_) => Error::internal(e).into_response(),
+    }
+}
+
+/// 我的 key（不含 key 本身），新的在前，过期的标 `expired`。
+async fn list_keys(State(auth): State<Auth>, headers: HeaderMap) -> Response {
+    let who = match manager(&auth, &headers) {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    match auth.list_api_keys(&who) {
+        Ok(keys) => {
+            Json(KeyList { keys: keys.into_iter().map(KeyView::from).collect() }).into_response()
+        }
+        Err(e) => issue_error(e),
+    }
 }
 
 /// 登录用户给自己签一把 API key。请求体是 JSON（可以为空）：`{"name": "claude-code", "ttl": "30d"}`。
 ///
 /// 谁都不用审批：key 只代表签发它的这个人、权限和这个人一样（本来就只有「能看」一种权限），
-/// 泄露的影响面和他的会话 cookie 泄露一样。拿 API key 再签 API key 不行，见 [`IssueError`]。
+/// 泄露的影响面和他的会话 cookie 泄露一样，而且随时能在页面上吊销。
 async fn create_key(State(auth): State<Auth>, headers: HeaderMap, body: Bytes) -> Response {
-    let Some(who) = auth.identify(&headers) else {
-        if !auth.enabled() {
-            return Error::bad_request("没有开启认证，访问不需要带任何凭证，也就不需要 API key")
-                .into_response();
-        }
-        return unauthorized(&auth);
+    let who = match manager(&auth, &headers) {
+        Ok(w) => w,
+        Err(r) => return r,
     };
     let req: CreateKey = if body.iter().all(u8::is_ascii_whitespace) {
         CreateKey::default()
@@ -143,45 +211,50 @@ async fn create_key(State(auth): State<Auth>, headers: HeaderMap, body: Bytes) -
             }
         },
     };
-    let issued = match auth.issue_api_key(&who, req.name.as_deref().unwrap_or(""), ttl_secs) {
+    let (token, key) = match auth.issue_api_key(&who, req.name.as_deref().unwrap_or(""), ttl_secs) {
         Ok(k) => k,
-        Err(IssueError::AuthDisabled) => {
-            return Error::bad_request("没有开启认证，不需要 API key").into_response();
-        }
-        Err(IssueError::KeyCannotMintKey) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "API key 不能再签发 API key，请用浏览器登录后生成",
-                    "kind": "forbidden",
-                })),
-            )
-                .into_response();
-        }
+        Err(e) => return issue_error(e),
     };
     tracing::info!(
-        user = %issued.key.user,
-        key_id = %issued.key.id,
-        key_name = %issued.key.name,
-        expires_in_secs = issued.exp - issued.key.iat,
+        user = %key.user,
+        key_id = %key.id,
+        key_name = %key.name,
+        expires_in_secs = key.expires_at - key.created_at,
         via = who.kind(),
         "签发 API key"
     );
-    let rfc3339 = |secs: i64| {
-        chrono::DateTime::from_timestamp(secs, 0).map(|t| t.to_rfc3339()).unwrap_or_default()
-    };
+    let expires_in = crate::mcp::fmt_duration((key.expires_at - key.created_at) * 1000);
     Json(CreatedKey {
-        key: issued.token,
-        id: issued.key.id,
-        name: issued.key.name,
-        user: issued.key.user,
-        created_at: rfc3339(issued.key.iat),
-        expires_at: rfc3339(issued.exp),
-        expires_in: crate::mcp::fmt_duration((issued.exp - issued.key.iat) * 1000),
-        persistent: auth.secret_is_persistent(),
+        key: token,
+        view: KeyView::from(key),
+        expires_in,
         mcp_url: format!("{}/mcp", auth.public_base(&headers)),
     })
     .into_response()
+}
+
+/// 吊销我自己的一把 key。别人的 / 不存在的一律 404，不区分。
+async fn revoke_key(
+    State(auth): State<Auth>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let who = match manager(&auth, &headers) {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    match auth.revoke_api_key(&who, id.trim()) {
+        Ok(true) => {
+            tracing::info!(user = %who.user(), key_id = %id, "吊销 API key");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "没有这把 key（或者它不是你的）", "kind": "not_found" })),
+        )
+            .into_response(),
+        Err(e) => issue_error(e),
+    }
 }
 
 #[derive(Deserialize)]

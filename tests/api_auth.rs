@@ -204,7 +204,6 @@ async fn full_login_flow_sets_session_and_logout_clears_it() {
     assert_eq!(me["identity"], "session");
     assert_eq!(me["logout_url"], "/api/auth/logout");
     assert_eq!(me["api_keys"]["max_ttl"], "90d");
-    assert_eq!(me["api_keys"]["persistent"], true, "配了 --session-secret");
 
     // 4b. 登录用户给自己签一把 API key，拿它当 Bearer 访问 API 和 /mcp
     let (status, key) = post_json(
@@ -216,11 +215,19 @@ async fn full_login_flow_sets_session_and_logout_clears_it() {
     .await;
     assert_eq!(status, 200, "{key}");
     let token = key["key"].as_str().unwrap();
-    assert!(token.starts_with("opdash_"), "{token}");
+    assert!(token.starts_with(key["prefix"].as_str().unwrap()), "{key}");
     assert_eq!(key["user"], "alice");
     assert_eq!(key["name"], "claude-code");
     assert_eq!(key["expires_in"], "30d");
+    assert_eq!(key["expired"], false);
     assert_eq!(key["mcp_url"], "https://opdash.example.com/mcp");
+    // 能列出来，但列表里没有 key 本身
+    let (status, list) = get_json_with(&app, "/api/auth/keys", &[("cookie", &session)]).await;
+    assert_eq!(status, 200, "{list}");
+    assert_eq!(list["keys"].as_array().unwrap().len(), 1);
+    assert_eq!(list["keys"][0]["id"], key["id"]);
+    assert!(list["keys"][0].get("key").is_none());
+    assert!(!list.to_string().contains(token), "列表不能泄露 key");
     let bearer = format!("Bearer {token}");
     let (status, meta) = get_json_with(&app, "/api/meta", &[("authorization", &bearer)]).await;
     assert_eq!(status, 200, "{meta}");
@@ -229,6 +236,7 @@ async fn full_login_flow_sets_session_and_logout_clears_it() {
     assert_eq!(me["identity"], "api_key");
     assert_eq!(me["user"]["name"], "alice", "key 代表签发它的人");
     assert_eq!(me["user"]["email"], "alice@example.com");
+    assert!(me["api_keys"].is_null(), "拿 key 进来的不能管理 key");
     let (status, _, _) = post_full(
         &app,
         "/mcp",
@@ -237,10 +245,22 @@ async fn full_login_flow_sets_session_and_logout_clears_it() {
     )
     .await;
     assert_eq!(status, 200, "MCP 端点认 API key");
-    // 拿 key 再签 key 不行
+    // 拿 key 再签 key / 列 key / 删 key 都不行
     let (status, body) =
         post_json(&app, "/api/auth/keys", "{}", &[("authorization", &bearer)]).await;
     assert_eq!(status, 403, "{body}");
+    let (status, _) = get_raw(&app, "/api/auth/keys", &[("authorization", &bearer)]).await;
+    assert_eq!(status, 403);
+    // 本人吊销：立刻失效，再删是 404
+    let id = key["id"].as_str().unwrap();
+    let (status, _, _) =
+        delete_full(&app, &format!("/api/auth/keys/{id}"), &[("cookie", &session)]).await;
+    assert_eq!(status, 204);
+    let (status, _) = get_raw(&app, "/api/meta", &[("authorization", &bearer)]).await;
+    assert_eq!(status, 401, "吊销后 key 不能再用");
+    let (status, _, _) =
+        delete_full(&app, &format!("/api/auth/keys/{id}"), &[("cookie", &session)]).await;
+    assert_eq!(status, 404);
     // 改过的 cookie 不认
     let tampered = format!("{}x", session);
     let (status, _) = get_raw(&app, "/api/meta", &[("cookie", &tampered)]).await;
@@ -324,8 +344,11 @@ async fn rejects_bad_id_token_and_missing_role() {
 #[tokio::test]
 async fn api_keys_without_oidc_and_their_edges() {
     let fake = FakeClickhouse::start().await;
-    // 只开 Basic、没配 --session-secret：也能签 key，但 persistent = false
-    let app = app_with_schema(&fake, &["--basic-auth", "ops:secret", "--api-key-ttl", "48h"]).await;
+    // 只开 Basic 也能签 key；显式指定文件，下面要用同一个文件模拟重启
+    let key_file = std::env::temp_dir().join(format!("opdash-restart-{}.json", std::process::id()));
+    let key_file = key_file.to_string_lossy().into_owned();
+    let args = ["--basic-auth", "ops:secret", "--api-key-ttl", "48h", "--api-key-file", &key_file];
+    let app = app_with_schema(&fake, &args).await;
 
     // 没登录不给签
     let (status, _, _) = post_full(&app, "/api/auth/keys", "{}", &[]).await;
@@ -336,15 +359,13 @@ async fn api_keys_without_oidc_and_their_edges() {
     assert_eq!(status, 200);
     assert_eq!(me["identity"], "basic");
     assert_eq!(me["api_keys"]["max_ttl"], "2d", "48h 能整除成天就按天写");
-    assert_eq!(me["api_keys"]["persistent"], false);
 
     // 空请求体：默认名字、上限有效期
     let (status, key) = post_json(&app, "/api/auth/keys", "", &basic).await;
     assert_eq!(status, 200, "{key}");
     assert_eq!(key["name"], "api-key");
     assert_eq!(key["expires_in"], "2d");
-    assert_eq!(key["persistent"], false);
-    assert_eq!(key["id"].as_str().unwrap().len(), 8);
+    assert_eq!(key["id"].as_str().unwrap().len(), 12);
     // 要得比上限长，按上限算
     let (_, key2) = post_json(&app, "/api/auth/keys", r#"{"ttl":"365d"}"#, &basic).await;
     assert_eq!(key2["expires_in"], "2d", "要得比上限长，按上限算");
@@ -364,6 +385,17 @@ async fn api_keys_without_oidc_and_their_edges() {
     assert_eq!(status, 401);
     let (status, _) = get_raw(&app, "/api/meta", &[("authorization", &token)]).await;
     assert_eq!(status, 401);
+    // 两把都在列表里，新的在前
+    let (_, list) = get_json_with(&app, "/api/auth/keys", &basic).await;
+    let ids: Vec<&str> =
+        list["keys"].as_array().unwrap().iter().map(|k| k["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [key2["id"].as_str().unwrap(), key["id"].as_str().unwrap()]);
+    // 「重启」：另一个 app 打开同一个文件，key 还在、还能用
+    let again = app_with_schema(&fake, &args).await;
+    let (status, _) =
+        get_raw(&again, "/api/meta", &[("authorization", &format!("Bearer {token}"))]).await;
+    assert_eq!(status, 200, "key 存在文件里，重启后照样认");
+    std::fs::remove_file(&key_file).ok();
 
     // 没开认证：签 key 没意义，400 说清楚
     let app = app_with_schema(&fake, &[]).await;

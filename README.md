@@ -160,7 +160,7 @@ exemplar），所以返回目标不能写死。跳过去时用 react-router 的 
 一旦时刻是确定的（错误分组的 `last_ms` 和 `sample_trace` 来自同一个 `argMax`，链路详情的 `at` 来自列表行），
 不带时间范围就是白扫：`idx_trace_id` 是 `bloom_filter`，默认误判率 2.5%，摊到 30 天的分区上就是几亿行。
 错误分组展开取堆栈时实测——不带时间范围 2.8 亿行 / 5.2 GB / 3.7 秒，带上样本时刻前后各一小时
-21 万行 / 15.5 MB / 0.16 秒。日志表按 `(timestamp, level, trace_id)` 排，时间范围直接走主键。
+21 万行 / 15.5 MB / 0.16 秒。日志表按 `(service_name, timestamp, level, trace_id)` 排，时间范围走主键第二列的通用排除搜索，同样只读范围内的 granule。
 
 ## 启动
 
@@ -194,7 +194,7 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--export-max-rows` | `OPDASH_EXPORT_MAX_ROWS` | `50000` | 导出上限 |
 | `--max-message-chars` | `OPDASH_MAX_MESSAGE_CHARS` | `16384` | 列表 / 上下文 / 跟随里每条日志的 `message` 最多取多少字符，**导出不受限**。见下面「一条日志能有多大」 |
 | `--max-trace-spans` | `OPDASH_MAX_TRACE_SPANS` | `5000` | 一条 trace 最多取多少 span，超过标记截断 |
-| `--max-read-bytes` / `--max-read-rows` | `OPDASH_MAX_READ_BYTES` / `OPDASH_MAX_READ_ROWS` | `0`（不限） | 单条查询的读量护栏（`max_bytes_to_read` / `max_rows_to_read`），超过立刻报错让用户缩小范围，比等超时体验好；集群上按分片各自计 |
+| `--max-read-bytes` / `--max-read-rows` | `OPDASH_MAX_READ_BYTES` / `OPDASH_MAX_READ_ROWS` | `0`（不限） | 单条查询的读量护栏（`max_bytes_to_read` / `max_rows_to_read`），超过立刻报错让用户缩小范围，比等超时体验好。**按整条查询的总读量算**（发起端汇总各分片的进度一起检查），不是按分片；要按分片得用 `max_bytes_to_read_leaf` |
 | `--max-concurrent-queries` | `OPDASH_MAX_CONCURRENT_QUERIES` | `16` | 同时最多几条查询在库上跑，排队 10 秒没名额回 503 |
 | `--schema-refresh` | `OPDASH_SCHEMA_REFRESH` | `5m` | 多久重读一次 `system.columns` |
 | `--tail-interval` | `OPDASH_TAIL_INTERVAL` | `1s` | 日志跟随时服务端多久查一次增量；每条跟随连接就是这个频率的一条轻量查询 |
@@ -206,8 +206,9 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--oidc-scopes` | `OPDASH_OIDC_SCOPES` | `openid profile email` | 授权请求的 scope |
 | `--public-url` | `OPDASH_PUBLIC_URL` | 按请求头推 | 浏览器访问 opdash 的地址，拼 OIDC 回调用；在 Ingress 后面按 `X-Forwarded-Proto` / `Host` 推一般是对的，本地 vite 开发配 `http://localhost:5173` |
 | `--session-ttl` | `OPDASH_SESSION_TTL` | `12h` | 登录会话多久失效，到期重新跳一次 Keycloak |
-| `--session-secret` | `OPDASH_SESSION_SECRET` | 随机 | 会话 cookie 和 API key 的签名密钥。不配则每次启动随机生成（重启后要重新登录、发出去的 API key 全部失效）；多副本必须配同一个 |
-| `--api-key-ttl` | `OPDASH_API_KEY_TTL` | `90d` | 用户自己生成的 API key（给 MCP / 脚本用）最长有效多久，生成时可以选更短的。key 是签名 token、服务端不存也没法单个吊销，别给太长 |
+| `--session-secret` | `OPDASH_SESSION_SECRET` | 随机 | 会话 cookie 的签名密钥。不配则每次启动随机生成（重启后要重新登录）；多副本必须配同一个 |
+| `--api-key-file` | `OPDASH_API_KEY_FILE` | `api-keys.json` | 用户自己生成的 API key（给 MCP / 脚本用）存在哪个文件，只存哈希。**容器里把所在目录挂成卷**（镜像的工作目录是 `/var/lib/opdash`），不然重启就没了；多副本共享同一个文件 |
+| `--api-key-ttl` | `OPDASH_API_KEY_TTL` | `90d` | API key 最长有效多久，生成时可以选更短的 |
 
 `RUST_LOG=opdash=debug` 能看到每条 SQL 和绑定的参数。
 
@@ -256,25 +257,35 @@ POST /api/auth/keys      登录用户给自己签一把 API key，见下面「AP
 ### API key：把登录「拿出来」给 MCP 客户端和脚本
 
 Claude Code 这类 MCP 客户端和 curl 不会跳浏览器登录，所以登录用户可以在页面右上角的钥匙图标里
-**给自己生成一把 API key**（`POST /api/auth/keys`，body 可选 `{"name": "claude-code", "ttl": "30d"}`），
-之后带 `Authorization: Bearer opdash_…` 访问任何接口，包括 `/mcp`。key 代表签发它的这个人，权限和他
-登录后一样（本来也只有「能看」一种权限），`/api/auth/me` 会告诉你这个请求是 `session` / `basic` /
-`api_key` 哪种身份进来的，日志里也记着 key 的 id 和名字。
+**给自己生成 API key、看自己有哪些、随时吊销**。之后带 `Authorization: Bearer opdash_…` 访问任何接口，
+包括 `/mcp`。key 代表签发它的这个人，权限和他登录后一样（本来也只有「能看」一种权限），
+`/api/auth/me` 会告诉你这个请求是 `session` / `basic` / `api_key` 哪种身份进来的，日志里记着
+key 的 id 和名字（不记 key 本身）。
 
-key 和会话 cookie 是同一种东西：一小段 JSON（谁、叫什么、什么时候发的）用 `--session-secret` 这把
-钥匙 HMAC 签名，带过期时间，**服务端不存**。opdash 是只读的、没有写库路径，为了一张 key 表去写
-ClickHouse 或挂一个文件卷不值得。代价是：
+```text
+GET    /api/auth/keys        我的 key：名字、前缀、创建 / 到期 / 最近使用时间；没有 key 本身
+POST   /api/auth/keys        签一把，body 可选 {"name": "claude-code", "ttl": "30d"}；key 只在响应里给这一次
+DELETE /api/auth/keys/{id}   吊销，立刻失效
+```
 
-* **没法单个吊销**：丢了只能等它过期，或者换 `--session-secret` 让全部作废（会话也一起作废）。
-  所以 `--api-key-ttl` 默认只有 90 天，页面上生成时可以选 7 / 30 / 90 天。
-* **没配 `--session-secret` 就别指望它跨重启**：密钥随机生成，opdash 一重启所有 key 失效；页面上会
-  提醒。多副本部署本来就必须配同一个。
-* **key 不能再签 key**：拿 API key 调 `POST /api/auth/keys` 是 403，一把泄露的 key 不该能给自己续命。
+key 长这样：`opdash_<12 位 hex id>.<32 位随机串>`。**服务端只存随机串的 SHA-256**（`--api-key-file`，
+一个几 KB 的 JSON），认证时按 id 找到那一行、常量时间比哈希、看有没有过期；文件泄露了也签不出 key，
+页面上列出来的也只有前半段。`last_used_at` 每分钟落一次盘，不会让每个 MCP 请求都写磁盘。
+
+为什么是文件不是 ClickHouse：opdash 对库是只读的（每条查询 `readonly=2`，推荐给它只读账号），
+为了一张几行的 key 表加一条写库路径、再处理集群上的建表，不值。文件用「写临时文件再 rename」，
+掉电不会留半个文件；**容器里要把它所在目录挂成卷**，镜像的工作目录是 `/var/lib/opdash`，
+`docker-compose.yml` 已经挂了一个 named volume，k8s 给它一个几 MB 的 PVC 就行。多副本共享一个卷
+也可以：每次用到都先看文件的 mtime，别的副本改了就重读。
+
+几条规矩：
+
+* **只能管自己的**：列表只列本人的，吊销别人的和吊销不存在的一样是 404，不给探测 id 的机会。
+* **key 不能管 key**：拿 API key 调这三个接口都是 403，一把泄露的 key 不能给自己续命、也不能删别的。
+* **有效期**：默认最长 90 天（`--api-key-ttl`），页面上可选 7 / 30 / 90 天；过期的还会在列表里显示
+  7 天（标「已过期」），然后从文件里清掉。
 * 不用审批：谁登录了谁就能给自己签。要限制谁能进 opdash，用 `--oidc-required-role`。
-
-没登录的请求：浏览器导航（Accept 带 `text/html`）302 去登录；API 和静态资源回
-`401 {"error":"需要登录","kind":"unauthenticated","login_url":"/api/auth/login"}`，前端拿到就整页跳登录。
-`/api/health` 和 `/api/auth/*` 不认证。
+* 没开认证的部署没有 key 这回事（什么都不用带），按钮不显示，接口回 400 说明原因。
 
 ## 给 AI 用：MCP
 
@@ -386,8 +397,8 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   `max_execution_time`、`wait_end_of_query=1`（错误一定是干净的 5xx 而不是 200 + 半截 JSON）、
   `output_format_json_quote_64bit_integers=0`；span 表的查询另带 `optimize_skip_unused_shards=1`。
 * 时间范围：`timestamp >= fromUnixTimestamp64Milli({from:Int64})`，参数代入后是常量，能裁剪分区、走主键。
-* 日志检索 / 上下文 / 导出统一 `ORDER BY timestamp, level, trace_id`——**就是表自己的排序键**，
-  ClickHouse 才能纯按顺序倒着读、读够 LIMIT 就停。排序键以外的列一旦参与排序，计划里会多出
+* 日志检索 / 上下文 / 导出统一 `ORDER BY timestamp, level, trace_id`——**就是表排序键去掉服务的那一截**
+  （锁定单个服务时正是该服务数据段的物理顺序），ClickHouse 才能纯按顺序倒着读、读够 LIMIT 就停。排序键以外的列一旦参与排序，计划里会多出
   `PartialSorting` + `FinishSorting`，为了定出这 200 行的先后要多读一大堆。线上 26.3 实测（1 小时窗口）：
 
   | | 排序键以外的列也参与排序 | 只按排序键 |
@@ -446,12 +457,30 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   平均每几秒出现一次，它就在每个 granule 里，**任何**跳数索引都跳不掉。真正稀疏的是
   32 位 id 那类——那已经由 `idx_message_tokens` 覆盖了。（关键字取自 `system.query_log` 里
   近 7 天用户真实搜过的词，不是拍脑袋选的。）
-* **别把 `service_name` 挪进日志表的排序键**——直觉上「按服务排就能只扫这个服务的 message」，
-  实测是亏的：近 7 天 12823 次日志检索里只有 **394 次（3%）**带服务筛选，其余 97% 是「最近 N 条」。
-  时间打头时后者顺序读、读够就停（0.334 GB）；服务打头就没法顺序读，要把整段时间的行排一遍
-  （**3.49 GB，10 倍**，`optimize_read_in_order = 0` 模拟出来的）。为 3% 的查询让 97% 的查询贵十倍，
-  不划算。想要「按服务扫得少」得等一个不牺牲时间序的方案（投影要多存一份 message，136 GiB，
-  更不划算）。
+* **日志表的排序键是 `(service_name, timestamp, level, trace_id)`，服务打头**（2026-09-18 换的，之前是
+  `(timestamp, level, trace_id)`）。当年不放服务打头的理由是「近 7 天 12823 次检索只有 3% 带服务筛选」，
+  到 2026-09 用法变了：近 7 天 584 次检索里 67% 带服务，关键字检索里 74% 带服务，而「服务 + 关键字」
+  是最疼的一类——排序键里没有服务时，服务筛选**完全不减少读量**（message 按 granule 整块读，每个 granule
+  里都有这个服务），3 小时以上的这类检索 61 次挂了 41 次（撞 20 GiB 护栏）。建了一张新键的试验表、
+  灌进同样的数据对比（缓存全关，正常量级的 3 小时窗、2144 万行）：
+
+  | 查询 | 时间打头 | 服务打头 |
+  |---|---|---|
+  | 服务 + 关键字 列表 | 34.1 GB / 4.5 s | **2.0 GB / 0.76 s** |
+  | 服务 + 关键字 直方图 | 34.0 GB / 3.8 s | **1.9 GB / 0.39 s** |
+  | 服务 + 关键字（最大的服务，占 30% 字节） | 34.1 GB / 4.8 s | 7.9 GB / 1.3 s |
+  | 只筛服务 最近 200 条 | 0.03 GB / 311 ms | 0.08 GB / 102 ms |
+  | 无筛选 最近 200 条 | 0.02 GB / 302 ms | 0.39 GB / 207 ms |
+  | 无筛选 直方图 | 0.19 GB / 237 ms | 0.19 GB / 157 ms |
+  | 只有关键字（稀有词） | 34.1 GB / 6.5 s | 34.9 GB / 6.1 s |
+  | trace id 查找 | 0.07 GB / 419 ms | 0.08 GB / 114 ms |
+  | 筛选下拉 facet | 0.93 GB / 464 ms | 0.93 GB / 309 ms |
+
+  「无筛选最近 N 条」不能再顺序读、读够就停，要把范围内的排序列读出来排一遍，读量涨 20 倍但绝对值
+  很小（排序列都很窄），墙钟没变差；主键分析对第二列 `timestamp` 的范围条件仍然有效（generic exclusion
+  search），不会读整个分区。「只有关键字」失去早停，常见词理论上会变慢，实测没量出差别。
+  换表的做法：建 `app_log_v2`、按分区回灌、`EXCHANGE TABLES` 原子换名、再补灌换名前后的两个分区；
+  Distributed 表和 logpipe 都按名字写，不用改。
 * 手动写 `PREWHERE` 没有意义：`optimize_move_to_prewhere` 默认开着，实测把 `service_name`
   显式提到 PREWHERE 读量一字不差（39.6 GB → 40.5 GB，还略涨）。
 * **`ngrambf_v1` 试过，无效，别再走这条路**：8192 行日志里就有 13 万个不同 trigram，几乎覆盖整个

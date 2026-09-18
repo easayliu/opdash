@@ -28,20 +28,27 @@ export interface AuthMe {
   identity: 'session' | 'basic' | 'api_key' | null
   login_url: string | null
   logout_url: string | null
-  /** 能不能生成 API key；没开认证是 null */
-  api_keys: { max_ttl: string; persistent: boolean } | null
+  /** 这个身份能不能管理 API key；没开认证、或者本身就是拿 key 进来的，是 null */
+  api_keys: { max_ttl: string } | null
 }
 
-/** POST /api/auth/keys：刚签出来的 API key，`key` 只给这一次。 */
-export interface ApiKeyCreated {
-  key: string
+/** GET /api/auth/keys 里的一把 key：没有 key 本身（服务端只存哈希）。 */
+export interface ApiKeyInfo {
   id: string
   name: string
   user: string
+  /** `opdash_<id>.`，拿它和配置里的 key 对号 */
+  prefix: string
   created_at: string
   expires_at: string
+  last_used_at?: string
+  expired: boolean
+}
+
+/** POST /api/auth/keys：刚签出来的 API key，`key` 只给这一次。 */
+export interface ApiKeyCreated extends ApiKeyInfo {
+  key: string
   expires_in: string
-  persistent: boolean
   mcp_url: string
 }
 

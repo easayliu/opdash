@@ -317,7 +317,18 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
     use opdash::config::Config;
     use opdash::schema::SchemaCache;
 
+    // 每个 app 一个自己的 API key 文件，别在仓库目录里留下 api-keys.json、也别让测试互相看见
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let key_file = std::env::temp_dir().join(format!(
+        "opdash-test-keys-{}-{}.json",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let key_file = key_file.to_string_lossy().into_owned();
     let mut args = vec!["opdash", "--clickhouse-url", endpoint];
+    if !extra_args.contains(&"--api-key-file") {
+        args.extend_from_slice(&["--api-key-file", &key_file]);
+    }
     args.extend_from_slice(extra_args);
     let config = Config::parse_from(args);
     let client = Client::new(ClientOptions {
@@ -337,7 +348,7 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
         &config.trace_table,
         &config.metric_table,
     ));
-    let auth = opdash::auth::Auth::from_config(&config);
+    let auth = opdash::auth::Auth::from_config(&config).expect("打开 API key 文件");
     let state = AppState::new(config, client, schema);
     api::app(state, auth)
 }
@@ -407,6 +418,30 @@ pub async fn post_full(
     }
     let response =
         app.clone().oneshot(req.body(Body::from(body.to_owned())).unwrap()).await.unwrap();
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+        .collect();
+    let body = response.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, headers, body)
+}
+
+pub async fn delete_full(
+    app: &axum::Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let mut req = axum::http::Request::builder().method("DELETE").uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let response = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
     let status = response.status().as_u16();
     let headers = response
         .headers()

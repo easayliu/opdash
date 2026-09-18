@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
-import { CheckIcon, CopyIcon, KeyRoundIcon, XIcon } from 'lucide-react'
-import { apiPost } from '@/api/client'
-import type { ApiKeyCreated, AuthMe } from '@/api/types'
-import { Button, Input, Select } from '@/components/ui'
+import { useQueryClient } from '@tanstack/react-query'
+import { CheckIcon, CopyIcon, KeyRoundIcon, Trash2Icon, XIcon } from 'lucide-react'
+import { apiDelete, apiPost } from '@/api/client'
+import { useApiKeys } from '@/api/queries'
+import type { ApiKeyCreated, ApiKeyInfo, AuthMe } from '@/api/types'
+import { Badge, Button, Input, Select, Spinner } from '@/components/ui'
 import { copyText } from '@/lib/utils'
 
 /** 有效期的几档。上限来自后端的 `--api-key-ttl`，比上限长的档不显示 */
@@ -21,11 +23,15 @@ function ttlDays(s: string): number {
   return m[2] === 'd' ? n : m[2] === 'h' ? n / 24 : n / 1440
 }
 
+const fmt = (iso: string) => new Date(iso).toLocaleString(undefined, { hour12: false })
+
 /**
- * 给自己生成一把 API key：MCP 客户端（Claude Code 等）和脚本用它当 `Authorization: Bearer`。
- * key 是签名 token，服务端不存、只显示这一次；关掉就再也看不到，丢了重新生成一把。
+ * 管理自己的 API key：MCP 客户端（Claude Code 等）和脚本用它当 `Authorization: Bearer`。
+ * 服务端只存哈希，key 本身只在生成那一刻显示一次；不要了随时吊销，立刻失效。
  */
 export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void }) {
+  const qc = useQueryClient()
+  const list = useApiKeys(true)
   const maxDays = ttlDays(me.api_keys?.max_ttl ?? '90d')
   const options = TTL_OPTIONS.filter((o) => ttlDays(o.value) <= maxDays)
   const [name, setName] = useState('claude-code')
@@ -42,12 +48,15 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const refresh = () => qc.invalidateQueries({ queryKey: ['auth', 'keys'] })
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
       setCreated(await apiPost<ApiKeyCreated>('/auth/keys', { name, ttl }))
+      await refresh()
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -55,9 +64,21 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
     }
   }
 
+  const revoke = async (k: ApiKeyInfo) => {
+    setError(null)
+    try {
+      await apiDelete(`/auth/keys/${encodeURIComponent(k.id)}`)
+      if (created?.id === k.id) setCreated(null)
+      await refresh()
+    } catch (err) {
+      setError((err as Error).message)
+    }
+  }
+
   const mcpCommand = created
     ? `claude mcp add --transport http opdash ${created.mcp_url} \\\n  --header "Authorization: Bearer ${created.key}"`
     : ''
+  const keys = list.data?.keys ?? []
 
   return (
     <>
@@ -66,9 +87,9 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
         role="dialog"
         aria-modal="true"
         aria-labelledby="api-key-title"
-        className="fixed inset-x-3 top-16 z-50 mx-auto max-w-xl rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[36rem] md:-translate-x-1/2"
+        className="fixed inset-x-3 top-16 z-50 mx-auto flex max-h-[calc(100dvh-5rem)] max-w-2xl flex-col rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[42rem] md:-translate-x-1/2"
       >
-        <header className="flex h-12 items-center gap-2 border-b border-border px-4">
+        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
           <KeyRoundIcon className="size-4 text-muted-fg" />
           <h2 id="api-key-title" className="flex-1 text-sm font-semibold">
             API key · 给 AI 助手和脚本用
@@ -78,19 +99,21 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
           </Button>
         </header>
 
-        {!created ? (
-          <form onSubmit={submit} className="flex flex-col gap-4 p-4">
-            <p className="text-xs leading-5 text-muted-fg">
-              key 代表你本人，能看的和你登录后能看的一样。Claude Code 这类 MCP 客户端不会跳浏览器登录，
-              所以要靠 key 接 <span className="mono">/mcp</span>；curl / 脚本也可以拿它当 <span className="mono">Authorization: Bearer</span>。
-            </p>
-            <label className="flex flex-col gap-1 text-xs text-muted-fg">
-              名字（只是标签，日志里认它）
-              <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder="claude-code" />
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
+          <p className="text-xs leading-5 text-muted-fg">
+            key 代表你本人，能看的和你登录后能看的一样。Claude Code 这类 MCP 客户端不会跳浏览器登录，所以靠 key 接{' '}
+            <span className="mono">/mcp</span>；curl / 脚本也可以拿它当 <span className="mono">Authorization: Bearer</span>。
+            服务端只存哈希，key 只在生成时显示一次；不要了随时吊销。
+          </p>
+
+          <form onSubmit={submit} className="flex flex-wrap items-end gap-2 rounded-md border border-border bg-muted/40 p-3">
+            <label className="flex min-w-40 flex-1 flex-col gap-1 text-2xs text-muted-fg">
+              名字（只是标签）
+              <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder="claude-code" className="h-8 text-xs" />
             </label>
-            <label className="flex flex-col gap-1 text-xs text-muted-fg">
-              有效期（到期自动失效；服务端不存 key，没法单个吊销，别给太长）
-              <Select value={ttl} onChange={(e) => setTtl(e.target.value)}>
+            <label className="flex flex-col gap-1 text-2xs text-muted-fg">
+              有效期
+              <Select value={ttl} onChange={(e) => setTtl(e.target.value)} className="h-8 text-xs">
                 {options.map((o) => (
                   <option key={o.value} value={o.value}>
                     {o.label}
@@ -99,41 +122,99 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
                 {!options.some((o) => o.value === ttl) && <option value={ttl}>{ttl}（上限）</option>}
               </Select>
             </label>
-            {me.api_keys && !me.api_keys.persistent && (
-              <p className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn">
-                服务端没配 <span className="mono">--session-secret</span>，签名密钥是随机的：opdash 一重启这把 key 就失效。
-              </p>
-            )}
-            {error && <p className="text-xs text-danger">{error}</p>}
-            <div className="flex justify-end gap-2">
-              <Button onClick={onClose}>取消</Button>
-              <Button type="submit" variant="primary" disabled={busy}>
-                {busy ? '生成中…' : '生成 key'}
-              </Button>
-            </div>
+            <Button type="submit" variant="primary" size="sm" disabled={busy}>
+              {busy ? '生成中…' : '生成新 key'}
+            </Button>
           </form>
-        ) : (
-          <div className="flex flex-col gap-4 p-4">
-            <p className="text-xs leading-5 text-muted-fg">
-              <span className="font-medium text-fg">现在就复制。</span>这把 key 只显示这一次，关掉后看不到了；丢了重新生成一把。
-              有效期 {created.expires_in}，到 {new Date(created.expires_at).toLocaleString()} 失效。
-            </p>
-            <Secret label="API key" value={created.key} />
-            <Secret label="接入 Claude Code（Streamable HTTP）" value={mcpCommand} />
-            <p className="text-2xs leading-5 text-muted-fg">
-              其它 MCP 客户端填地址 <span className="mono">{created.mcp_url}</span>，请求头{' '}
-              <span className="mono">Authorization: Bearer &lt;key&gt;</span>。curl 也一样：
-              <span className="mono"> curl -H "Authorization: Bearer …" {created.mcp_url.replace(/\/mcp$/, '')}/api/meta</span>
-            </p>
-            <div className="flex justify-end">
-              <Button variant="primary" onClick={onClose}>
-                复制好了，关闭
-              </Button>
+
+          {created && (
+            <div className="flex flex-col gap-3 rounded-md border border-brand/50 bg-card p-3">
+              <p className="text-xs leading-5">
+                <span className="font-medium">现在就复制。</span>
+                <span className="text-muted-fg">
+                  「{created.name}」只显示这一次，关掉后看不到了；丢了就吊销再生成一把。有效期 {created.expires_in}，到{' '}
+                  {fmt(created.expires_at)} 失效。
+                </span>
+              </p>
+              <Secret label="API key" value={created.key} />
+              <Secret label="接入 Claude Code（Streamable HTTP）" value={mcpCommand} />
+              <p className="text-2xs leading-5 text-muted-fg">
+                其它 MCP 客户端填地址 <span className="mono">{created.mcp_url}</span>，请求头{' '}
+                <span className="mono">Authorization: Bearer &lt;key&gt;</span>。
+              </p>
+              <div className="flex justify-end">
+                <Button size="xs" onClick={() => setCreated(null)}>
+                  复制好了，收起
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+
+          {error && <p className="text-xs text-danger">{error}</p>}
+
+          <section className="flex flex-col gap-1">
+            <div className="flex items-center justify-between text-xs text-muted-fg">
+              <span>我的 key</span>
+              {list.isFetching && <Spinner className="size-3" />}
+            </div>
+            {list.isError && <p className="text-xs text-danger">{(list.error as Error).message}</p>}
+            {list.data && keys.length === 0 && (
+              <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-fg">还没有 key，上面生成一把</p>
+            )}
+            {keys.length > 0 && (
+              <table className="w-full text-xs">
+                <thead className="text-left text-2xs text-muted-fg">
+                  <tr>
+                    <th className="py-1 pr-2 font-medium">名字</th>
+                    <th className="py-1 pr-2 font-medium">key</th>
+                    <th className="hidden py-1 pr-2 font-medium sm:table-cell">创建</th>
+                    <th className="py-1 pr-2 font-medium">到期</th>
+                    <th className="hidden py-1 pr-2 font-medium md:table-cell">最近使用</th>
+                    <th className="py-1" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {keys.map((k) => (
+                    <KeyRow key={k.id} k={k} highlight={created?.id === k.id} onRevoke={() => revoke(k)} />
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+        </div>
       </div>
     </>
+  )
+}
+
+function KeyRow({ k, highlight, onRevoke }: { k: ApiKeyInfo; highlight: boolean; onRevoke: () => void }) {
+  // 吊销分两步点，不弹 confirm：第一下变成「确认吊销」，几秒不点就复原
+  const [arm, setArm] = useState(false)
+  useEffect(() => {
+    if (!arm) return
+    const t = setTimeout(() => setArm(false), 4000)
+    return () => clearTimeout(t)
+  }, [arm])
+  return (
+    <tr className={highlight ? 'bg-brand/5' : undefined}>
+      <td className="max-w-40 truncate py-1.5 pr-2 font-medium" title={k.name}>
+        {k.name}
+      </td>
+      <td className="mono py-1.5 pr-2 text-2xs text-muted-fg" title="key 的前半段，后半段服务端也没存">
+        {k.prefix}…
+      </td>
+      <td className="hidden py-1.5 pr-2 whitespace-nowrap text-muted-fg sm:table-cell">{fmt(k.created_at)}</td>
+      <td className="py-1.5 pr-2 whitespace-nowrap text-muted-fg">
+        {k.expired ? <Badge tone="danger">已过期</Badge> : fmt(k.expires_at)}
+      </td>
+      <td className="hidden py-1.5 pr-2 whitespace-nowrap text-muted-fg md:table-cell">{k.last_used_at ? fmt(k.last_used_at) : '从没用过'}</td>
+      <td className="py-1.5 text-right">
+        <Button size="xs" variant={arm ? 'danger' : 'ghost'} onClick={() => (arm ? onRevoke() : setArm(true))} title="吊销后立刻失效">
+          <Trash2Icon className="size-3.5" />
+          {arm ? '确认吊销' : '吊销'}
+        </Button>
+      </td>
+    </tr>
   )
 }
 

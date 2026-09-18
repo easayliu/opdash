@@ -20,7 +20,7 @@ pub fn check(auth: &BasicAuth, headers: &HeaderMap) -> bool {
 }
 
 /// 长度不同直接判否，长度相同时逐字节比较完再出结果，不给按前缀猜密码的机会。
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;

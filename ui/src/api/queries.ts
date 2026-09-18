@@ -2,6 +2,7 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { apiGet, type Params } from './client'
 import type {
+  ApiKeyInfo,
   AuthMe,
   ContextResponse,
   ErrorsResponse,
@@ -32,6 +33,16 @@ export function useAuthMe() {
     queryKey: ['auth', 'me'],
     queryFn: () => apiGet<AuthMe>('/auth/me'),
     staleTime: 5 * 60_000,
+    retry: false,
+  })
+}
+
+/** 我的 API key 列表；对话框打开时才查。 */
+export function useApiKeys(enabled: boolean) {
+  return useQuery({
+    queryKey: ['auth', 'keys'],
+    queryFn: () => apiGet<{ keys: ApiKeyInfo[] }>('/auth/keys'),
+    enabled,
     retry: false,
   })
 }

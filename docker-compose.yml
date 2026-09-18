@@ -27,7 +27,13 @@ services:
       - OPDASH_SESSION_SECRET=${OPDASH_SESSION_SECRET:-}
       # 用户自己生成的 API key（MCP / 脚本用）最长有效期
       - OPDASH_API_KEY_TTL=${OPDASH_API_KEY_TTL:-90d}
+    # API key 文件（只存哈希）在 /var/lib/opdash/api-keys.json，挂个卷重启才不丢
+    volumes:
+      - opdash-data:/var/lib/opdash
       - RUST_LOG=${RUST_LOG:-info}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  opdash-data:

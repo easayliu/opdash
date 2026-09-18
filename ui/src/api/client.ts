@@ -62,13 +62,21 @@ export async function apiGet<T>(path: string, params: Params = {}, signal?: Abor
 }
 
 /** JSON 体的 POST，错误处理和 apiGet 一样。 */
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+export function apiPost<T>(path: string, body: unknown): Promise<T> {
+  return apiSend<T>('POST', path, body)
+}
+
+export function apiDelete(path: string): Promise<void> {
+  return apiSend<void>('DELETE', path)
+}
+
+async function apiSend<T>(method: 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
-    method: 'POST',
-    headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+    method,
+    headers: { accept: 'application/json', ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (res.ok) return (await res.json()) as T
+  if (res.ok) return (res.status === 204 ? undefined : await res.json()) as T
   let message = `${res.status} ${res.statusText}`
   let kind = 'internal'
   try {

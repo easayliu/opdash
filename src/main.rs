@@ -81,7 +81,11 @@ async fn run() -> anyhow::Result<()> {
     Arc::clone(&schema).spawn_refresher(config.schema_refresh);
 
     let bind = config.bind;
-    let auth = Auth::from_config(&config);
+    let auth = Auth::from_config(&config).map_err(anyhow::Error::msg)?;
+    if let Some(store) = auth.key_store() {
+        tracing::info!(file = %store.path().display(), "API key 文件已打开（只存哈希；容器里请把它所在目录挂成卷）");
+        Arc::clone(store).spawn_flusher(std::time::Duration::from_secs(60));
+    }
     if let Some(oidc) = auth.oidc() {
         // 和表结构一样：Keycloak 没起来也照样启动，登录时再试
         match oidc.discover().await {
@@ -108,6 +112,12 @@ async fn run() -> anyhow::Result<()> {
         }
     );
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
+    // 内存里攒着的 last_used_at 落盘再走
+    if let Some(store) = auth.key_store()
+        && let Err(e) = store.flush_if_dirty()
+    {
+        tracing::warn!(error = %e, "退出前落盘 API key 文件失败");
+    }
     tracing::info!("已退出");
     Ok(())
 }
