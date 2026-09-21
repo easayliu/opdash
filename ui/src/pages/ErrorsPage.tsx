@@ -97,11 +97,12 @@ export function ErrorsPage() {
         {q.isFetching && <Spinner className="size-4" />}
         <span className="ml-auto flex flex-wrap items-center gap-2">
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
-          <span className="flex h-8 items-center rounded-md border border-input p-0.5">
+          <span role="group" aria-label="统计哪一层的错误" className="flex h-8 items-center rounded-md border border-input p-0.5">
             {KINDS.map((k) => (
               <Hint key={k.value} text={k.hint} asChild>
                 <button
                   type="button"
+                  aria-pressed={kind === k.value}
                   onClick={() => set({ kind: k.value === 'entry' ? null : k.value, g: null })}
                   className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', kind === k.value && 'bg-accent-soft text-accent')}
                 >

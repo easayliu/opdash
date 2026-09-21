@@ -166,10 +166,16 @@ export function TracesPage() {
         </span>
         {search.data && <StatsLine stats={search.data.stats} className="hidden text-2xs text-muted-fg sm:inline" />}
         {search.isFetching && <Spinner className="size-4" />}
-        <span className="ml-auto flex items-center gap-2">
+        <span role="group" aria-label="每页条数" className="ml-auto flex items-center gap-2">
           每页
           {[50, 100, 200].map((n) => (
-            <button key={n} type="button" onClick={() => set({ limit: n === 50 ? null : n })} className={n === limit ? 'font-semibold text-accent' : 'hover:text-fg'}>
+            <button
+              key={n}
+              type="button"
+              aria-pressed={n === limit}
+              onClick={() => set({ limit: n === 50 ? null : n })}
+              className={n === limit ? 'font-semibold text-accent' : 'hover:text-fg'}
+            >
               {n}
             </button>
           ))}
