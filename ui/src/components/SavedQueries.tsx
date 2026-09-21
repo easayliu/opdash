@@ -7,13 +7,14 @@ import { useAuthMe, useSavedQueries } from '@/api/queries'
 import type { SavedQuery } from '@/api/types'
 import { Button, Input, Spinner } from '@/components/ui'
 import { describeQuery, pageLabel, sameView, savableView, savedHref, suggestName, type View } from '@/lib/saved'
+import { useTimeRange } from '@/lib/url-state'
 import { cn } from '@/lib/utils'
 
 /**
  * 顶栏的书签：收藏当前查询、打开 / 改名 / 删除已收藏的。收藏归在登录账号名下（`/api/saved`），
  * 换台机器还在；没开认证的部署大家共用一份。
  *
- * 收藏的是当前页面的地址（筛选条件 + 相对时间范围），不记翻页位置和绝对时间段，见 `lib/saved.ts`。
+ * 收藏的是当前页面的地址（筛选条件），不记翻页位置和时间范围——时间范围跟顶栏走，见 `lib/saved.ts`。
  */
 export function SavedQueries() {
   const { pathname, search } = useLocation()
@@ -21,6 +22,7 @@ export function SavedQueries() {
   const qc = useQueryClient()
   const me = useAuthMe()
   const list = useSavedQueries()
+  const { refresh: rerun } = useTimeRange()
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -64,7 +66,9 @@ export function SavedQueries() {
   const remove = (q: SavedQuery) => run(() => apiDelete(`/saved/${encodeURIComponent(q.id)}`))
   const go = (q: SavedQuery) => {
     setOpen(false)
-    navigate(savedHref(q))
+    // 点的就是当前这条：地址不会变，什么都不发生会像是没反应，按「刷新」处理——重新查一遍
+    if (view && sameView(view, q)) rerun()
+    else navigate(savedHref(q))
   }
 
   // 按页面分组，组内保持后端给的顺序（新的在前）
@@ -190,6 +194,7 @@ function SaveForm({ view, onSave }: { view: View; onSave: (name: string, view: V
         {words.length > 0 && ` · ${words.join(' · ')}`}
         {words.length === 0 && ' · 没有筛选条件'}
       </p>
+      <p className="text-2xs text-muted-fg/80">收藏的是筛选条件；时间范围不记，打开时用顶栏当前的范围。</p>
     </form>
   )
 }
