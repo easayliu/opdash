@@ -3,6 +3,7 @@ import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchPa
 import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { AnimatePresence, LazyMotion, MotionConfig } from 'motion/react'
 import * as m from 'motion/react-m'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { SavedQueries } from '@/components/SavedQueries'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
@@ -120,17 +121,21 @@ function AppRoutes() {
      */
     <AnimatePresence mode="wait" initial={false}>
       <m.div key={location.pathname} {...PAGE} className="flex min-h-0 flex-1 flex-col">
-        <Routes location={location}>
-          <Route path="/" element={<Navigate to="/services" replace />} />
-          <Route path="/logs" element={<LogsPage />} />
-          <Route path="/traces" element={<TracesPage />} />
-          <Route path="/traces/:traceId" element={<TraceDetailPage />} />
-          <Route path="/metrics" element={<MetricsPage />} />
-          <Route path="/errors" element={<ErrorsPage />} />
-          <Route path="/services" element={<ServicesPage />} />
-          <Route path="/services/:name" element={<ServiceDetailPage />} />
-          <Route path="*" element={<Navigate to="/services" replace />} />
-        </Routes>
+        {/* 崩的只是内容区：顶栏、时间范围、页签都还在，换个页签就能接着用。
+            这层跟着 `key={pathname}` 一起重挂，所以换页时错误状态自动清掉 */}
+        <ErrorBoundary>
+          <Routes location={location}>
+            <Route path="/" element={<Navigate to="/services" replace />} />
+            <Route path="/logs" element={<LogsPage />} />
+            <Route path="/traces" element={<TracesPage />} />
+            <Route path="/traces/:traceId" element={<TraceDetailPage />} />
+            <Route path="/metrics" element={<MetricsPage />} />
+            <Route path="/errors" element={<ErrorsPage />} />
+            <Route path="/services" element={<ServicesPage />} />
+            <Route path="/services/:name" element={<ServiceDetailPage />} />
+            <Route path="*" element={<Navigate to="/services" replace />} />
+          </Routes>
+        </ErrorBoundary>
       </m.div>
     </AnimatePresence>
   )
