@@ -127,6 +127,8 @@ function fmtRps(rps: number): string {
 function QuickLinks({ service, win, logDim, hasMetrics, className }: { service: string; win: Window; logDim: string; hasMetrics: boolean; className?: string }) {
   const stop = (e: React.MouseEvent) => e.stopPropagation()
   return (
+    // 这层 span 自己不可点，只是拦住冒泡：整张卡 / 整行都挂着跳转，点这三个小图标不该顺带被带走
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <span className={cn('flex items-center gap-0.5', className)} onClick={stop}>
       <Hint text="错误日志" asChild>
         <Link to={logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win)} className="rounded p-1 text-muted-fg hover:bg-muted hover:text-fg">

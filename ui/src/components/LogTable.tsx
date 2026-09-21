@@ -504,6 +504,8 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
         const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
         const detailId = `${uid}-detail-${item.index}`
         return (
+          // 整行可点只是给鼠标的方便，键盘走这一行开头那个 DisclosureToggle
+          // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
           <li
             key={key}
             data-index={item.index}
@@ -544,6 +546,8 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
               )}
             </div>
             {open ? (
+              // 详情在可点的 li 里面，点它不该顺带把整条收起来
+              // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
               <div id={detailId} className="mt-2" onClick={(e) => e.stopPropagation()}>
                 <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
               </div>

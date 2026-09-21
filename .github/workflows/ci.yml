@@ -37,6 +37,12 @@ jobs:
         working-directory: ui
         run: pnpm install --frozen-lockfile && pnpm build
 
+      # 类型和构建都看不出无障碍和 hooks 的问题（onClick 挂在 div 上、图标按钮没名字、
+      # 依赖数组漏东西），那两类只有 eslint 拦得住
+      - name: Lint ui
+        working-directory: ui
+        run: pnpm lint
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

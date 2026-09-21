@@ -103,6 +103,8 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
         const detailId = `${uid}-detail-${item.index}`
         return (
           <div key={key} data-index={item.index} ref={virtualizer.measureElement}>
+            {/* 整行可点只是给鼠标的方便，键盘走行首那个 DisclosureToggle，所以这里不另接键盘事件 */}
+            {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
             <div
               className={cn('row-hover group flex cursor-pointer items-start gap-2 px-3 leading-5 md:px-4', open && 'bg-muted/40')}
               onClick={() => toggle(key)}
@@ -167,7 +169,7 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
               )}
             </div>
             {open && (
-              <div id={detailId} className="border-y border-border/60 bg-muted/30 px-3 py-3 md:px-4" onClick={(e) => e.stopPropagation()}>
+              <div id={detailId} className="border-y border-border/60 bg-muted/30 px-3 py-3 md:px-4">
                 <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
               </div>
             )}

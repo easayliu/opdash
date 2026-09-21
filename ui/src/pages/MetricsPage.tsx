@@ -610,7 +610,8 @@ function DashboardPanel({
   const toggle = (label: string) =>
     setHidden((prev) => {
       const next = new Set(prev)
-      next.has(label) ? next.delete(label) : next.add(label)
+      if (next.has(label)) next.delete(label)
+      else next.add(label)
       return next
     })
 
@@ -882,8 +883,9 @@ function DrillPopover({
   const width = data.width_ms >= 60_000 ? `${Math.round(data.width_ms / 60_000)} 分钟` : `${Math.round(data.width_ms / 1000)} 秒`
   return (
     <>
-      {/* 点别处关掉 */}
-      <div className="fixed inset-0 z-30" onClick={onClose} />
+      {/* 点别处关掉。键盘那条路是 Escape（上面那个 keydown），这层遮罩本身对读屏不存在 */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
+      <div aria-hidden className="fixed inset-0 z-30" onClick={onClose} />
       <div
         className="absolute z-40 w-64 rounded-lg border border-border bg-card p-2.5 shadow-lg"
         style={{ left: Math.max(4, Math.min(at.x - 128, 9999)), top: at.y + 12 }}

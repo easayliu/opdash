@@ -184,6 +184,9 @@ function SaveForm({ view, onSave }: { view: View; onSave: (name: string, view: V
   return (
     <form onSubmit={submit} className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
+        {/* 浮层刚打开、焦点就该落在这个框里（人点「收藏」就是来起名字的）。
+            no-autofocus 防的是页面一加载就抢焦点，浮层内部的初始焦点是另一回事 */}
+        {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
         <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder={suggested} className="h-8 text-xs" aria-label="收藏的名字" autoFocus />
         <Button type="submit" variant="primary" size="sm" disabled={busy}>
           <BookmarkIcon className="size-3.5" />
@@ -250,6 +253,8 @@ function Row({
     <li className={cn('group flex items-center gap-1 px-1.5', current && 'bg-accent-soft/60')}>
       {editing ? (
         <div className="flex min-w-0 flex-1 items-center gap-1 py-1 pl-1.5">
+          {/* 点了「改名」，焦点直接进框里 */}
+          {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
           <Input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onKey} maxLength={64} className="h-7 text-xs" aria-label="新名字" autoFocus />
           <Button size="xs" variant="ghost" className="px-1.5" onClick={commit} title="保存 (Enter)">
             <CheckIcon className="size-3.5" />

@@ -201,6 +201,8 @@ export function TracesPage() {
         {traces.length > 0 && isMobile && (
           <ul className="text-xs">
             {traces.map((t) => (
+              // 整行可点是给手指的；键盘和读屏走下面那个真链接
+              // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
               <li key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60 px-3 py-2" onClick={() => navigate(traceHref(t), { state: from })}>
                 <div className="flex items-center gap-2">
                   <span className="mono text-2xs text-muted-fg tabular-nums">{formatTsMicro(t.start_us, { date: false }).slice(0, 12)}</span>

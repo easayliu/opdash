@@ -384,7 +384,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
 
   const items = virtualizer.getVirtualItems()
   return (
-    <div ref={listRef} className="relative h-full min-w-0 overflow-auto" onKeyDown={onListKey}>
+    <div ref={listRef} className="relative h-full min-w-0 overflow-auto">
       <div className="sticky top-0 z-[1] flex border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: minW, height: HEADER_H }}>
         <div className="flex shrink-0 items-center gap-1 overflow-hidden px-2 md:px-3" style={{ width: leftW }}>
           <span className="mr-auto hidden whitespace-nowrap md:inline">服务 / 操作</span>
@@ -432,7 +432,11 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
         </Hint>
       </div>
       <div ref={dragBox} className="pointer-events-none absolute inset-y-0 z-[2] border-x border-accent bg-accent/15" style={{ display: 'none' }} />
-      <div role="listbox" aria-label="span 列表" className="relative" style={{ height: virtualizer.getTotalSize(), minWidth: minW }}>
+      {/* 方向键接在 listbox 这一层：外面那个 div 只是滚动容器，没有角色也接不了键盘。
+          listbox 自己不进 tab 序列——按 APG 的 roving tabindex，可聚焦的是选中的那个 option，
+          键盘事件从它冒上来 */}
+      {/* eslint-disable-next-line jsx-a11y/interactive-supports-focus */}
+      <div role="listbox" aria-label="span 列表" onKeyDown={onListKey} className="relative" style={{ height: virtualizer.getTotalSize(), minWidth: minW }}>
         {/* 刻度竖线画一次盖在整列上，不用每行各画几根 */}
         <div aria-hidden className="pointer-events-none absolute inset-0 flex">
           <div className="shrink-0" style={{ width: leftW }} />
@@ -508,6 +512,8 @@ const SpanRow = memo(function SpanRow({ node: n, top, isSel, isTabStop, isCollap
   const labelAfter = right < 84
   const labelBefore = !labelAfter && left > 16
   return (
+    // 键盘操作按 APG 的 listbox 那套：整列一个 tab 落点，方向键接在外面的 listbox 上
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events
     <div
       data-span-id={s.span_id}
       role="option"
