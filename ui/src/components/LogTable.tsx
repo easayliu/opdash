@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, ListTreeIcon, XIcon } from 'lucide-react'
@@ -175,6 +175,32 @@ function HeaderFilter({ col, filter }: { col: string; filter: ColFilter }) {
   )
 }
 
+/**
+ * 展开 / 收起一条日志的那个箭头。
+ *
+ * 整行可点是给鼠标的方便，但它**不能是唯一的入口**：`<tr>` / `<li>` 不可聚焦，键盘和读屏原来
+ * 就打不开详情——而详情里才有 message 全文、属性表、trace / span 的跳转，等于半个页面够不着。
+ * 所以箭头本身是个真按钮，按 ARIA 的 Disclosure 那套报 `aria-expanded`，并用 `aria-controls`
+ * 指向展开出来的那一块。行上的 onClick 照旧，点按钮时别让它再冒上去翻一次。
+ */
+export function DisclosureToggle({ open, controls, onToggle, className }: { open: boolean; controls: string; onToggle: () => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-controls={open ? controls : undefined}
+      aria-label={open ? '收起这条日志的详情' : '展开这条日志的详情'}
+      onClick={(e) => {
+        e.stopPropagation()
+        onToggle()
+      }}
+      className={cn('cursor-pointer rounded-sm text-muted-fg hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60', className)}
+    >
+      {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
+    </button>
+  )
+}
+
 /** 把命中的关键字用 <mark> 包起来（不分大小写，纯文本，不走 innerHTML）。 */
 export function Highlight({ text, terms }: { text: string; terms?: string[] }) {
   const keys = (terms ?? []).filter(Boolean)
@@ -278,6 +304,7 @@ const THEAD_H = 30
 
 function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, compact, sort, onSort, colFilters, expanded, toggle }: RowsProps & Pick<LogTableProps, 'compact' | 'sort' | 'onSort' | 'colFilters'>) {
   const from = useFrom()
+  const uid = useId()
   const tableRef = useRef<HTMLTableElement>(null)
   const keys = useRowKeys(rows)
   const virtualizer = useRowVirtualizer(rows, keys, tableRef, EST_ROW_H, THEAD_H)
@@ -341,6 +368,8 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
         const open = expanded.has(key)
         const [first, rest] = splitFirstLine(r.message)
         const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
+        // 展开出来那一行的 id，给箭头的 aria-controls 指。rowKey 是内容拼的（带空格），当不了 id
+        const detailId = `${uid}-detail-${item.index}`
         // 一条日志一个 tbody：主行加展开行一起量高度
         return (
           <tbody key={key} data-index={item.index} ref={virtualizer.measureElement}>
@@ -349,8 +378,8 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
               data-selected={isAnchor ? '1' : undefined}
               onClick={() => toggle(key)}
             >
-              <td className="py-1.5 pl-2 text-muted-fg">
-                {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
+              <td className="py-1.5 pl-2">
+                <DisclosureToggle open={open} controls={detailId} onToggle={() => toggle(key)} />
               </td>
               <td className="mono px-1.5 py-1.5 whitespace-nowrap text-muted-fg tabular-nums">{formatTs(r.ts_ms)}</td>
               <td className="px-1.5 py-1.5">
@@ -429,7 +458,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
               )}
             </tr>
             {open && (
-              <tr className="border-b border-border/60 bg-muted/30">
+              <tr id={detailId} className="border-b border-border/60 bg-muted/30">
                 <td />
                 <td colSpan={span} className="px-2 py-3">
                   <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
@@ -453,6 +482,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
 /** 手机上的日志列表：一条一张卡，点开看全文和字段。列太多的表格在窄屏上只能横滚，不如卡片。 */
 function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onContext, onPivot, expanded, toggle }: RowsProps) {
   const from = useFrom()
+  const uid = useId()
   const listRef = useRef<HTMLUListElement>(null)
   const keys = useRowKeys(rows)
   const virtualizer = useRowVirtualizer(rows, keys, listRef, EST_CARD_H, 0)
@@ -472,6 +502,7 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
         const open = expanded.has(key)
         const [first, rest] = splitFirstLine(r.message)
         const isAnchor = anchorKey === key || (!!selectedSpanId && r.span_id === selectedSpanId)
+        const detailId = `${uid}-detail-${item.index}`
         return (
           <li
             key={key}
@@ -482,6 +513,7 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
             onClick={() => toggle(key)}
           >
             <div className="flex items-center gap-2 text-2xs text-muted-fg">
+              <DisclosureToggle open={open} controls={detailId} onToggle={() => toggle(key)} className="-ml-1 shrink-0" />
               <span className="mono tabular-nums">{formatTs(r.ts_ms, { date: false })}</span>
               <Badge tone={levelTone(r.level)}>{r.level || '-'}</Badge>
               {primary && <span className="min-w-0 flex-1 truncate">{dimValue(r, primary) || '-'}</span>}
@@ -512,7 +544,7 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
               )}
             </div>
             {open ? (
-              <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+              <div id={detailId} className="mt-2" onClick={(e) => e.stopPropagation()}>
                 <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
               </div>
             ) : (

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { ArrowDownIcon, ListTreeIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
-import { ExpandedRow, Highlight, visibleDims } from '@/components/LogTable'
+import { DisclosureToggle, ExpandedRow, Highlight, visibleDims } from '@/components/LogTable'
 import { Button, Hint, linkClass } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
 import { useRowKeys } from '@/lib/log-row'
@@ -35,6 +35,7 @@ const STICK_SLOP = 24
  */
 export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText }: LogStreamProps) {
   const hostRef = useRef<HTMLDivElement>(null)
+  const uid = useId()
   const scrollEl = useRef<HTMLElement | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [atBottom, setAtBottom] = useState(true)
@@ -99,12 +100,15 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
         const key = keys[item.index]
         const open = expanded.has(key)
         const [first, rest] = splitFirstLine(r.message)
+        const detailId = `${uid}-detail-${item.index}`
         return (
           <div key={key} data-index={item.index} ref={virtualizer.measureElement}>
             <div
               className={cn('row-hover group flex cursor-pointer items-start gap-2 px-3 leading-5 md:px-4', open && 'bg-muted/40')}
               onClick={() => toggle(key)}
             >
+              {/* 整行可点是给鼠标的；键盘和读屏走这个按钮（见 LogTable 的 DisclosureToggle） */}
+              <DisclosureToggle open={open} controls={detailId} onToggle={() => toggle(key)} className="mt-px shrink-0" />
               <span className="mono shrink-0 text-2xs text-muted-fg tabular-nums">{formatTs(r.ts_ms, { date: false })}</span>
               <Hint text={r.level}>
                 <span className="mono w-11 shrink-0 text-2xs uppercase" style={{ color: levelColor(r.level) }}>
@@ -163,7 +167,7 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
               )}
             </div>
             {open && (
-              <div className="border-y border-border/60 bg-muted/30 px-3 py-3 md:px-4" onClick={(e) => e.stopPropagation()}>
+              <div id={detailId} className="border-y border-border/60 bg-muted/30 px-3 py-3 md:px-4" onClick={(e) => e.stopPropagation()}>
                 <ExpandedRow row={r} dims={dims} highlight={highlight} onPivot={onPivot} />
               </div>
             )}
