@@ -16,6 +16,9 @@ export interface SpanNode {
   span: Span
   children: SpanNode[]
   depth: number
+  /** 在**同层兄弟**里排第几（从 1 起）、这一层共几个。读屏报「第几个，共几个」用，树是按层算的 */
+  posinset: number
+  setsize: number
   /** parent_span_id 指向了一个不在结果里的 span */
   orphan: boolean
 }
@@ -29,7 +32,7 @@ export interface SpanTree {
 /** 按 parent_span_id 建树。根 = parent 为空的；parent 找不到的挂到顶层并标记。 */
 export function buildTree(spans: Span[]): SpanTree {
   const byId = new Map<string, SpanNode>()
-  for (const s of spans) byId.set(s.span_id, { span: s, children: [], depth: 0, orphan: false })
+  for (const s of spans) byId.set(s.span_id, { span: s, children: [], depth: 0, posinset: 1, setsize: 1, orphan: false })
   const roots: SpanNode[] = []
   for (const node of byId.values()) {
     const pid = node.span.parent_span_id
@@ -45,9 +48,17 @@ export function buildTree(spans: Span[]): SpanTree {
   const walk = (n: SpanNode, depth: number) => {
     n.depth = depth
     n.children.sort(byStart)
-    for (const c of n.children) walk(c, depth + 1)
+    n.children.forEach((c, i) => {
+      c.posinset = i + 1
+      c.setsize = n.children.length
+      walk(c, depth + 1)
+    })
   }
-  for (const r of roots) walk(r, 0)
+  roots.forEach((r, i) => {
+    r.posinset = i + 1
+    r.setsize = roots.length
+    walk(r, 0)
+  })
   let startUs = Infinity
   let endUs = -Infinity
   for (const s of spans) {
@@ -432,11 +443,19 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
         </Hint>
       </div>
       <div ref={dragBox} className="pointer-events-none absolute inset-y-0 z-[2] border-x border-accent bg-accent/15" style={{ display: 'none' }} />
-      {/* 方向键接在 listbox 这一层：外面那个 div 只是滚动容器，没有角色也接不了键盘。
-          listbox 自己不进 tab 序列——按 APG 的 roving tabindex，可聚焦的是选中的那个 option，
-          键盘事件从它冒上来 */}
+      {/*
+        * 这是一棵树，不是一个列表。
+        *
+        * 原来报的是 `listbox` / `option`，但这些行有父子层级、能折叠展开，而 option 表达不了
+        * 这两件事：读屏既念不出「第 3 层」，也念不出「已折叠」——左右方向键明明是能用的，
+        * 听的人根本不知道有这回事。ARIA 给它的就是 tree / treeitem：`aria-expanded` 说折没折、
+        * `aria-level` 说在第几层，配合已有的 `aria-setsize` / `aria-posinset`。
+        *
+        * 键盘照旧按 APG 的 roving tabindex：整棵树只留一个 tab 落点（选中的那行），方向键接在
+        * 树这一层，事件从聚焦的那个 treeitem 冒上来，所以树自己不进 tab 序列。
+        */}
       {/* eslint-disable-next-line jsx-a11y/interactive-supports-focus */}
-      <div role="listbox" aria-label="span 列表" onKeyDown={onListKey} className="relative" style={{ height: virtualizer.getTotalSize(), minWidth: minW }}>
+      <div role="tree" aria-label="span 列表" onKeyDown={onListKey} className="relative" style={{ height: virtualizer.getTotalSize(), minWidth: minW }}>
         {/* 刻度竖线画一次盖在整列上，不用每行各画几根 */}
         <div aria-hidden className="pointer-events-none absolute inset-0 flex">
           <div className="shrink-0" style={{ width: leftW }} />
@@ -453,8 +472,6 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
             <SpanRow
               key={id}
               node={n}
-              index={item.index}
-              total={rows.length}
               top={item.start - HEADER_H}
               isSel={selected === id}
               isTabStop={id === (selected ?? rows[0]?.span.span_id)}
@@ -477,9 +494,6 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
 
 interface RowProps {
   node: SpanNode
-  /** 这一行在整棵展开后的列表里排第几（从 0 起）、一共多少行——读屏要靠它报「第几个，共几个」 */
-  index: number
-  total: number
   /** 在列表里的纵向位置（px，不含表头） */
   top: number
   isSel: boolean
@@ -497,7 +511,7 @@ interface RowProps {
 }
 
 /** 一行 span。props 全是原始值和稳定引用，选中 / 折叠别的行时这一行不会重画。 */
-const SpanRow = memo(function SpanRow({ node: n, index, total, top, isSel, isTabStop, isCollapsed, color, leftW, isMobile, viewStartUs, viewLen, treeStartUs, onSelect, onToggle }: RowProps) {
+const SpanRow = memo(function SpanRow({ node: n, top, isSel, isTabStop, isCollapsed, color, leftW, isMobile, viewStartUs, viewLen, treeStartUs, onSelect, onToggle }: RowProps) {
   const s = n.span
   const isErr = s.status === 'Error'
   const hasKids = n.children.length > 0
@@ -517,15 +531,19 @@ const SpanRow = memo(function SpanRow({ node: n, index, total, top, isSel, isTab
   const labelAfter = right < 84
   const labelBefore = !labelAfter && left > 16
   return (
-    // 键盘操作按 APG 的 listbox 那套：整列一个 tab 落点，方向键接在外面的 listbox 上
+    // 键盘操作按 APG 的 tree 那套：整棵树一个 tab 落点，方向键接在外面的 tree 上
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events
     <div
       data-span-id={s.span_id}
-      role="option"
+      role="treeitem"
       aria-selected={isSel}
-      // 几千个 span 的 trace 只渲染视口里的几十行，不报这一对读屏就会说「第 3 个，共 40 个」
-      aria-setsize={total}
-      aria-posinset={index + 1}
+      // 有子 span 才报折叠状态；没有子节点的行不写这个属性，不然读屏会念成「可展开的空节点」
+      aria-expanded={hasKids ? !isCollapsed : undefined}
+      aria-level={n.depth + 1}
+      // 几千个 span 的 trace 只渲染视口里的几十行，不报这一对读屏就会说「第 3 个，共 40 个」。
+      // 树是按层数的：这里报的是同层兄弟里的位置，不是拍平之后的行号（见 buildTree）
+      aria-setsize={n.setsize}
+      aria-posinset={n.posinset}
       // 整列只留一个 tab 落点（选中的那行，没选中就是第一行），进来之后用方向键走
       tabIndex={isTabStop ? 0 : -1}
       aria-label={`${s.service} ${s.name}，耗时 ${dur}${isErr ? '，出错' : ''}`}
