@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
-import { CopyIcon } from 'lucide-react'
 import { useMeta, useSpanAttrs, useTraceDetail, useTraceLogs } from '@/api/queries'
 import type { LogRow, TraceDetailResponse } from '@/api/types'
 import { LEVEL_RANK, LogTable, sortLogRows, type ColFilter, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Combobox, EmptyState, ErrorBox, Spinner } from '@/components/ui'
+import { Badge, Button, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
 import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
-import { around, logsHref, metricsHref, serviceHref } from '@/lib/links'
+import { WINDOW_AROUND_MS, around, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { formatDuration, formatTs, formatTsMicro } from '@/lib/time'
 import { useFromState, useUrlState } from '@/lib/url-state'
-import { cn, copyText } from '@/lib/utils'
+import { cn } from '@/lib/utils'
+import { usePageTitle } from '@/lib/title'
 
 /** 日志窗口在 span 跨度之外前后各放宽多少：给时钟偏差和写入延迟留余量 */
 const LOG_WINDOW_PAD_MS = 5 * 60_000
@@ -30,7 +30,7 @@ function truncatedHint(d: TraceDetailResponse, max = 5000): string {
       : ''
   const pinned = d.pinned_span ? `；链接指名的 ${d.pinned_span} 不在这一段里，已单独取回来钉在图上` : ''
   return d.narrowed
-    ? `这条 trace 的 span 超过 ${max} 个，只显示 ${span} 这一段（以进来时的时刻为中心）${pinned}`
+    ? `这条 trace 的 span 超过 ${max} 个，只显示 ${span} 这一段（从进来的时刻往后尽量长）${pinned}`
     : `超过 ${max} 个 span，按时间只显示最早的这些${pinned}`
 }
 
@@ -92,6 +92,7 @@ export function TraceDetailPage() {
     }
   }, [selectedSpan, detail.data?.attributes_lazy, attrsFor])
   const root = tree.roots[0]?.span
+  usePageTitle(root && `${root.service} ${root.name}`)
   const errorSpans = useMemo(() => spans.filter((s) => s.status === 'Error').sort((a, b) => a.start_us - b.start_us), [spans])
   const errors = errorSpans.length
   // 点顶部的错误数：选中下一个出错的 span（从当前选中的往后数，到头再绕回第一个），瀑布图会滚过去
@@ -120,13 +121,6 @@ export function TraceDetailPage() {
     const cause = rootCauseSpan(tree)
     if (cause) set({ span: cause.span_id }, { replace: true })
   }, [traceId, spans.length, tree, selected, set])
-
-  useEffect(() => {
-    document.title = root ? `${root.service} ${root.name} · opdash` : 'opdash'
-    return () => {
-      document.title = 'opdash'
-    }
-  }, [root])
 
   const at = Number(params.get('at')) || undefined
   /**
@@ -157,7 +151,8 @@ export function TraceDetailPage() {
       return { from: Math.floor(from - LOG_WINDOW_PAD_MS), to: Math.ceil(to + LOG_WINDOW_PAD_MS) }
     }
     // span 表里没有这条 trace（采样掉了、过了 TTL，或者只有日志打了 TID）：退回 at 前后一大片；
-    // 连 at 都没有就不带时间条件，让后端靠 bloom filter 扫全部分区
+    // 连 at 都没有才不带时间条件——日志表的 `idx_trace_id` 误判率 2.5%，摊到 30 天只剪掉九成七，
+    // 这一趟实测要 10.4 亿行 / 5.4 GB / 14 s，是真没别的线索了才走
     return at ? { from: at - 3_600_000, to: at + 24 * 3_600_000 } : {}
   }, [detail.isPending, detail.data, at])
   // 一条 trace 的日志全拉下来，排序和「只看某个 span」都在浏览器里做
@@ -229,12 +224,14 @@ export function TraceDetailPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-6 gap-y-1.5 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
         {from && (
-          <Link to={from.href} className="shrink-0 text-sm text-muted-fg hover:text-fg" title={`回到${from.label}`}>
-            ← {from.label}
-          </Link>
+          <Hint text={`回到${from.label}`} asChild>
+            <Link to={from.href} className="shrink-0 text-sm text-muted-fg hover:text-fg">
+              ← {from.label}
+            </Link>
+          </Hint>
         )}
         <div className="min-w-0 max-w-full">
-          <div className="flex min-w-0 items-center gap-2 text-base font-semibold">
+          <h1 className="flex min-w-0 items-center gap-2 text-base font-semibold">
             {root ? (
               <>
                 <span className="text-muted-fg">{root.service}</span>
@@ -244,15 +241,11 @@ export function TraceDetailPage() {
             ) : (
               '链路详情'
             )}
-          </div>
+          </h1>
           <div className="mono mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-muted-fg">
             <span className="truncate">{traceId}</span>
-            <button type="button" onClick={() => copyText(traceId)} title="复制 trace id" className="hover:text-fg">
-              <CopyIcon className="size-3.5" />
-            </button>
-            <button type="button" onClick={() => copyText(window.location.href)} title="复制本页链接" className="ml-2 hover:text-fg">
-              复制链接
-            </button>
+            <CopyButton text={traceId} title="复制 trace id" />
+            <CopyButton text={() => window.location.href} title="复制本页链接（带当前选中的 span）" className="ml-2" label="复制链接" />
           </div>
         </div>
         {detail.data && spans.length > 0 && (
@@ -274,9 +267,9 @@ export function TraceDetailPage() {
               <dd className="tabular-nums">
                 {spans.length}
                 {detail.data.truncated && (
-                  <Badge tone="warn" className="ml-1" title={truncatedHint(detail.data, meta.data?.limits.max_trace_spans)}>
-                    {detail.data.narrowed ? '只显示这一段' : '已截断'}
-                  </Badge>
+                  <Hint text={truncatedHint(detail.data, meta.data?.limits.max_trace_spans)} className="ml-1">
+                    <Badge tone="warn">{detail.data.narrowed ? '只显示这一段' : '已截断'}</Badge>
+                  </Hint>
                 )}
               </dd>
             </div>
@@ -284,9 +277,11 @@ export function TraceDetailPage() {
               <dt className="text-2xs text-muted-fg">错误</dt>
               <dd className="tabular-nums">
                 {errors > 0 ? (
-                  <button type="button" onClick={jumpToError} title={errors > 1 ? '点击跳到下一个出错的 span' : '点击跳到出错的 span'} className="cursor-pointer">
-                    <Badge tone="danger">{errors}</Badge>
-                  </button>
+                  <Hint text={errors > 1 ? '点击跳到下一个出错的 span' : '点击跳到出错的 span'} asChild>
+                    <button type="button" onClick={jumpToError} className="cursor-pointer">
+                      <Badge tone="danger">{errors}</Badge>
+                    </button>
+                  </Hint>
                 ) : (
                   0
                 )}
@@ -299,46 +294,56 @@ export function TraceDetailPage() {
         {root && (
           <div className="flex flex-wrap items-center gap-2">
             {meta.data?.metrics && (
-              <Link to={metricsHref(root.service, around(tree.startUs / 1000))} title={`${root.service} 在这前后半小时的指标`}>
-                <Button size="xs">服务指标</Button>
-              </Link>
+              <Hint text={`${root.service} 在这前后半小时的指标`} asChild>
+                <Link to={metricsHref(root.service, around(tree.startUs / 1000))}>
+                  <Button size="xs">服务指标</Button>
+                </Link>
+              </Hint>
             )}
             <Link to={serviceHref(root.service, around(tree.startUs / 1000))}>
               <Button size="xs">服务概览</Button>
             </Link>
-            <Link to={logsHref({ traceId })} title="这条链路的全部日志">
-              <Button size="xs">全部日志</Button>
-            </Link>
+            {/* 时间窗按这条 trace 的实际跨度前后放宽：日志页按 id 查也要裁时间（见 logsHref），
+                不带窗口就会撞上它 1 小时的默认值 */}
+            <Hint text="这条链路的全部日志" asChild>
+              <Link
+                to={logsHref({ traceId }, { fromMs: tree.startUs / 1000 - WINDOW_AROUND_MS, toMs: tree.endUs / 1000 + WINDOW_AROUND_MS })}
+              >
+                <Button size="xs">全部日志</Button>
+              </Link>
+            </Hint>
           </div>
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg md:ml-auto md:gap-x-4">
           {colors.entries().map(([name, color]) => (
-            <button
-              key={name}
-              type="button"
-              disabled={!serviceDim}
-              onClick={() => toggleServiceFilter(name)}
-              title={serviceFilter === name ? '取消只看这个服务的日志' : `只看 ${name} 的日志`}
-              className={cn(
-                'inline-flex cursor-pointer items-center gap-1 rounded px-1 -mx-1 hover:bg-muted hover:text-fg disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-fg',
-                serviceFilter === name && 'bg-accent-soft font-medium text-accent hover:text-accent',
-                serviceFilter && serviceFilter !== name && 'opacity-60',
-              )}
-            >
-              <span className="inline-block h-3.5 w-1 rounded-sm" style={{ background: color }} />
-              {name}
-            </button>
+            <Hint text={serviceFilter === name ? '取消只看这个服务的日志' : `只看 ${name} 的日志`} asChild>
+              <button
+                key={name}
+                type="button"
+                disabled={!serviceDim}
+                onClick={() => toggleServiceFilter(name)}
+                className={cn(
+                  'inline-flex cursor-pointer items-center gap-1 rounded px-1 -mx-1 hover:bg-muted hover:text-fg disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-fg',
+                  serviceFilter === name && 'bg-accent-soft font-medium text-accent hover:text-accent',
+                  serviceFilter && serviceFilter !== name && 'opacity-60',
+                )}
+              >
+                <span className="inline-block h-3.5 w-1 rounded-sm" style={{ background: color }} />
+                {name}
+              </button>
+            </Hint>
           ))}
           <StatsLine stats={detail.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
           {detail.data?.windowed && (
-            <button
-              type="button"
-              className="text-accent hover:underline"
-              title="只查了开始时间前 1 小时到后 24 小时的 span；怀疑漏了就查全部时间（慢）"
-              onClick={() => set({ at: null }, { replace: true })}
-            >
-              查全部时间
-            </button>
+            <Hint text="只查了开始时间前 1 小时到后 24 小时的 span；怀疑漏了就查全部时间（慢）" asChild>
+              <button
+                type="button"
+                className={linkClass}
+                onClick={() => set({ at: null }, { replace: true })}
+              >
+                查全部时间
+              </button>
+            </Hint>
           )}
         </div>
       </header>
@@ -356,7 +361,7 @@ export function TraceDetailPage() {
                 title="没有这条 trace 的 span"
                 hint={
                   <>
-                    可能还没入库（采集有几秒延迟）、被采样掉了，或者已经超过 30 天。可以看看有没有<Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className="text-accent hover:underline">这个 trace id 的日志</Link>。
+                    可能还没入库（采集有几秒延迟）、被采样掉了，或者已经超过 30 天。可以看看有没有<Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className={linkClass}>这个 trace id 的日志</Link>。
                   </>
                 }
               />
@@ -373,12 +378,11 @@ export function TraceDetailPage() {
                 <span className="hidden text-2xs text-muted-fg md:inline">选中 span 的 {selectedLogCount} 条已高亮</span>
               )}
               {logs.data?.truncated && (
-                <Badge
-                  tone="warn"
-                  title={`库里带这个 trace id 的日志有 ${logs.data.total ?? '?'} 条，只取了最早的 ${logs.data.rows.length} 条。这么多多半是 trace id 被复用了（常驻消费者一直用同一个 id），剩下的多半跟这次请求无关——要全看去日志页`}
+                <Hint
+                  text={`库里带这个 trace id 的日志有 ${logs.data.total ?? '?'} 条，只取了最早的 ${logs.data.rows.length} 条。这么多多半是 trace id 被复用了（常驻消费者一直用同一个 id），剩下的多半跟这次请求无关——要全看去日志页`}
                 >
-                  只取了前 {logs.data.rows.length} 条
-                </Badge>
+                  <Badge tone="warn">只取了前 {logs.data.rows.length} 条</Badge>
+                </Hint>
               )}
               {showLogs && selected && (
                 <Button size="xs" active={logsOnlySpan} onClick={() => set({ span_logs: logsOnlySpan ? null : '1' }, { replace: true })}>
@@ -403,7 +407,7 @@ export function TraceDetailPage() {
               {showLogs && logs.isFetching && <Spinner className="size-3.5" />}
               <span className="ml-auto flex items-center gap-3 text-2xs text-muted-fg">
                 <StatsLine stats={logs.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
-                <Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className="text-accent hover:underline">
+                <Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className={linkClass}>
                   在日志页打开
                 </Link>
               </span>
@@ -426,7 +430,7 @@ export function TraceDetailPage() {
                           ? '这个筛选下没有日志。'
                           : `没有带这个 trace id 的日志。${selected && logsOnlySpan ? '试试取消「只看选中 span」。' : '日志里要打 [TID:…] 才能关联；Go / nginx 这类不打 TID 的服务这里看不到。'}`}
                         {dimFiltered && (
-                          <button type="button" className="text-accent hover:underline" onClick={() => set(Object.fromEntries(filterDims.map((d) => [`log_${d}`, null])), { replace: true })}>
+                          <button type="button" className={linkClass} onClick={() => set(Object.fromEntries(filterDims.map((d) => [`log_${d}`, null])), { replace: true })}>
                             清掉列上的筛选
                           </button>
                         )}

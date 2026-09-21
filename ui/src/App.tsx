@@ -104,6 +104,14 @@ export default function App() {
     // 外壳钉在视口高度，页面各自在内部滚（表头 sticky、瀑布图 / 日志分栏滚动、右侧 span 面板都靠这个），
     // 顶栏和页脚固定；没自带滚动区的页面退回到 main 滚
     <div className="flex h-dvh flex-col">
+      {/* 平时看不见，Tab 第一下才冒出来：不给它的话，键盘用户每切一个页面都要把顶栏
+          的六个页签和时间 / 主题 / 用户挨个 Tab 一遍才摸得到内容 */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-md focus:border focus:border-border focus:bg-card focus:px-3 focus:py-2 focus:text-sm focus:shadow-md"
+      >
+        跳到主内容
+      </a>
       {/* 手机上导航页签换到第二行，第一行只留 logo 和时间 / 主题 / 用户 */}
       <header className="z-20 shrink-0 border-b border-border bg-card">
         <div className="flex flex-wrap items-stretch gap-x-4 px-3 md:h-14 md:flex-nowrap md:px-4">
@@ -143,7 +151,7 @@ export default function App() {
           </div>
         </div>
       </header>
-      <main className="flex min-h-0 flex-1 flex-col overflow-auto">
+      <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col overflow-auto">
         <AppRoutes />
       </main>
       <footer className="hidden h-8 shrink-0 items-center justify-end gap-3 border-t border-border px-4 text-2xs text-muted-fg md:flex">

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { FilterIcon, HelpCircleIcon, SlidersHorizontalIcon, XIcon } from 'lucide-react'
 import { useLogFacets } from '@/api/queries'
-import { Button, Combobox, Input, Kbd } from '@/components/ui'
+import { Button, Combobox, Hint, Input, Kbd } from '@/components/ui'
 import type { Params } from '@/api/client'
 import type { ValueCount } from '@/api/types'
 import { cn } from '@/lib/utils'
@@ -24,6 +24,9 @@ interface Props {
   dims: string[]
   /** facet 查询用的时间范围参数 */
   rangeParams: Params
+  /** 按 id 查时这一趟有没有按当前时间范围裁（点了「不限时间再找一次」就是 false），
+   *  chip 上要如实写出来——扫 30 天和扫一小时差着两个数量级 */
+  scoped?: boolean
   onChange: (next: LogFilterState) => void
 }
 
@@ -43,7 +46,7 @@ const DIM_LABEL: Record<string, string> = {
 }
 
 /** 日志筛选栏：一行关键字 + 一行级别 / 常用维度；少用的维度折叠起来。回车 / 点查询才生效。 */
-export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
+export function LogFilters({ state, dims, rangeParams, scoped, onChange }: Props) {
   const [q, setQ] = useState(state.q)
   const [logger, setLogger] = useState(state.logger)
   const [thread, setThread] = useState(state.thread)
@@ -86,10 +89,15 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
   const conditionCount = (state.levels.length ? 1 : 0) + Object.keys(state.dims).length + (state.logger ? 1 : 0) + (state.thread ? 1 : 0)
   const idChip = activeIds && (
     <span className="inline-flex h-9 max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-3 text-xs text-accent">
-      <span className="truncate">{state.trace_id ? `trace ${state.trace_id.slice(0, 12)}…` : `span ${state.span_id}`}（已忽略时间范围）</span>
-      <button type="button" className="shrink-0" onClick={() => onChange({ ...state, trace_id: '', span_id: '' })} title="去掉">
-        <XIcon className="size-3.5" />
-      </button>
+      <span className="truncate">
+        {state.trace_id ? `trace ${state.trace_id.slice(0, 12)}…` : `span ${state.span_id}`}
+        {scoped === false && '（不限时间）'}
+      </span>
+      <Hint text="去掉" asChild>
+        <button type="button" className="shrink-0" onClick={() => onChange({ ...state, trace_id: '', span_id: '' })}>
+          <XIcon className="size-3.5" />
+        </button>
+      </Hint>
     </span>
   )
 
@@ -104,14 +112,15 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
             className="mono pr-9"
             aria-label="日志关键字"
           />
-          <button
-            type="button"
-            className="absolute top-1/2 right-2.5 -translate-y-1/2 text-muted-fg hover:text-fg"
-            onClick={() => setHelp((h) => !h)}
-            title="语法说明"
-          >
-            <HelpCircleIcon className="size-4" />
-          </button>
+          <Hint text="语法说明" asChild>
+            <button
+              type="button"
+              className="absolute top-1/2 right-2.5 -translate-y-1/2 text-muted-fg hover:text-fg"
+              onClick={() => setHelp((h) => !h)}
+            >
+              <HelpCircleIcon className="size-4" />
+            </button>
+          </Hint>
         </div>
         <Button
           size="md"
@@ -148,21 +157,23 @@ export function LogFilters({ state, dims, rangeParams, onChange }: Props) {
         </div>
       )}
       <div className={cn('flex flex-wrap items-center gap-2', !mobileOpen && 'hidden md:flex')}>
-        <div className="flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto" title="日志级别（可多选）">
-          {LEVELS.map((l) => (
-            <button
-              key={l}
-              type="button"
-              onClick={() => toggleLevel(l)}
-              className={cn(
-                'h-full flex-1 rounded-sm px-2 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5',
-                state.levels.includes(l) && 'bg-accent-soft text-accent',
-              )}
-            >
-              {l}
-            </button>
-          ))}
-        </div>
+        <Hint text="日志级别（可多选）">
+          <div className="flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto">
+            {LEVELS.map((l) => (
+              <button
+                key={l}
+                type="button"
+                onClick={() => toggleLevel(l)}
+                className={cn(
+                  'h-full flex-1 rounded-sm px-2 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5',
+                  state.levels.includes(l) && 'bg-accent-soft text-accent',
+                )}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
+        </Hint>
         {primary.map((dim) => (
           <DimSelect key={dim} dim={dim} value={state.dims[dim]?.[0] ?? ''} values={facetValues.get(dim)} loading={facets.isPending} onChange={(v) => setDim(dim, v)} />
         ))}

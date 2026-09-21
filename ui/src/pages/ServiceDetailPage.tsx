@@ -5,7 +5,7 @@ import type { OperationStat } from '@/api/types'
 import { LineChart, Legend, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Card, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
+import { Badge, Button, Card, EmptyState, ErrorBox, Hint, Select, Spinner } from '@/components/ui'
 import { Delta, ErrorRate } from '@/pages/ServicesPage'
 import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Mover } from '@/lib/compare'
 import { change, pct } from '@/lib/health'
@@ -14,6 +14,7 @@ import { formatDurationMs, formatNumber } from '@/lib/time'
 import { useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
 import { cn } from '@/lib/utils'
+import { usePageTitle } from '@/lib/title'
 
 // 三条线两两都要分得开（会交叉）：用参考配色前三档 aqua / blue / orange，全对校验通过
 const LATENCY_SERIES: LineSeries[] = [
@@ -61,6 +62,7 @@ function sortableDelta(o: OperationStat, key: OpSort): number {
 export function ServiceDetailPage() {
   const { name = '' } = useParams<{ name: string }>()
   const service = decodeURIComponent(name)
+  usePageTitle(service)
   const meta = useMeta()
   const { range } = useTimeRange()
   const { params, set } = useUrlState()
@@ -135,24 +137,27 @@ export function ServiceDetailPage() {
         {op && (
           <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
             <span className="truncate">{op}</span>
-            <button type="button" onClick={() => set({ op: null })} title="看整个服务">
-              ✕
-            </button>
+            <Hint text="看整个服务" asChild>
+              <button type="button" onClick={() => set({ op: null })}>
+                ✕
+              </button>
+            </Hint>
           </span>
         )}
         <span className="flex w-full flex-wrap items-center gap-2 md:ml-auto md:w-auto">
-          <Select
-            value={compare}
-            onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })}
-            className="h-8 text-xs"
-            title="图和表上的变化都和这一段比"
-          >
-            {COMPARE.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
-            ))}
-          </Select>
+          <Hint text="图和表上的变化都和这一段比" asChild>
+            <Select
+              value={compare}
+              onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })}
+              className="h-8 text-xs"
+            >
+              {COMPARE.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </Select>
+          </Hint>
           <Link to={tracesHref({ service, spanName: op || undefined, kinds: 'Server,Consumer', sort: 'duration' }, win)}>
             <Button size="sm">最慢的链路</Button>
           </Link>
@@ -168,9 +173,11 @@ export function ServiceDetailPage() {
           </Link>
           {/* 指标表可能没有（没部署 metricpipe），有才给入口 */}
           {meta.data?.metrics && (
-            <Link to={metricsHref(service, win)} title="JVM、连接池、Kafka 这些链路里看不到的">
-              <Button size="sm">指标看板</Button>
-            </Link>
+            <Hint text="JVM、连接池、Kafka 这些链路里看不到的" asChild>
+              <Link to={metricsHref(service, win)}>
+                <Button size="sm">指标看板</Button>
+              </Link>
+            </Hint>
           )}
         </span>
       </header>
@@ -267,24 +274,26 @@ export function ServiceDetailPage() {
           extra={
             <>
               {ops.data?.truncated && (
-                <Badge tone="warn" title="这个服务的接口太多（常见于把 SQL / id 拼进了 span 名），只统计了量最大的那些">
-                  接口已截断
-                </Badge>
+                <Hint text="这个服务的接口太多（常见于把 SQL / id 拼进了 span 名），只统计了量最大的那些">
+                  <Badge tone="warn">接口已截断</Badge>
+                </Hint>
               )}
               <StatsLine stats={ops.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
               {!isMobile && (
-                <span className="flex h-7 items-center rounded-md border border-input p-0.5" title="点表头是按这一列排；切到「变化」就按这一列和对比窗口的变化排">
-                  {(['value', 'delta'] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setByDelta(m === 'delta')}
-                      className={cn('h-full rounded-sm px-2 text-2xs text-muted-fg hover:text-fg', byDelta === (m === 'delta') && 'bg-accent-soft text-accent')}
-                    >
-                      {m === 'value' ? '按值排' : '按变化排'}
-                    </button>
-                  ))}
-                </span>
+                <Hint text="点表头是按这一列排；切到「变化」就按这一列和对比窗口的变化排">
+                  <span className="flex h-7 items-center rounded-md border border-input p-0.5">
+                    {(['value', 'delta'] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setByDelta(m === 'delta')}
+                        className={cn('h-full rounded-sm px-2 text-2xs text-muted-fg hover:text-fg', byDelta === (m === 'delta') && 'bg-accent-soft text-accent')}
+                      >
+                        {m === 'value' ? '按值排' : '按变化排'}
+                      </button>
+                    ))}
+                  </span>
+                </Hint>
               )}
             </>
           }
@@ -321,9 +330,11 @@ export function ServiceDetailPage() {
                   onClick={() => select(o.span_name)}
                 >
                   <div className="flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate font-medium" title={o.span_name}>
-                      {o.span_name} <span className="text-2xs font-normal text-muted-fg">{o.kind}</span>
-                    </span>
+                    <Hint text={o.span_name}>
+                      <span className="min-w-0 flex-1 truncate font-medium">
+                        {o.span_name} <span className="text-2xs font-normal text-muted-fg">{o.kind}</span>
+                      </span>
+                    </Hint>
                     <OpTag o={o} />
                     <ErrorRate rate={o.error_rate} />
                   </div>
@@ -464,22 +475,23 @@ const MOVER_DOT: Record<Mover['tone'], string> = {
 function MoverRow({ m, selected, onSelect }: { m: Mover; selected: boolean; onSelect: () => void }) {
   return (
     <li>
-      <button
-        type="button"
-        onClick={onSelect}
-        className={cn('row-hover flex w-full items-center gap-3 border-b border-border/60 px-3 py-2 text-left last:border-b-0', selected && 'row-selected')}
-        title={selected ? '再点一下看整个服务' : '只看这个接口的趋势'}
-      >
-        <span className={cn('size-2 shrink-0 rounded-full', MOVER_DOT[m.tone])} />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-medium" title={m.op.span_name}>
-            {m.op.span_name}
+      <Hint text={selected ? '再点一下看整个服务' : '只看这个接口的趋势'} asChild>
+        <button
+          type="button"
+          onClick={onSelect}
+          className={cn('row-hover flex w-full items-center gap-3 border-b border-border/60 px-3 py-2 text-left last:border-b-0', selected && 'row-selected')}
+        >
+          <span className={cn('size-2 shrink-0 rounded-full', MOVER_DOT[m.tone])} />
+          <span className="min-w-0 flex-1">
+            <Hint text={m.op.span_name}>
+              <span className="block truncate text-xs font-medium">{m.op.span_name}</span>
+            </Hint>
+            <span className="block truncate text-2xs text-muted-fg">{m.detail}</span>
           </span>
-          <span className="block truncate text-2xs text-muted-fg">{m.detail}</span>
-        </span>
-        <span className="hidden shrink-0 text-2xs text-muted-fg tabular-nums sm:inline">{formatNumber(m.op.requests)} 次</span>
-        <Badge tone={m.tone}>{m.impact}</Badge>
-      </button>
+          <span className="hidden shrink-0 text-2xs text-muted-fg tabular-nums sm:inline">{formatNumber(m.op.requests)} 次</span>
+          <Badge tone={m.tone}>{m.impact}</Badge>
+        </button>
+      </Hint>
     </li>
   )
 }

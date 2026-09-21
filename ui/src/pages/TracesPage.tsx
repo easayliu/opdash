@@ -6,11 +6,12 @@ import type { TraceSummary } from '@/api/types'
 import { Heatmap, type HeatCellRange } from '@/components/charts/Heatmap'
 import { StatsLine } from '@/components/StatsLine'
 import { TraceFilters, type TraceFilterState } from '@/components/TraceFilters'
-import { Badge, Button, EmptyState, ErrorBox, Spinner } from '@/components/ui'
+import { Badge, Button, CopyButton, EmptyState, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
 import { formatDuration, formatTsMicro, writeRange } from '@/lib/time'
 import { errorsHref, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { splitList, useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
+import { usePageTitle } from '@/lib/title'
 
 /** 详情页带上开始时间，服务端只查附近分区 */
 function traceHref(t: TraceSummary): string {
@@ -18,6 +19,7 @@ function traceHref(t: TraceSummary): string {
 }
 
 export function TracesPage() {
+  usePageTitle('链路')
   const meta = useMeta()
   const navigate = useNavigate()
   const { params, set, setParams } = useUrlState()
@@ -99,6 +101,8 @@ export function TracesPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* 同日志页：视觉上没有标题栏，读屏要靠它定位 */}
+      <h1 className="sr-only">链路</h1>
       <TraceFilters state={filter} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
       {filter.service && (
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 md:px-4">
@@ -116,9 +120,11 @@ export function TracesPage() {
           >
             <Button size="xs">错误日志</Button>
           </Link>
-          <Link to={errorsHref({ service: filter.service }, { fromMs: range.fromMs, toMs: range.toMs })} title="这个服务在报哪几种错，按次数排">
-            <Button size="xs">错误分组</Button>
-          </Link>
+          <Hint text="这个服务在报哪几种错，按次数排" asChild>
+            <Link to={errorsHref({ service: filter.service }, { fromMs: range.fromMs, toMs: range.toMs })}>
+              <Button size="xs">错误分组</Button>
+            </Link>
+          </Hint>
           <Link to={serviceHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })}>
             <Button size="xs">服务概览</Button>
           </Link>
@@ -188,23 +194,34 @@ export function TracesPage() {
               <li key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60 px-3 py-2" onClick={() => navigate(traceHref(t), { state: from })}>
                 <div className="flex items-center gap-2">
                   <span className="mono text-2xs text-muted-fg tabular-nums">{formatTsMicro(t.start_us, { date: false }).slice(0, 12)}</span>
-                  <span className="min-w-0 flex-1 truncate">
+                  {/* 手机列表整行可点是给手指的；入口名做成真链接，键盘和读屏才有路可走 */}
+                  <Link
+                    to={traceHref(t)}
+                    state={from}
+                    className="min-w-0 flex-1 truncate rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     <span className="text-muted-fg">{t.root_service}</span> <span className="font-medium">{t.root_name}</span>
-                  </span>
+                  </Link>
                   <span className="shrink-0 font-semibold tabular-nums">{formatDuration(t.duration_ns)}</span>
                 </div>
                 <div className="mt-1 flex items-center gap-2 text-2xs text-muted-fg">
                   {t.error_count > 0 && <Badge tone="danger">{t.error_count} 错误</Badge>}
                   {t.root_missing && (
-                    <Badge tone="warn" title="没找到根 span，显示的是最早的那个 span">
-                      根缺失
-                    </Badge>
+                    <Hint text="没找到根 span，显示的是最早的那个 span">
+                      <Badge tone="warn">根缺失</Badge>
+                    </Hint>
                   )}
                   <span className="tabular-nums">{t.span_count} span</span>
-                  <span className="min-w-0 flex-1 truncate" title={t.services.join(', ')}>
-                    {t.services.join(', ')}
+                  <Hint text={t.services.join(', ')}>
+                    <span className="min-w-0 flex-1 truncate">
+                      {t.services.join(', ')}
+                    </span>
+                  </Hint>
+                  <span className="mono flex shrink-0 items-center gap-1 text-accent">
+                    {t.trace_id.slice(0, 8)}…
+                    <CopyButton text={t.trace_id} title="复制完整 trace id" size="xs" />
                   </span>
-                  <span className="mono shrink-0 text-accent">{t.trace_id.slice(0, 8)}…</span>
                 </div>
               </li>
             ))}
@@ -228,14 +245,14 @@ export function TracesPage() {
             </thead>
             <tbody>
               {traces.map((t) => (
-                <tr key={t.trace_id} className="row-hover cursor-pointer border-b border-border/60" onClick={() => navigate(traceHref(t), { state: from })}>
+                <tr key={t.trace_id} className="row-hover group cursor-pointer border-b border-border/60" onClick={() => navigate(traceHref(t), { state: from })}>
                   <td className="mono px-3 py-2 whitespace-nowrap text-muted-fg tabular-nums">{formatTsMicro(t.start_us).slice(0, 23)}</td>
                   <td className="truncate px-3 py-2">
                     <span className="text-muted-fg">{t.root_service}</span> <span className="font-medium">{t.root_name}</span>
                     {t.root_missing && (
-                      <Badge tone="warn" className="ml-1" title="没找到根 span，显示的是最早的那个 span">
-                        根缺失
-                      </Badge>
+                      <Hint text="没找到根 span，显示的是最早的那个 span" className="ml-1">
+                        <Badge tone="warn">根缺失</Badge>
+                      </Hint>
                     )}
                   </td>
                   <td className="px-3 py-2 text-right font-semibold tabular-nums">{formatDuration(t.duration_ns)}</td>
@@ -246,9 +263,13 @@ export function TracesPage() {
                     {t.services.join(', ')}
                   </td>
                   <td className="mono px-3 py-2 text-2xs">
-                    <Link to={traceHref(t)} state={from} className="text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
-                      {t.trace_id.slice(0, 12)}…
-                    </Link>
+                    {/* 列表上只看得到前 12 位，要完整 id 以前得先点进详情页 */}
+                    <span className="flex items-center gap-1">
+                      <Link to={traceHref(t)} state={from} className={linkClass} onClick={(e) => e.stopPropagation()}>
+                        {t.trace_id.slice(0, 12)}…
+                      </Link>
+                      <CopyButton text={t.trace_id} title="复制完整 trace id" size="xs" reveal />
+                    </span>
                   </td>
                 </tr>
               ))}

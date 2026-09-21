@@ -6,7 +6,7 @@ import { useErrorGroups, useMeta, useMetricEvents, useServiceOperations, useServ
 import type { ErrorGroup, MetricEvent, OperationStat, OverviewResponse, ServiceStat } from '@/api/types'
 import { Sparkline } from '@/components/charts/Sparkline'
 import { StatsLine } from '@/components/StatsLine'
-import { Button, Card, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
+import { Button, Card, EmptyState, ErrorBox, Hint, Input, Select, Spinner } from '@/components/ui'
 import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Compare } from '@/lib/compare'
 import { change, changeTone, formatChange, healthRank, meaningfulLatency, pct, serviceHealth, type Health } from '@/lib/health'
 import { errorTitle, errorTitleFull } from '@/lib/errors'
@@ -15,6 +15,7 @@ import { formatDurationMs, formatNumber, formatTs } from '@/lib/time'
 import { useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
 import { cn, scrollParent } from '@/lib/utils'
+import { usePageTitle } from '@/lib/title'
 
 type SortKey = keyof Pick<ServiceStat, 'service' | 'requests' | 'rps' | 'errors' | 'error_rate' | 'p50_ms' | 'p95_ms' | 'p99_ms' | 'max_ms'>
 
@@ -62,10 +63,11 @@ export function ErrorRate({ rate }: { rate: number }) {
 /** 健康度的那个点：红 / 黄 / 绿，hover 看原因 */
 function HealthDot({ level, reasons }: { level: Health; reasons: string[] }) {
   return (
-    <span
-      className={cn('inline-block size-2 shrink-0 rounded-full', level === 'bad' && 'bg-danger', level === 'warn' && 'bg-warn', level === 'ok' && 'bg-ok')}
-      title={reasons.length ? reasons.join('；') : '正常'}
-    />
+    <Hint text={reasons.length ? reasons.join('；') : '正常'}>
+      <span
+        className={cn('inline-block size-2 shrink-0 rounded-full', level === 'bad' && 'bg-danger', level === 'warn' && 'bg-warn', level === 'ok' && 'bg-ok')}
+      />
+    </Hint>
   )
 }
 
@@ -101,16 +103,22 @@ function QuickLinks({ service, win, logDim, hasMetrics, className }: { service: 
   const stop = (e: React.MouseEvent) => e.stopPropagation()
   return (
     <span className={cn('flex items-center gap-0.5', className)} onClick={stop}>
-      <Link to={logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win)} title="错误日志" className="rounded p-1 text-muted-fg hover:bg-muted hover:text-fg">
-        <ScrollTextIcon className="size-3.5" />
-      </Link>
-      <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)} title="最慢的链路" className="rounded p-1 text-muted-fg hover:bg-muted hover:text-fg">
-        <GitBranchIcon className="size-3.5" />
-      </Link>
-      {hasMetrics && (
-        <Link to={metricsHref(service, win)} title="指标看板" className="rounded p-1 text-muted-fg hover:bg-muted hover:text-fg">
-          <ChartLineIcon className="size-3.5" />
+      <Hint text="错误日志" asChild>
+        <Link to={logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win)} className="rounded p-1 text-muted-fg hover:bg-muted hover:text-fg">
+          <ScrollTextIcon className="size-3.5" />
         </Link>
+      </Hint>
+      <Hint text="最慢的链路" asChild>
+        <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)} className="rounded p-1 text-muted-fg hover:bg-muted hover:text-fg">
+          <GitBranchIcon className="size-3.5" />
+        </Link>
+      </Hint>
+      {hasMetrics && (
+        <Hint text="指标看板" asChild>
+          <Link to={metricsHref(service, win)} className="rounded p-1 text-muted-fg hover:bg-muted hover:text-fg">
+            <ChartLineIcon className="size-3.5" />
+          </Link>
+        </Hint>
       )}
     </span>
   )
@@ -138,9 +146,11 @@ const Contributor = memo(function Contributor({ ops }: { ops: OperationStat[] })
   }, [ops])
   if (!line) return null
   return (
-    <div className="mt-1 truncate text-2xs text-muted-fg" title={`${line.name}（${formatNumber(line.requests)} 次）`}>
-      主要是 <span className="mono text-fg">{line.name}</span>：<span className="font-medium text-fg">{line.text}</span>
-    </div>
+    <Hint text={`${line.name}（${formatNumber(line.requests)} 次）`}>
+      <div className="mt-1 truncate text-2xs text-muted-fg">
+        主要是 <span className="mono text-fg">{line.name}</span>：<span className="font-medium text-fg">{line.text}</span>
+      </div>
+    </Hint>
   )
 })
 
@@ -153,19 +163,20 @@ const Contributor = memo(function Contributor({ ops }: { ops: OperationStat[] })
 function TopError({ g, win }: { g: ErrorGroup; win: Window }) {
   const stop = (e: React.MouseEvent) => e.stopPropagation()
   return (
-    <Link
-      to={errorsHref({ service: g.service, group: g.id }, win)}
-      onClick={stop}
-      className="mt-1 flex min-w-0 items-baseline gap-1 text-2xs text-muted-fg hover:text-fg"
-      title={`${errorTitleFull(g)}${g.message ? `: ${g.message}` : ''}（${formatNumber(g.count)} 次）`}
-    >
-      <AlertTriangleIcon className="size-3 shrink-0 translate-y-0.5 text-danger" />
-      <span className="min-w-0 truncate">
-        <span className="mono font-medium text-fg">{errorTitle(g)}</span>
-        {g.message && <span className="text-fg/80">: {g.message}</span>}
-      </span>
-      <span className="shrink-0 tabular-nums">{formatNumber(g.count)} 次</span>
-    </Link>
+    <Hint text={`${errorTitleFull(g)}${g.message ? `: ${g.message}` : ''}（${formatNumber(g.count)} 次）`} asChild>
+      <Link
+        to={errorsHref({ service: g.service, group: g.id }, win)}
+        onClick={stop}
+        className="mt-1 flex min-w-0 items-baseline gap-1 text-2xs text-muted-fg hover:text-fg"
+      >
+        <AlertTriangleIcon className="size-3 shrink-0 translate-y-0.5 text-danger" />
+        <span className="min-w-0 truncate">
+          <span className="mono font-medium text-fg">{errorTitle(g)}</span>
+          {g.message && <span className="text-fg/80">: {g.message}</span>}
+        </span>
+        <span className="shrink-0 tabular-nums">{formatNumber(g.count)} 次</span>
+      </Link>
+    </Hint>
   )
 }
 
@@ -175,15 +186,16 @@ function Restarts({ events }: { events: MetricEvent[] }) {
   const restarts = events.filter((e) => e.kind === 'restart')
   const starts = events.length - restarts.length
   return (
-    <span
-      className="inline-flex items-center gap-1 rounded-sm bg-warn-soft px-1.5 py-px text-2xs text-warn"
-      title={events.map((e) => `${formatTs(e.t_ms, { ms: false, date: false })} ${e.kind === 'restart' ? '重启' : '新起'} ${e.pod}`).join('\n')}
-    >
-      <RotateCwIcon className="size-3" />
-      {restarts.length > 0 && `${restarts.length} 次重启`}
-      {restarts.length > 0 && starts > 0 && ' · '}
-      {starts > 0 && `${starts} 个新 pod`}
-    </span>
+    <Hint text={events.map((e) => `${formatTs(e.t_ms, { ms: false, date: false })} ${e.kind === 'restart' ? '重启' : '新起'} ${e.pod}`).join('\n')}>
+      <span
+        className="inline-flex items-center gap-1 rounded-sm bg-warn-soft px-1.5 py-px text-2xs text-warn"
+      >
+        <RotateCwIcon className="size-3" />
+        {restarts.length > 0 && `${restarts.length} 次重启`}
+        {restarts.length > 0 && starts > 0 && ' · '}
+        {starts > 0 && `${starts} 个新 pod`}
+      </span>
+    </Hint>
   )
 }
 
@@ -268,6 +280,7 @@ function FineList({
 }
 
 export function ServicesPage() {
+  usePageTitle('服务')
   const { range } = useTimeRange()
   const { params, set } = useUrlState()
   const meta = useMeta()
@@ -368,33 +381,38 @@ export function ServicesPage() {
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
             <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="搜服务" className="h-8 w-36 pl-8 text-xs" aria-label="搜服务" />
           </span>
-          <Select value={compare} onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })} className="h-8 text-xs" title="所有变化和哪一段时间比">
-            {COMPARE.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
-            ))}
-          </Select>
-          {view === 'cards' && (
-            <Select value={order} onChange={(e) => set({ sort: e.target.value === 'health' ? null : e.target.value })} className="h-8 text-xs" title="卡片顺序">
-              {ORDERS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
+          <Hint text="所有变化和哪一段时间比" asChild>
+            <Select value={compare} onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })} className="h-8 text-xs">
+              {COMPARE.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
                 </option>
               ))}
             </Select>
+          </Hint>
+          {view === 'cards' && (
+            <Hint text="卡片顺序" asChild>
+              <Select value={order} onChange={(e) => set({ sort: e.target.value === 'health' ? null : e.target.value })} className="h-8 text-xs">
+                {ORDERS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </Select>
+            </Hint>
           )}
           <span className="hidden h-8 items-center rounded-md border border-input p-0.5 md:flex">
             {(['cards', 'table'] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => set({ view: v === 'cards' ? null : v })}
-                className={cn('flex h-full items-center gap-1 rounded-sm px-2 text-xs text-muted-fg hover:text-fg', view === v && 'bg-accent-soft text-accent')}
-                title={v === 'cards' ? '卡片' : '表格'}
-              >
-                {v === 'cards' ? <LayoutGridIcon className="size-3.5" /> : <TableIcon className="size-3.5" />}
-              </button>
+              <Hint text={v === 'cards' ? '卡片' : '表格'} asChild>
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => set({ view: v === 'cards' ? null : v })}
+                  className={cn('flex h-full items-center gap-1 rounded-sm px-2 text-xs text-muted-fg hover:text-fg', view === v && 'bg-accent-soft text-accent')}
+                >
+                  {v === 'cards' ? <LayoutGridIcon className="size-3.5" /> : <TableIcon className="size-3.5" />}
+                </button>
+              </Hint>
             ))}
           </span>
         </span>
@@ -488,7 +506,15 @@ export function ServicesPage() {
                           <span className="mr-2 inline-block align-middle">
                             <HealthDot {...serviceHealth(s)} />
                           </span>
-                          {s.service || '(空)'}
+                          {/* 整行点哪儿都能进去是给鼠标的方便；键盘和读屏靠这个真链接，
+                              不然首页这张表根本走不进服务详情 */}
+                          <Link
+                            to={serviceHref(s.service, win, compare)}
+                            className="rounded-sm focus-visible:outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand/60"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {s.service || '(空)'}
+                          </Link>
                         </td>
                         <td className="px-4 py-2.5 text-right tabular-nums">{formatNumber(s.requests)}</td>
                         <td className="px-4 py-2.5 text-right text-muted-fg tabular-nums">{s.rps < 10 ? s.rps.toFixed(2) : Math.round(s.rps)}</td>
@@ -591,16 +617,20 @@ const BigCard = memo(function BigCard({ s, health, win, compare, events, topErro
     <Link to={serviceHref(s.service, win, compare)} className={cn('group row-hover flex flex-col rounded-lg border bg-card p-3.5', health.level === 'bad' ? 'border-danger/50' : 'border-warn/50')}>
       <div className="flex items-center gap-2">
         <HealthDot level={health.level} reasons={health.reasons} />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold" title={s.service}>
-          {s.service || '(空)'}
-        </span>
+        <Hint text={s.service}>
+          <span className="min-w-0 flex-1 truncate text-sm font-semibold">
+            {s.service || '(空)'}
+          </span>
+        </Hint>
         <Restarts events={events} />
         {!isMobile && <QuickLinks service={s.service} win={win} logDim={logDim} hasMetrics={hasMetrics} className="opacity-0 group-hover:opacity-100" />}
         <span className="text-2xs text-muted-fg tabular-nums">{formatNumber(s.requests)} 次</span>
       </div>
-      <div className={cn('mt-1 truncate text-2xs', health.level === 'bad' ? 'text-danger' : 'text-warn')} title={health.reasons.join('；')}>
-        {health.reasons.join('；')}
-      </div>
+      <Hint text={health.reasons.join('；')}>
+        <div className={cn('mt-1 truncate text-2xs', health.level === 'bad' ? 'text-danger' : 'text-warn')}>
+          {health.reasons.join('；')}
+        </div>
+      </Hint>
       <Contributor ops={ops} />
       {topError && <TopError g={topError} win={win} />}
       {/* 原因区可能是一行也可能两行（带主因），指标和火花图贴底对齐，同一行的卡片才对得齐 */}
@@ -632,9 +662,11 @@ const Row = memo(function Row({ s, health, win, compare, events, logDim, hasMetr
     <Link to={serviceHref(s.service, win, compare)} className={cn('group row-hover grid grid-cols-[minmax(0,2fr)_1fr_1fr_1fr_7rem_5rem] items-center gap-x-3 border-b border-border/60 px-3 py-1.5 text-xs', last && 'border-b-0')}>
       <span className="flex min-w-0 items-center gap-2">
         <HealthDot {...health} />
-        <span className="truncate font-medium" title={s.service}>
-          {s.service || '(空)'}
-        </span>
+        <Hint text={s.service}>
+          <span className="truncate font-medium">
+            {s.service || '(空)'}
+          </span>
+        </Hint>
         <Restarts events={events} />
       </span>
       <span className="flex items-baseline gap-1.5 tabular-nums">
@@ -643,10 +675,12 @@ const Row = memo(function Row({ s, health, win, compare, events, logDim, hasMetr
       <span className="flex items-baseline gap-1.5 tabular-nums">
         {pct(s.error_rate)} <Delta delta={change(s.error_rate, s.prev?.error_rate)} upIs="bad" />
       </span>
-      <span className={cn('flex items-baseline gap-1.5 tabular-nums', !latencyOk && 'text-muted-fg')} title={latencyOk ? undefined : '入口 span 几乎不耗时（消费确认类），延迟没意义'}>
-        {latencyOk ? formatDurationMs(s.p95_ms) : '—'}
-        {latencyOk && <Delta delta={change(s.p95_ms, s.prev?.p95_ms)} upIs="bad" />}
-      </span>
+      <Hint text={latencyOk ? undefined : '入口 span 几乎不耗时（消费确认类），延迟没意义'}>
+        <span className={cn('flex items-baseline gap-1.5 tabular-nums', !latencyOk && 'text-muted-fg')}>
+          {latencyOk ? formatDurationMs(s.p95_ms) : '—'}
+          {latencyOk && <Delta delta={change(s.p95_ms, s.prev?.p95_ms)} upIs="bad" />}
+        </span>
+      </Hint>
       <Sparkline requests={s.spark.requests} errors={s.spark.errors} prev={s.spark.prev_requests} height={20} />
       <QuickLinks service={s.service} win={win} logDim={logDim} hasMetrics={hasMetrics} className="justify-end opacity-0 group-hover:opacity-100" />
     </Link>

@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { CheckIcon, CopyIcon, KeyRoundIcon, Trash2Icon, XIcon } from 'lucide-react'
+import { KeyRoundIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { apiDelete, apiPost } from '@/api/client'
 import { useApiKeys } from '@/api/queries'
 import type { ApiKeyCreated, ApiKeyInfo, AuthMe } from '@/api/types'
-import { Badge, Button, Input, Select, Spinner } from '@/components/ui'
-import { copyText } from '@/lib/utils'
+import { Badge, Button, CopyButton, Hint, Input, Select, Spinner } from '@/components/ui'
+import { useModal } from '@/lib/modal'
 
 /** 有效期的几档。上限来自后端的 `--api-key-ttl`，比上限长的档不显示 */
 const TTL_OPTIONS = [
@@ -66,6 +66,9 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
   const [error, setError] = useState<string | null>(null)
   const [created, setCreated] = useState<ApiKeyCreated | null>(null)
 
+  // 焦点关在对话框里、关掉还回去、背景不滚——见 useModal
+  const box = useModal<HTMLDivElement>()
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -116,11 +119,13 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
+      <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} aria-hidden />
       <div
+        ref={box}
         role="dialog"
         aria-modal="true"
         aria-labelledby="api-key-title"
+        tabIndex={-1}
         className="fixed inset-x-3 top-16 z-50 mx-auto flex max-h-[calc(100dvh-5rem)] max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[44rem] md:-translate-x-1/2"
       >
         <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3">
@@ -130,9 +135,11 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
               API key · 给 AI 助手和脚本用
             </h2>
             {user && (
-              <p className="mt-0.5 truncate text-2xs text-muted-fg" title={user.email ?? undefined}>
-                当前登录 <span className="font-medium text-fg">{user.name}</span> —— key 归在你名下，只有你自己看得到
-              </p>
+              <Hint text={user.email ?? undefined}>
+                <p className="mt-0.5 truncate text-2xs text-muted-fg">
+                  当前登录 <span className="font-medium text-fg">{user.name}</span> —— key 归在你名下，只有你自己看得到
+                </p>
+              </Hint>
             )}
           </div>
           <Button variant="ghost" className="px-2" onClick={onClose} title="关闭 (Esc)">
@@ -292,22 +299,20 @@ function KeyRow({ k, highlight, onRevoke }: { k: ApiKeyInfo; highlight: boolean;
   )
 }
 
+/**
+ * 一段只显示这一次的东西（key 本身、两段接入配置），配一个复制按钮。
+ *
+ * 复制走公共的 `CopyButton`：以前这里自己管 `copied`，失败时一声不吭——而 key 关掉对话框就
+ * 再也拿不到了，明文 http 上剪贴板又恰恰最可能被拦，正是最不该沉默的地方。
+ *
+ * `select-all` 是兜底：真复制不了，点一下代码块也能整段选中，自己按 Cmd+C。
+ */
 function Secret({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false)
-  const copy = async () => {
-    if (await copyText(value)) {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    }
-  }
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between text-xs text-muted-fg">
         <span>{label}</span>
-        <Button size="xs" variant="ghost" onClick={copy} title="复制">
-          {copied ? <CheckIcon className="size-3.5 text-ok" /> : <CopyIcon className="size-3.5" />}
-          {copied ? '已复制' : '复制'}
-        </Button>
+        <CopyButton text={value} title="复制" label="复制" className="h-7 rounded-md px-2.5 text-2xs hover:bg-muted" />
       </div>
       <pre className="mono max-h-32 overflow-auto rounded-md border border-border bg-muted px-3 py-2 text-2xs leading-5 break-all whitespace-pre-wrap select-all">
         {value}

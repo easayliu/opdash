@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { XIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
 import { useLogContext } from '@/api/queries'
-import { Button, ErrorBox, Spinner } from '@/components/ui'
+import { Button, ErrorBox, Hint, Spinner } from '@/components/ui'
 import { LogTable } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { rowKey } from '@/lib/log-row'
@@ -22,9 +22,11 @@ export function ContextDrawer({ row, dims, onClose }: { row: LogRow; dims: strin
       <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border px-3 md:px-4">
         <div className="min-w-0 flex-1">
           <div className="text-base font-semibold">日志上下文</div>
-          <div className="mono truncate text-2xs text-muted-fg" title={row.file}>
-            {row.host} · {row.file}
-          </div>
+          <Hint text={row.file}>
+            <div className="mono truncate text-2xs text-muted-fg">
+              {row.host} · {row.file}
+            </div>
+          </Hint>
         </div>
         <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
         <Button variant="ghost" className="px-2.5" onClick={onClose} title="关闭 (Esc)">

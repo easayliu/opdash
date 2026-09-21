@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router'
 import { BookmarkCheckIcon, BookmarkIcon, CheckIcon, PencilIcon, RefreshCwIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { apiDelete, apiPost, apiPut } from '@/api/client'
 import { useAuthMe, useSavedQueries } from '@/api/queries'
 import type { SavedQuery } from '@/api/types'
-import { Button, Input, Spinner } from '@/components/ui'
+import { Button, Hint, Input, PopoverPanel, Spinner } from '@/components/ui'
 import { describeQuery, pageLabel, sameView, savableView, savedHref, suggestName, type View } from '@/lib/saved'
 import { useTimeRange } from '@/lib/url-state'
 import { cn } from '@/lib/utils'
@@ -25,26 +25,18 @@ export function SavedQueries() {
   const { refresh: rerun } = useTimeRange()
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const ref = useRef<HTMLDivElement>(null)
+  // 面板异步挂载，锚在这个按钮上（触发器留在首屏包里，见 `@/components/base-ui`）
+  const anchor = useRef<HTMLButtonElement>(null)
 
   const view = useMemo(() => savableView(pathname, search), [pathname, search])
   const queries = list.data?.queries ?? []
   const existing = view ? queries.find((q) => sameView(view, q)) : undefined
 
+  // 点外面关、Escape 关、焦点进出都归 Base UI 管了，这里只剩「每次打开清掉上次的报错」
   useEffect(() => {
     if (!open) return
     setError(null)
-    const onClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onClick)
-    document.addEventListener('keydown', onKey)
     return () => {
-      document.removeEventListener('mousedown', onClick)
-      document.removeEventListener('keydown', onKey)
     }
   }, [open])
 
@@ -83,20 +75,26 @@ export function SavedQueries() {
   const authed = me.data && me.data.mode !== 'none' && me.data.user
 
   return (
-    <div ref={ref} className="relative flex items-center">
+    <div className="flex items-center">
       <Button
         variant="ghost"
         className="px-2.5"
         active={!!existing}
         aria-expanded={open}
         title={existing ? `已收藏为「${existing.name}」` : view ? '收藏当前查询' : '我的收藏'}
+        ref={anchor}
         onClick={() => setOpen((o) => !o)}
       >
         {existing ? <BookmarkCheckIcon className="size-4" /> : <BookmarkIcon className="size-4" />}
       </Button>
       {open && (
-        // 手机上钉在视口顶部撑满宽度；桌面挂在按钮下面
-        <div className="fixed inset-x-3 top-14 z-30 flex max-h-[calc(100dvh-5rem)] flex-col rounded-lg border border-border bg-card shadow-lg md:absolute md:inset-x-auto md:top-full md:right-0 md:mt-1 md:w-[26rem]">
+        <Suspense fallback={null}>
+          <PopoverPanel
+            open={open}
+            onOpenChange={setOpen}
+            anchor={anchor}
+            className="flex max-h-[calc(100dvh-5rem)] w-[min(26rem,calc(100vw-1.5rem))] flex-col rounded-lg border border-border bg-card shadow-lg"
+          >
           <div className="shrink-0 border-b border-border p-3">
             {view ? (
               existing ? (
@@ -125,9 +123,11 @@ export function SavedQueries() {
                 </span>
               )}
               {list.isFetching && <Spinner className="size-3" />}
-              <span className="ml-auto truncate" title={me.data?.user?.email ?? undefined}>
-                {authed ? `归在 ${me.data?.user?.name} 名下` : me.data?.mode === 'none' ? '没开认证，所有人共用' : ''}
-              </span>
+              <Hint text={me.data?.user?.email ?? undefined}>
+                <span className="ml-auto truncate">
+                  {authed ? `归在 ${me.data?.user?.name} 名下` : me.data?.mode === 'none' ? '没开认证，所有人共用' : ''}
+                </span>
+              </Hint>
             </div>
             {error && <p className="mx-3 my-1 rounded-md border border-danger/40 bg-danger-soft px-2.5 py-1.5 text-xs text-danger">{error}</p>}
             {list.isError && <p className="px-3 py-2 text-xs text-danger">{(list.error as Error).message}</p>}
@@ -156,7 +156,8 @@ export function SavedQueries() {
               </section>
             ))}
           </div>
-        </div>
+          </PopoverPanel>
+        </Suspense>
       )}
     </div>
   )
@@ -189,11 +190,13 @@ function SaveForm({ view, onSave }: { view: View; onSave: (name: string, view: V
           收藏
         </Button>
       </div>
-      <p className="truncate text-2xs text-muted-fg" title={words.join(' · ')}>
-        {pageLabel(view.path)}
-        {words.length > 0 && ` · ${words.join(' · ')}`}
-        {words.length === 0 && ' · 没有筛选条件'}
-      </p>
+      <Hint text={words.join(' · ')}>
+        <p className="truncate text-2xs text-muted-fg">
+          {pageLabel(view.path)}
+          {words.length > 0 && ` · ${words.join(' · ')}`}
+          {words.length === 0 && ' · 没有筛选条件'}
+        </p>
+      </Hint>
       <p className="text-2xs text-muted-fg/80">收藏的是筛选条件；时间范围不记，打开时用顶栏当前的范围。</p>
     </form>
   )
@@ -265,10 +268,12 @@ function Row({
           </Button>
         </div>
       ) : (
-        <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 flex-col items-start rounded-md px-1.5 py-1.5 text-left hover:bg-muted" title={savedHref(q)}>
-          <span className={cn('w-full truncate text-xs font-medium', current && 'text-accent')}>{q.name}</span>
-          <span className="w-full truncate text-2xs text-muted-fg">{words.length ? words.join(' · ') : '没有筛选条件'}</span>
-        </button>
+        <Hint text={savedHref(q)} asChild>
+          <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 flex-col items-start rounded-md px-1.5 py-1.5 text-left hover:bg-muted">
+            <span className={cn('w-full truncate text-xs font-medium', current && 'text-accent')}>{q.name}</span>
+            <span className="w-full truncate text-2xs text-muted-fg">{words.length ? words.join(' · ') : '没有筛选条件'}</span>
+          </button>
+        </Hint>
       )}
       {!editing && (
         <span className="flex shrink-0 items-center opacity-60 group-hover:opacity-100">

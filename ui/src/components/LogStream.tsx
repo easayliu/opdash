@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { ArrowDownIcon, ListTreeIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
 import { ExpandedRow, Highlight, visibleDims } from '@/components/LogTable'
-import { Button } from '@/components/ui'
+import { Button, Hint, linkClass } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
 import { useRowKeys } from '@/lib/log-row'
 import { formatTs } from '@/lib/time'
@@ -106,54 +106,60 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
               onClick={() => toggle(key)}
             >
               <span className="mono shrink-0 text-2xs text-muted-fg tabular-nums">{formatTs(r.ts_ms, { date: false })}</span>
-              <span className="mono w-11 shrink-0 text-2xs uppercase" style={{ color: levelColor(r.level) }} title={r.level}>
-                {(r.level || '-').slice(0, 5)}
-              </span>
-              {cols[0] && (
-                <span className="mono w-32 shrink-0 truncate text-2xs text-muted-fg" title={dimValue(r, cols[0])}>
-                  {onPivot ? (
-                    <button
-                      type="button"
-                      className="max-w-full truncate hover:text-accent hover:underline"
-                      title={`只看 ${cols[0]} = ${dimValue(r, cols[0])}`}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onPivot(cols[0], dimValue(r, cols[0]))
-                      }}
-                    >
-                      {dimValue(r, cols[0]) || '-'}
-                    </button>
-                  ) : (
-                    dimValue(r, cols[0]) || '-'
-                  )}
+              <Hint text={r.level}>
+                <span className="mono w-11 shrink-0 text-2xs uppercase" style={{ color: levelColor(r.level) }}>
+                  {(r.level || '-').slice(0, 5)}
                 </span>
+              </Hint>
+              {cols[0] && (
+                <Hint text={dimValue(r, cols[0])}>
+                  <span className="mono w-32 shrink-0 truncate text-2xs text-muted-fg">
+                    {onPivot ? (
+                      <button
+                        type="button"
+                        className="max-w-full truncate hover:text-accent hover:underline"
+                        aria-label={`只看 ${cols[0]} = ${dimValue(r, cols[0])}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onPivot(cols[0], dimValue(r, cols[0]))
+                        }}
+                      >
+                        {dimValue(r, cols[0]) || '-'}
+                      </button>
+                    ) : (
+                      dimValue(r, cols[0]) || '-'
+                    )}
+                  </span>
+                </Hint>
               )}
               <span className={cn('mono min-w-0 flex-1 text-xs break-all', !open && 'truncate')}>
                 <Highlight text={first} terms={highlight} />
                 {!open && rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
               </span>
               {r.trace_id && (
-                <Link
-                  to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
-                  className="mono shrink-0 text-2xs text-accent hover:underline"
-                  title={`查看链路 ${r.trace_id}`}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {r.trace_id.slice(0, 8)}…
-                </Link>
+                <Hint text={`查看链路 ${r.trace_id}`} asChild>
+                  <Link
+                    to={`/traces/${r.trace_id}?at=${r.ts_ms}`}
+                    className={cn('mono shrink-0 text-2xs', linkClass)}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {r.trace_id.slice(0, 8)}…
+                  </Link>
+                </Hint>
               )}
               {onContext && (
-                <button
-                  type="button"
-                  className="shrink-0 text-muted-fg opacity-0 group-hover:opacity-100 hover:text-fg"
-                  title="查看这一行前后的日志（同一容器日志流）"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onContext(r)
-                  }}
-                >
-                  <ListTreeIcon className="size-3.5" />
-                </button>
+                <Hint text="查看这一行前后的日志（同一容器日志流）" asChild>
+                  <button
+                    type="button"
+                    className="shrink-0 text-muted-fg opacity-0 group-hover:opacity-100 hover:text-fg"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onContext(r)
+                    }}
+                  >
+                    <ListTreeIcon className="size-3.5" />
+                  </button>
+                </Hint>
               )}
             </div>
             {open && (

@@ -282,7 +282,7 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
         ),
         tool(
             "search_logs",
-            "检索日志：关键字 / 正则、级别、维度列、logger、线程、trace_id / span_id。默认最新在前。按 id 查可以不给时间范围（走索引）。message 超长会截断并注明原长。",
+            "检索日志：关键字 / 正则、级别、维度列、logger、线程、trace_id / span_id。默认最新在前。**任何情况下都尽量给时间范围**：span_id 没有索引、trace_id 的 bloom filter 只剪掉九成七，按 id 查不给范围要扫满 30 天（实测 38 GB / 9~18 s），知道大概时刻就给个 range。message 超长会截断并注明原长。",
             schema(
                 [
                     log_filter_props(),
@@ -1684,7 +1684,8 @@ async fn search_logs(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     let trace_id = a.string("trace_id")?;
     let span_id = a.string("span_id")?;
     let by_id = trace_id.is_some() || span_id.is_some();
-    // 按 id 查可以不带时间范围；其余情况一定要有
+    // 按 id 查可以不带时间范围，但那是兜底不是常态：span_id 上没有索引，不带范围要扫满 30 天
+    // （2026-09-21 实测 31.3 G 行 / 37.9 GiB / 8.8 s），工具说明里已经写明让调用方尽量给 range
     let window = if by_id { a.window_opt("1h")? } else { Some(a.window("1h")?) };
     let limit = a.limit("limit", 50, 200)?;
     let max_chars = a.limit("max_message_chars", 2000, 200_000)? as usize;

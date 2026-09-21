@@ -123,16 +123,18 @@ async fn a_missing_span_in_a_complete_trace_does_not_scan_all_partitions() {
     assert_eq!(body["spans"].as_array().unwrap().len(), 2);
 }
 
-/// 宽的那一档装不下（span 数超上限）：退回围着 `at` 的窄窗口，而不是拿「按时间最早的前 N 个」。
+/// 宽的那一档装不下（span 数超上限）：退回一档**从 `at` 往后延**的窗口，而不是拿
+/// 「按时间最早的前 N 个」。
 ///
 /// 线上那条被复用的 trace id（21882 个 span、跨 2 小时 13 分）就是这样：最早的 5000 个是
-/// 一小时前的另一段，和用户带着 `at` 点进来想看的那一刻毫无关系。
+/// 一小时前的另一段，和用户带着 `at` 点进来想看的那一刻毫无关系。往后延是因为 trace 从 `at`
+/// 往后跑——定时任务能跑十分钟，围着 `at` 的 ±1 分钟只截得到开头。
 #[tokio::test]
-async fn a_trace_too_big_to_fit_falls_back_to_the_window_around_at() {
+async fn a_trace_too_big_to_fit_falls_back_to_a_window_running_forward_from_at() {
     let fake = FakeClickhouse::start().await;
     let app = app_with_schema(&fake, &["--max-trace-spans", "3"]).await;
     fake
-        // ±1 分钟：贴着窗口边，说明 trace 还往外延伸，继续探；这一档留着当退路
+        // ±1 分钟：贴着窗口边，说明 trace 还往外延伸，继续探；这一档留着当最后的退路
         .respond(
             located("aaaaaaaaaaaaaaa1", AT_MS - 59_000)
                 + &located("aaaaaaaaaaaaaaa2", AT_MS - 58_000),
@@ -141,23 +143,55 @@ async fn a_trace_too_big_to_fit_falls_back_to_the_window_around_at() {
         .respond(located("aaaaaaaaaaaaaaa1", AT_MS - 899_000) + &located("aaaaaaaaaaaaaaa2", AT_MS))
         // -1 小时 / +24 小时：4 行 > 上限 3，装不下
         .respond(located_many(4, AT_MS))
+        // 往后延第一档（-1 分钟 / +2 小时）：3 行，正好装得下，用它
+        .respond(located_many(3, AT_MS))
+        .respond(span_rows(3, AT_MS * 1000));
+
+    let (status, body) = get_json(&app, &format!("/api/traces/{TRACE}?at={AT_MS}")).await;
+    assert_eq!(status, 200, "{body}");
+
+    let sql = sql(&fake);
+    assert_eq!(sql.len(), 5, "三档定位 + 一档往后延 + 一趟取数: {sql:?}");
+    assert_eq!(body["narrowed"], true);
+    assert_eq!(body["truncated"], true, "这条 trace 在这一段之外还有 span");
+    assert_eq!(body["windowed"], true);
+    // 报的是往后延的那一档：往前只留 1 分钟，往后给到 2 小时
+    assert_eq!(body["window_from_ms"], AT_MS - 60_000);
+    assert_eq!(body["window_to_ms"], AT_MS + 2 * 3_600_000);
+    assert_eq!(body["spans"].as_array().unwrap().len(), 3);
+}
+
+/// 往后延的几档也都装不下：这才退回围着 `at` 的窄窗口。
+#[tokio::test]
+async fn a_trace_too_big_even_looking_forward_falls_back_to_the_window_around_at() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &["--max-trace-spans", "3"]).await;
+    fake
+        // ±1 分钟：贴着边，留着当退路
+        .respond(
+            located("aaaaaaaaaaaaaaa1", AT_MS - 59_000)
+                + &located("aaaaaaaaaaaaaaa2", AT_MS - 58_000),
+        )
+        .respond(located("aaaaaaaaaaaaaaa1", AT_MS - 899_000) + &located("aaaaaaaaaaaaaaa2", AT_MS))
+        // -1 小时 / +24 小时：装不下
+        .respond(located_many(4, AT_MS))
+        // 往后延的三档：+2 小时 / +30 分钟 / +5 分钟，全都装不下
+        .respond(located_many(4, AT_MS))
+        .respond(located_many(4, AT_MS))
+        .respond(located_many(4, AT_MS))
         // 取数：用的是退回去的那两个 span
         .respond(span_rows(2, (AT_MS - 59_000) * 1000));
 
     let (status, body) = get_json(&app, &format!("/api/traces/{TRACE}?at={AT_MS}")).await;
     assert_eq!(status, 200, "{body}");
 
-    let sql = sql(&fake);
-    assert_eq!(sql.len(), 4, "三档定位 + 一趟取数: {sql:?}");
+    assert_eq!(sql(&fake).len(), 7, "三档定位 + 三档往后延 + 一趟取数");
     assert_eq!(body["narrowed"], true);
-    assert_eq!(body["truncated"], true, "这条 trace 在这一段之外还有 span");
-    assert_eq!(body["windowed"], true);
-    // 报的是退回去的那一档（±1 分钟），不是最后探的那一档
     assert_eq!(body["window_from_ms"], AT_MS - 60_000);
-    assert_eq!(body["window_to_ms"], AT_MS + 60_000);
+    assert_eq!(body["window_to_ms"], AT_MS + 60_000, "退到 ±1 分钟那档");
     assert_eq!(body["spans"].as_array().unwrap().len(), 2);
     // 取数的时间条件也跟着退回去的那批走
-    assert_eq!(param(&fake, 3, 3).parse::<i64>().unwrap(), AT_MS - 59_000);
+    assert_eq!(param(&fake, 6, 3).parse::<i64>().unwrap(), AT_MS - 59_000);
 }
 
 /// 窄窗口里没几个 span（`at` 偏了几分钟）就别拿它当退路：退回一张几乎空的瀑布图更糟。
@@ -174,6 +208,10 @@ async fn a_nearly_empty_window_is_not_used_as_the_fallback() {
         // ±15 分钟：5 个，够用了
         .respond(located_many(5, AT_MS - 899_000))
         // -1 小时 / +24 小时：31 行 > 上限 30
+        .respond(located_many(31, AT_MS))
+        // 往后延的三档也都装不下
+        .respond(located_many(31, AT_MS))
+        .respond(located_many(31, AT_MS))
         .respond(located_many(31, AT_MS))
         .respond(span_rows(5, (AT_MS - 899_000) * 1000));
 

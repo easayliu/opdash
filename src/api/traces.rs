@@ -17,8 +17,8 @@ use crate::query::traces::{
     AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, ENTRY_KINDS,
     ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span,
     SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary,
-    ValueRow, candidate_range, dedup_by_trace, detail_probe_hit, detail_probes, normalize_kind,
-    normalize_span_id, normalize_trace_id,
+    ValueRow, candidate_range, dedup_by_trace, detail_forward_probes, detail_probe_hit,
+    detail_probes, normalize_kind, normalize_span_id, normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -524,8 +524,17 @@ async fn locate_spans(
             .await?;
         stats.absorb(&r.stats);
         if r.rows.len() > max as usize {
-            // 这一档装不下：退回围着 at 的窄窗口；没有退路（第一档就满了）才按时间切前 max 个
-            done = Some(match narrow.take() {
+            // 这一档装不下。先试「从 at 往后尽量长」的几档：trace 是往后跑的，`at` 多半是它的
+            // 开头，同样的 span 预算往后延能盖住这条 trace 自己的时间。都装不下再退回围着 at
+            // 的窄窗口；连退路都没有（第一档就满了）才按时间切前 max 个
+            let forward = match at {
+                Some(at) => {
+                    forward_fallback(state, queries, trace_id, max, at, window.as_ref(), &mut stats)
+                        .await?
+                }
+                None => None,
+            };
+            done = Some(match forward.or_else(|| narrow.take()) {
                 Some((rows, window)) => (rows, window, true, true),
                 None => (r.rows, window, true, false),
             });
@@ -547,6 +556,33 @@ async fn locate_spans(
         .or_else(|| last.map(|(rows, window)| (rows, window, false, false)))
         .unwrap_or_default();
     Ok(Located { rows, stats, truncated, window, narrowed })
+}
+
+/// 宽窗口装不下时的退路：从 `at` 往后延着试几档，取第一档装得下的。
+///
+/// 只试比 `over`（已经装不下的那一档）更窄的窗口，见
+/// [DETAIL_FORWARD_WINDOWS](crate::query::traces::DETAIL_FORWARD_WINDOWS)。最多多跑三趟带窗口的定位查询，
+/// 而且只在「这条 trace 大得装不下」这条已经很贵的路径上才发生。
+async fn forward_fallback(
+    state: &AppState,
+    queries: &TraceQueries<'_>,
+    trace_id: &str,
+    max: u32,
+    at: i64,
+    over: Option<&TimeRange>,
+    stats: &mut Stats,
+) -> Result<Option<(Vec<LocatedSpan>, Option<TimeRange>)>> {
+    for window in detail_forward_probes(at, over) {
+        let r = state
+            .client
+            .rows::<LocatedSpan>(queries.detail_locate(trace_id, max, Some(&window))?)
+            .await?;
+        stats.absorb(&r.stats);
+        if !r.rows.is_empty() && r.rows.len() <= max as usize {
+            return Ok(Some((r.rows, Some(window))));
+        }
+    }
+    Ok(None)
 }
 
 /// 单独定位 URL 上 `span=` 指名的那一个 span，窗口同样按 [DETAIL_PROBE_WINDOWS](crate::query::traces::DETAIL_PROBE_WINDOWS)

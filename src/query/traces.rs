@@ -274,6 +274,31 @@ pub const DETAIL_PROBE_WINDOWS: &[Option<(i64, i64)>] = &[
 pub const DETAIL_NOW_WINDOWS: &[(i64, i64)] =
     &[(15 * 60_000, 15 * 60_000), (2 * 3_600_000, 2 * 3_600_000), (26 * 3_600_000, 26 * 3_600_000)];
 
+/// 宽窗口装不下时，往后延着试的几档（`(往前, 往后)`，毫秒），从宽到窄取第一档装得下的。
+///
+/// 2026-09-21 加。在这之前装不下一律退回第一档「够用」的窗口，也就是 ±1 分钟——这是按请求
+/// 链路调的，一个请求几百毫秒就结束了，前后各 1 分钟绰绰有余。定时任务不是这样：线上那条
+/// `job-center UrlJodHandle.execute` 根 span 跑了 10 分 24 秒，±1 分钟只截到开头两分钟里
+/// 开始的 1337 个 span，后面九分钟的活全在窗外，图上只剩一条长条和它最早的一批子孙。
+///
+/// trace 是往后跑的，而 `at` 多半是它的**开头**（列表页点进来就是根 span 的开始时间），所以
+/// 往后延比往两边扩合理：同样的 span 预算，能盖住的是这条 trace 自己的时间，不是它开始之前
+/// 那段（对被复用的 trace id 来说，开始之前是另一批毫不相干的 span）。
+///
+/// 只试比「已经装不下的那一档」更窄的窗口：已经知道那一档超了，再往外扫是更大的读量换更差
+/// 的结果。
+pub const DETAIL_FORWARD_WINDOWS: &[(i64, i64)] =
+    &[(60_000, 2 * 3_600_000), (60_000, 30 * 60_000), (60_000, 5 * 60_000)];
+
+/// 从 `at` 往后延的几档窗口，已经装不下的那一档（`over`）之外的都去掉。
+pub fn detail_forward_probes(at: i64, over: Option<&TimeRange>) -> Vec<TimeRange> {
+    DETAIL_FORWARD_WINDOWS
+        .iter()
+        .map(|&(before, after)| TimeRange { from_ms: (at - before).max(0), to_ms: at + after })
+        .filter(|w| over.is_none_or(|o| w.to_ms <= o.to_ms))
+        .collect()
+}
+
 /// 这次详情按什么顺序探窗口：有 `at` 就围着它按 [`DETAIL_PROBE_WINDOWS`]，没有就锚在 `now_ms`
 /// 按 [`DETAIL_NOW_WINDOWS`]，两条路末尾都是不限时间的兜底（`None`）。
 pub fn detail_probes(at: Option<i64>, now_ms: i64) -> Vec<Option<TimeRange>> {
@@ -1611,6 +1636,27 @@ mod tests {
         assert!(!detail_probe_hit(&[span(1_001_000)], &w));
         // 一个都没定位到，也不算命中
         assert!(!detail_probe_hit(&[], &w));
+    }
+
+    #[test]
+    fn forward_probes_extend_after_at_and_stay_inside_the_window_that_overflowed() {
+        let at = 1_000_000;
+        // 不限时间那档装不下：三档都可以试，从宽到窄
+        let all = detail_forward_probes(at, None);
+        assert_eq!(all.len(), DETAIL_FORWARD_WINDOWS.len());
+        assert!(all.windows(2).all(|p| p[0].to_ms > p[1].to_ms), "{all:?} 必须从宽到窄");
+        // 往后延得比往前多：trace 是从 at 往后跑的
+        assert!(all.iter().all(|w| w.to_ms - at > at - w.from_ms));
+
+        // ±15 分钟那档装不下：只剩落在它里面的那些，再往外扫是更大的读量换更差的结果
+        let over = TimeRange { from_ms: at - 15 * 60_000, to_ms: at + 15 * 60_000 };
+        let inside = detail_forward_probes(at, Some(&over));
+        assert!(!inside.is_empty(), "至少还剩一档能试");
+        assert!(inside.iter().all(|w| w.to_ms <= over.to_ms), "{inside:?} 不能越过 {over:?}");
+        assert!(inside.len() < all.len(), "越过的那几档必须被滤掉");
+
+        // at 靠近纪元起点时不会算出负的下界
+        assert!(detail_forward_probes(1_000, None).iter().all(|w| w.from_ms >= 0));
     }
 
     #[test]

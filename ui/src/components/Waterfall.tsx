@@ -1,14 +1,14 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
-import { AlertTriangleIcon, ChevronDownIcon, ChevronRightIcon, CopyIcon } from 'lucide-react'
+import { AlertTriangleIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import type { AttrValue, Span } from '@/api/types'
-import { Badge, Button, ErrorBox, Spinner } from '@/components/ui'
+import { Badge, Button, CopyButton, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
 import type { ColorAssigner } from '@/lib/colors'
 import { formatDuration, formatTsMicro } from '@/lib/time'
 import { fillSqlParams, formatSql } from '@/lib/sql'
 import { useIsMobile } from '@/lib/media'
-import { cn, copyText } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 
 export interface SpanNode {
   span: Span
@@ -257,6 +257,72 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
   const select = useCallback((id: string, isSel: boolean) => onSelectRef.current(isSel ? null : id), [])
+  /**
+   * 键盘操作瀑布图。选中 span 是这一页的主要动作，以前只有鼠标点得动。
+   *
+   * 按 listbox 那套做：上下键换选中（跟着焦点走），左右键折叠 / 展开子树，Home / End 到头尾，
+   * Enter / 空格取消选中——跟再点一下选中的行是同一个效果。
+   *
+   * 焦点得跟着选中的行跑，但行是虚拟化的，刚选中的那一行这一帧可能还没渲染出来。所以只立个
+   * 旗子，交给下面那个每次渲染都跑的 effect：等元素真出现了再 `focus`，没出现就下一帧再看。
+   */
+  const kbdFocus = useRef(false)
+  const moveSel = useCallback(
+    (to: number | 'first' | 'last') => {
+      if (!rows.length) return
+      const cur = rows.findIndex((n) => n.span.span_id === selected)
+      const next =
+        to === 'first' ? 0 : to === 'last' ? rows.length - 1 : Math.min(rows.length - 1, Math.max(0, (cur < 0 ? 0 : cur) + to))
+      kbdFocus.current = true
+      onSelectRef.current(rows[next].span.span_id)
+    },
+    [rows, selected],
+  )
+  const onListKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const id = selected ?? rows[0]?.span.span_id
+    switch (e.key) {
+      case 'ArrowDown':
+        moveSel(1)
+        break
+      case 'ArrowUp':
+        moveSel(-1)
+        break
+      case 'Home':
+        moveSel('first')
+        break
+      case 'End':
+        moveSel('last')
+        break
+      case 'ArrowRight':
+        if (id && collapsed.has(id)) toggle(id)
+        else moveSel(1)
+        break
+      case 'ArrowLeft':
+        // 已经展开的先收起来，本来就是收着的就跳到父节点
+        if (id && !collapsed.has(id) && rows.find((n) => n.span.span_id === id)?.children.length) toggle(id)
+        else if (id && parentOf.get(id)) {
+          kbdFocus.current = true
+          onSelectRef.current(parentOf.get(id)!)
+        }
+        break
+      case 'Enter':
+      case ' ':
+        if (id) select(id, id === selected)
+        break
+      default:
+        return
+    }
+    // 方向键在这里是换行，不该顺带滚一屏
+    e.preventDefault()
+  }
+  // 选中的行渲染出来之后把焦点挪过去；没出现就等下一帧（虚拟化列表，行可能还没画）
+  useEffect(() => {
+    if (!kbdFocus.current || !selected) return
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-span-id="${CSS.escape(selected)}"]`)
+    if (!el) return
+    kbdFocus.current = false
+    el.focus({ preventScroll: true })
+  })
   const toggle = useCallback((id: string) => {
     setCollapsed((c) => {
       const next = new Set(c)
@@ -316,7 +382,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
 
   const items = virtualizer.getVirtualItems()
   return (
-    <div ref={listRef} className="relative h-full min-w-0 overflow-auto">
+    <div ref={listRef} className="relative h-full min-w-0 overflow-auto" onKeyDown={onListKey}>
       <div className="sticky top-0 z-[1] flex border-b border-border bg-card text-2xs text-muted-fg" style={{ minWidth: minW, height: HEADER_H }}>
         <div className="flex shrink-0 items-center gap-1 overflow-hidden px-2 md:px-3" style={{ width: leftW }}>
           <span className="mr-auto hidden whitespace-nowrap md:inline">服务 / 操作</span>
@@ -331,41 +397,42 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
             </Button>
           )}
         </div>
-        <div
-          className="relative flex-1 cursor-col-resize touch-pan-y select-none"
-          title="拖动选择范围放大；双击还原"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={endDrag}
-          onDoubleClick={() => setZoom(null)}
-        >
-          {ticks.map((t) => (
-            <span
-              key={t}
-              className={cn('absolute top-0 leading-8 tabular-nums', t === 0 ? 'pl-1.5' : t === 1 ? 'pr-1.5' : '-translate-x-1/2')}
-              // 两端的刻度给「窗口外 N 个」的角标让位
-              style={t === 1 ? { right: outside.after > 0 ? '3.5rem' : 0 } : { left: t === 0 && outside.before > 0 ? '3.5rem' : `${t * 100}%` }}
-            >
-              {offsetLabel(view.startUs + viewLen * t)}
-            </span>
-          ))}
-          {outside.before > 0 && (
-            <span className="absolute top-0 left-0 rounded-br bg-warn-soft px-1.5 leading-[1.125rem] text-warn" title={`${outside.before} 个 span 在窗口之前`}>
-              ◂ {outside.before}
-            </span>
-          )}
-          {outside.after > 0 && (
-            <span className="absolute top-0 right-0 rounded-bl bg-warn-soft px-1.5 leading-[1.125rem] text-warn" title={`${outside.after} 个 span 在窗口之后（异步）`}>
-              {outside.after} ▸
-            </span>
-          )}
-        </div>
+        <Hint text="拖动选择范围放大；双击还原">
+          <div
+            className="relative flex-1 cursor-col-resize touch-pan-y select-none"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={endDrag}
+            onDoubleClick={() => setZoom(null)}
+          >
+            {ticks.map((t) => (
+              <span
+                key={t}
+                className={cn('absolute top-0 leading-8 tabular-nums', t === 0 ? 'pl-1.5' : t === 1 ? 'pr-1.5' : '-translate-x-1/2')}
+                // 两端的刻度给「窗口外 N 个」的角标让位
+                style={t === 1 ? { right: outside.after > 0 ? '3.5rem' : 0 } : { left: t === 0 && outside.before > 0 ? '3.5rem' : `${t * 100}%` }}
+              >
+                {offsetLabel(view.startUs + viewLen * t)}
+              </span>
+            ))}
+            {outside.before > 0 && (
+              <Hint text={`${outside.before} 个 span 在窗口之前`}>
+                <span className="absolute top-0 left-0 rounded-br bg-warn-soft px-1.5 leading-[1.125rem] text-warn">◂ {outside.before}</span>
+              </Hint>
+            )}
+            {outside.after > 0 && (
+              <Hint text={`${outside.after} 个 span 在窗口之后（异步）`}>
+                <span className="absolute top-0 right-0 rounded-bl bg-warn-soft px-1.5 leading-[1.125rem] text-warn">{outside.after} ▸</span>
+              </Hint>
+            )}
+          </div>
+        </Hint>
       </div>
       <div ref={dragBox} className="pointer-events-none absolute inset-y-0 z-[2] border-x border-accent bg-accent/15" style={{ display: 'none' }} />
-      <div className="relative" style={{ height: virtualizer.getTotalSize(), minWidth: minW }}>
+      <div role="listbox" aria-label="span 列表" className="relative" style={{ height: virtualizer.getTotalSize(), minWidth: minW }}>
         {/* 刻度竖线画一次盖在整列上，不用每行各画几根 */}
-        <div className="pointer-events-none absolute inset-0 flex">
+        <div aria-hidden className="pointer-events-none absolute inset-0 flex">
           <div className="shrink-0" style={{ width: leftW }} />
           <div className="relative flex-1">
             {ticks.slice(1, -1).map((t) => (
@@ -382,6 +449,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
               node={n}
               top={item.start - HEADER_H}
               isSel={selected === id}
+              isTabStop={id === (selected ?? rows[0]?.span.span_id)}
               isCollapsed={collapsed.has(id)}
               color={colors.color(n.span.service)}
               leftW={leftW}
@@ -404,6 +472,8 @@ interface RowProps {
   /** 在列表里的纵向位置（px，不含表头） */
   top: number
   isSel: boolean
+  /** 这一行是不是整列唯一的 tab 落点 */
+  isTabStop: boolean
   isCollapsed: boolean
   color: string
   leftW: number
@@ -416,7 +486,7 @@ interface RowProps {
 }
 
 /** 一行 span。props 全是原始值和稳定引用，选中 / 折叠别的行时这一行不会重画。 */
-const SpanRow = memo(function SpanRow({ node: n, top, isSel, isCollapsed, color, leftW, isMobile, viewStartUs, viewLen, treeStartUs, onSelect, onToggle }: RowProps) {
+const SpanRow = memo(function SpanRow({ node: n, top, isSel, isTabStop, isCollapsed, color, leftW, isMobile, viewStartUs, viewLen, treeStartUs, onSelect, onToggle }: RowProps) {
   const s = n.span
   const isErr = s.status === 'Error'
   const hasKids = n.children.length > 0
@@ -438,48 +508,61 @@ const SpanRow = memo(function SpanRow({ node: n, top, isSel, isCollapsed, color,
   return (
     <div
       data-span-id={s.span_id}
-      className={cn('row-hover absolute inset-x-0 flex cursor-pointer border-b border-border/50', isSel && 'row-selected')}
+      role="option"
+      aria-selected={isSel}
+      // 整列只留一个 tab 落点（选中的那行，没选中就是第一行），进来之后用方向键走
+      tabIndex={isTabStop ? 0 : -1}
+      aria-label={`${s.service} ${s.name}，耗时 ${dur}${isErr ? '，出错' : ''}`}
+      className={cn(
+        'row-hover absolute inset-x-0 flex cursor-pointer border-b border-border/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/60',
+        isSel && 'row-selected',
+      )}
       style={{ height: ROW_H, top }}
       onClick={() => onSelect(s.span_id, isSel)}
     >
       <div className="flex shrink-0 items-center gap-1.5 overflow-hidden pr-3" style={{ width: leftW, paddingLeft: 8 + n.depth * (isMobile ? 10 : 16) }}>
-        <button
-          type="button"
-          className={cn('shrink-0 text-muted-fg', !hasKids && 'invisible')}
-          onClick={(e) => {
-            e.stopPropagation()
-            onToggle(s.span_id)
-          }}
-          title={isCollapsed ? '展开' : '折叠'}
-        >
-          {isCollapsed ? <ChevronRightIcon className="size-4" /> : <ChevronDownIcon className="size-4" />}
-        </button>
+        <Hint text={isCollapsed ? '展开' : '折叠（也可以按左右方向键）'} asChild>
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden
+            className={cn('shrink-0 text-muted-fg', !hasKids && 'invisible')}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggle(s.span_id)
+            }}
+          >
+            {isCollapsed ? <ChevronRightIcon className="size-4" /> : <ChevronDownIcon className="size-4" />}
+          </button>
+        </Hint>
         <span className="inline-block h-4 w-1 shrink-0 rounded-sm" style={{ background: color }} />
         <span className="truncate text-xs">
           <span className="text-muted-fg">{s.service}</span> <span className="font-medium">{s.name}</span>
         </span>
         {isErr && <AlertTriangleIcon className="size-4 shrink-0 text-danger" aria-label="错误" />}
         {n.orphan && (
-          <Badge tone="warn" title={`父 span ${s.parent_span_id} 不在结果里（采样或未入库）`}>
-            父缺失
-          </Badge>
+          <Hint text={`父 span ${s.parent_span_id} 不在结果里（采样或未入库）`}>
+            <Badge tone="warn">父缺失</Badge>
+          </Hint>
         )}
       </div>
       <div className="relative flex-1 overflow-hidden">
         {before || after ? (
-          <span
-            className={cn('absolute top-0 text-2xs leading-[30px] whitespace-nowrap text-muted-fg tabular-nums', before ? 'left-1.5' : 'right-1.5')}
-            title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}，在当前窗口之${before ? '前' : '后'}`}
-          >
-            {before ? `◂ ${offsetLabel(startUs)} · ${dur}` : `${offsetLabel(startUs)} · ${dur} ▸`}
-          </span>
+          <Hint text={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}，在当前窗口之${before ? '前' : '后'}`}>
+            <span
+              className={cn('absolute top-0 text-2xs leading-[30px] whitespace-nowrap text-muted-fg tabular-nums', before ? 'left-1.5' : 'right-1.5')}
+            >
+              {before ? `◂ ${offsetLabel(startUs)} · ${dur}` : `${offsetLabel(startUs)} · ${dur} ▸`}
+            </span>
+          </Hint>
         ) : (
           <>
-            <div
-              className={cn('absolute top-[7px] h-4 rounded-sm', isErr && 'ring-1 ring-danger', x0 < 0 && 'rounded-l-none', x1 > 100 && 'rounded-r-none')}
-              style={{ left: `${left}%`, width: `${width}%`, background: color, opacity: isErr ? 0.9 : 0.75 }}
-              title={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}`}
-            />
+            <Hint text={`${s.service} ${s.name} ${dur}，开始于 ${offsetLabel(startUs)}`}>
+              <div
+                className={cn('absolute top-[7px] h-4 rounded-sm', isErr && 'ring-1 ring-danger', x0 < 0 && 'rounded-l-none', x1 > 100 && 'rounded-r-none')}
+                style={{ left: `${left}%`, width: `${width}%`, background: color, opacity: isErr ? 0.9 : 0.75 }}
+              />
+            </Hint>
             <span
               className={cn('absolute top-0 text-2xs leading-[30px] whitespace-nowrap tabular-nums', labelAfter || labelBefore ? 'text-muted-fg' : 'text-fg')}
               style={labelAfter ? { left: `${right}%`, marginLeft: 4 } : labelBefore ? { right: `${100 - left}%`, marginRight: 4 } : { left: `${left}%`, marginLeft: 4 }}
@@ -514,27 +597,58 @@ function FilledSql({ sql, dbSystem }: { sql: string; dbSystem?: AttrValue }) {
     <div className="border-b border-border/60 px-4 py-3">
       <div className="mb-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
         <span className="font-medium">填参后的 SQL</span>
-        <button type="button" onClick={() => copyText(pretty)} title="复制 SQL" className="hover:text-fg">
-          <CopyIcon className="size-3" />
-        </button>
+        <CopyButton text={() => pretty} title="复制 SQL" size="xs" />
       </div>
       <pre className="mono max-h-96 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-2xs leading-[1.125rem] whitespace-pre-wrap break-all">{pretty}</pre>
     </div>
   )
 }
 
+/** 一组属性拼成 JSON，给「复制全部」用：值保持原样（数字还是数字），不走 fmtValue。 */
+function entriesToJson(entries: [string, AttrValue][]): string {
+  return JSON.stringify(Object.fromEntries(entries), null, 2)
+}
+
+/**
+ * 属性表。属性 / 资源 / 事件属性 / 链接属性四处都用它。
+ *
+ * 键和值都是整块可点，点字就复制，跟 Kumo 的 `InlineCopyText` 一样；图标平时不显示，鼠标扫到
+ * 这一行才浮现，几十条属性不至于糊上两列图标。
+ *
+ * 值为什么要能一键拿走：多半是 URL、pod 名、拼出来的 JSON 这种长串，还折着行，手选选不准。
+ * 键为什么要能拿走：拿它去 MCP 或查询里当筛选字段。
+ *
+ * 跟 Kumo 差一处：它的值默认 `truncate` 只占一行，我们要看全长 URL 和 SQL，所以折行。折行的
+ * 点击热区横跨好几行，光靠图标浮现看不出这一整块都能点，于是补一层淡背景把热区画出来。
+ *
+ * 行外面套一层 `display: contents`：它自己不生成盒子，键和值照旧是外层 grid 的两个格子、
+ * 跨行对齐不变，但 hover 有了一个真实的元素可挂，两列的图标就能一起亮。
+ */
 function KV({ entries }: { entries: [string, AttrValue][] }) {
   if (!entries.length) return <div className="px-4 py-4 text-xs text-muted-fg">（无）</div>
   return (
     <div className="grid grid-cols-[minmax(6rem,auto)_1fr] gap-x-3 gap-y-1 px-4 py-3 text-xs md:grid-cols-[minmax(8rem,auto)_1fr] md:gap-x-4">
-      {entries.map(([k, v]) => (
-        <Fragment key={k}>
-          <span className="mono truncate text-muted-fg" title={k}>
-            {k}
-          </span>
-          <span className="mono min-w-0 break-all">{fmtValue(v)}</span>
-        </Fragment>
-      ))}
+      {entries.map(([k, v]) => {
+        const text = fmtValue(v)
+        return (
+          <div key={k} className="group contents">
+            <CopyButton text={k} title={`复制字段名 ${k}`} size="xs" reveal className="mono -mx-1 h-5 px-1 text-muted-fg hover:bg-muted/60">
+              <Hint text={k}>
+                <span className="truncate">
+                  {k}
+                </span>
+              </Hint>
+            </CopyButton>
+            {text === '' ? (
+              <span />
+            ) : (
+              <CopyButton text={text} title="复制值" size="xs" reveal align="start" className="mono -mx-1 px-1 text-fg hover:bg-muted/60">
+                <span className="min-w-0 break-all">{text}</span>
+              </CopyButton>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -589,18 +703,37 @@ export function SpanPanel({
   const resource = Object.entries(span.resource)
   const subtitle = spanSubtitle(span)
   const filledSql = useMemo(() => fillSqlParams(span.attributes), [span.attributes])
+  const tabCount = tab === 'attrs' ? attrs.length : tab === 'resource' ? resource.length : tab === 'events' ? span.events.length : span.links.length
+  // 传函数：点了才拼，别在每次渲染时都 stringify 一遍几十条属性
+  const tabJson = () =>
+    tab === 'attrs'
+      ? entriesToJson(attrs)
+      : tab === 'resource'
+        ? entriesToJson(resource)
+        : JSON.stringify(tab === 'events' ? span.events : span.links, null, 2)
   return (
     // 手机上盖满整个视口（顶栏也盖掉），桌面是右侧固定宽度的侧栏
     <aside className="fixed inset-0 z-30 flex min-h-0 flex-col bg-card md:static md:z-auto md:w-[30rem] md:shrink-0 md:border-l md:border-border">
       <header className="border-b border-border px-4 py-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="truncate text-base font-semibold" title={span.name}>
-              {span.name}
+            <div className="flex min-w-0 items-center gap-1">
+              <Hint text={span.name}>
+                <div className="truncate text-base font-semibold">
+                  {span.name}
+                </div>
+              </Hint>
+              <CopyButton text={span.name} title="复制 span 名" />
             </div>
-            <div className="truncate text-xs text-muted-fg" title={subtitle}>
-              {span.service}
-              {subtitle && ` · ${subtitle}`}
+            {/* 副标题是 HTTP 方法 + 路径 / SQL / topic 这类，拿去搜代码、搜日志都用得上 */}
+            <div className="flex min-w-0 items-center gap-1 text-xs text-muted-fg">
+              <Hint text={subtitle}>
+                <span className="truncate">
+                  {span.service}
+                  {subtitle && ` · ${subtitle}`}
+                </span>
+              </Hint>
+              <CopyButton text={subtitle ? `${span.service} ${subtitle}` : span.service} title="复制服务和摘要" size="xs" />
             </div>
           </div>
           <Button variant="ghost" size="xs" className="shrink-0" onClick={onClose} title="关闭">
@@ -609,7 +742,17 @@ export function SpanPanel({
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
           <Badge tone={kindTone(span.kind)}>{span.kind}</Badge>
-          {span.status === 'Error' ? <Badge tone="danger">Error{span.status_message ? `: ${span.status_message}` : ''}</Badge> : span.status === 'Ok' ? <Badge tone="ok">Ok</Badge> : null}
+          {span.status === 'Error' ? (
+            // 出错原文常常是一长串，Badge 里挤不下也选不中，配个复制按钮
+            <span className="inline-flex max-w-full items-center gap-1">
+              <Hint text={span.status_message || 'Error'}>
+                <Badge tone="danger">Error{span.status_message ? `: ${span.status_message}` : ''}</Badge>
+              </Hint>
+              {span.status_message && <CopyButton text={span.status_message} title="复制错误原文" size="xs" />}
+            </span>
+          ) : span.status === 'Ok' ? (
+            <Badge tone="ok">Ok</Badge>
+          ) : null}
           <span className="text-muted-fg">耗时</span>
           <span className="font-semibold tabular-nums">{formatDuration(span.duration_ns)}</span>
           <span className="text-muted-fg">开始</span>
@@ -618,16 +761,16 @@ export function SpanPanel({
         </div>
         <div className="mono mt-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
           span {span.span_id}
-          <button type="button" onClick={() => copyText(span.span_id)} title="复制 span id" className="hover:text-fg">
-            <CopyIcon className="size-3" />
-          </button>
+          <CopyButton text={span.span_id} title="复制 span id" size="xs" />
           <span className="ml-auto flex items-center gap-1">
             {metricsLink && (
-              <Link to={metricsLink} title={`${span.service} 在这一刻前后的指标（GC、连接池、CPU……）`}>
-                <Button size="xs" variant="ghost">
-                  这个服务的指标
-                </Button>
-              </Link>
+              <Hint text={`${span.service} 在这一刻前后的指标（GC、连接池、CPU……）`} asChild>
+                <Link to={metricsLink}>
+                  <Button size="xs" variant="ghost">
+                    这个服务的指标
+                  </Button>
+                </Link>
+              </Hint>
             )}
             <Button size="xs" variant="ghost" onClick={onShowLogs}>
               只看这个 span 的日志
@@ -635,7 +778,7 @@ export function SpanPanel({
           </span>
         </div>
       </header>
-      <div className="flex border-b border-border text-xs">
+      <div className="flex items-center border-b border-border text-xs">
         {(
           [
             ['attrs', `属性 ${attrs.length}`],
@@ -653,6 +796,8 @@ export function SpanPanel({
             {label}
           </button>
         ))}
+        {/* 一屏几十条属性，问人「这个 span 长啥样」时要的是一整坨，不是一条条点 */}
+        {tabCount > 0 && <CopyButton text={tabJson} title={`把当前页签的 ${tabCount} 条复制成 JSON`} size="xs" className="mr-3 ml-auto text-2xs" label="复制全部" />}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {/* 属性是点开这个 span 才去查的，转一下比先渲染一屏空的好 */}
@@ -679,10 +824,18 @@ export function SpanPanel({
                   <div className="flex items-center gap-2 px-4 pt-3 text-sm">
                     <span className="font-medium">{e.name}</span>
                     <span className="text-2xs text-muted-fg tabular-nums">+{formatDuration((e.ts_us - span.start_us) * 1000)}</span>
+                    <CopyButton text={() => JSON.stringify(e, null, 2)} title="复制整条事件（含堆栈）" size="xs" className="ml-auto" />
                   </div>
                   <KV entries={rest} />
                   {stack !== undefined && (
-                    <pre className="mono mx-4 mb-3 max-h-80 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-2xs leading-[1.125rem] whitespace-pre-wrap">{fmtValue(stack)}</pre>
+                    <div className="mx-4 mb-3">
+                      {/* 整页最该能一键拿走的就是它：贴工单、拿去搜，全靠这一坨 */}
+                      <div className="mb-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
+                        <span className="font-medium">exception.stacktrace</span>
+                        <CopyButton text={() => fmtValue(stack)} title="复制堆栈" size="xs" />
+                      </div>
+                      <pre className="mono max-h-80 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-2xs leading-[1.125rem] whitespace-pre-wrap">{fmtValue(stack)}</pre>
+                    </div>
                   )}
                 </div>
               )
@@ -696,12 +849,16 @@ export function SpanPanel({
               <div key={i} className="border-b border-border/60 px-4 py-3 text-xs">
                 {/* 带上这个 span 的时刻：关联链路时间上必然挨着，详情就能从最窄的窗口探起，
                     不带的话只能不限时间扫全部分区（线上实测 789 MB / 7.2 秒） */}
-                <Link
-                  to={`/traces/${l.trace_id}?span=${l.span_id}&at=${Math.floor(span.start_us / 1000)}`}
-                  className="mono text-accent hover:underline"
-                >
-                  {l.trace_id} / {l.span_id}
-                </Link>
+                <div className="flex min-w-0 items-start gap-1">
+                  <Link
+                    to={`/traces/${l.trace_id}?span=${l.span_id}&at=${Math.floor(span.start_us / 1000)}`}
+                    className={cn('mono min-w-0 break-all', linkClass)}
+                  >
+                    {l.trace_id} / {l.span_id}
+                  </Link>
+                  <CopyButton text={l.trace_id} title="复制 trace id" size="xs" className="h-5" />
+                  <CopyButton text={l.span_id} title="复制 span id" size="xs" className="h-5" />
+                </div>
                 <KV entries={Object.entries(l.attributes)} />
               </div>
             ))

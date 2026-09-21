@@ -180,14 +180,25 @@ PUT    /api/saved/{id}   改名 {"name"}，或换地址 {"path", "query"} 一起
 DELETE /api/saved/{id}   删掉；别人的和不存在的一样是 404
 ```
 
-按 trace id / span id 查日志时**不带时间范围**：两张表的 `trace_id` 都有 bloom filter，点查不需要时间条件，
-而 3 小时前的 trace id 在「最近 15 分钟」下本来就查不到。
+按 trace id / span id 查日志**一样要带时间范围**（2026-09-21 改，之前是反过来的）。日志表上
+**`span_id` 没有任何索引**，`trace_id` 的 `idx_trace_id` 是 `bloom_filter`、默认误判率 2.5%，摊到 30 天的
+分区上也只剪掉九成七——两条路不带时间范围都是几十 GB 的全表扫描。关掉 query condition cache 实测：
 
-**但「已经知道它是什么时候的」就一定要带上。** 这条规矩的前提是「人手上只有一个 id，不知道它是哪一刻的」；
-一旦时刻是确定的（错误分组的 `last_ms` 和 `sample_trace` 来自同一个 `argMax`，链路详情的 `at` 来自列表行），
-不带时间范围就是白扫：`idx_trace_id` 是 `bloom_filter`，默认误判率 2.5%，摊到 30 天的分区上就是几亿行。
-错误分组展开取堆栈时实测——不带时间范围 2.8 亿行 / 5.2 GB / 3.7 秒，带上样本时刻前后各一小时
-21 万行 / 15.5 MB / 0.16 秒。日志表按 `(service_name, timestamp, level, trace_id)` 排，时间范围走主键第二列的通用排除搜索，同样只读范围内的 granule。
+| 查询 | 读行数 | 读量 | 耗时 |
+| --- | --- | --- | --- |
+| `span_id=…`，不带时间范围 | 313.5 亿 | 37.9 GiB | 8.8 s |
+| `span_id=…` + 1 小时窗口 | 830 万 | 158 MB | 0.18 s |
+| `trace_id=…`，不带时间范围 | 10.4 亿 | 5.4 GB | 14 s |
+| `trace_id=…` + 样本时刻前后 1 小时 | 21 万 | 15.5 MB | 0.16 s |
+
+所以拼链接的地方（`ui/src/lib/links.ts` 的 `logsHref`）一律把时间窗带上：手上有确定时刻的传
+`around(ts)`（错误分组的 `last_ms` 和 `sample_trace` 来自同一个 `argMax`，链路详情有 trace 自己的跨度，
+日志行有 `ts_ms`），只有一个 id 的传页面当前范围。日志页按 id 查也照页面当前范围裁，**相对范围
+（`range=1h`）也算数**——以前只认字面写着的 `from` / `to`，于是 `logs?span_id=…&range=1h` 每打开一次
+就是一次 38 GB 的扫描。窗口没套住时空状态上有「不限时间再找一次」兜底，那一下才是上表第一行的代价。
+
+时间范围无论在哪个排序键下都走主键的通用排除搜索，只读范围内的 granule（线上现在还是
+`(timestamp, level, trace_id)`，见下面「排序键」一节）。
 
 ## 启动
 
@@ -522,8 +533,9 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
   平均每几秒出现一次，它就在每个 granule 里，**任何**跳数索引都跳不掉。真正稀疏的是
   32 位 id 那类——那已经由 `idx_message_tokens` 覆盖了。（关键字取自 `system.query_log` 里
   近 7 天用户真实搜过的词，不是拍脑袋选的。）
-* **日志表的排序键是 `(service_name, timestamp, level, trace_id)`，服务打头**（2026-09-18 换的，之前是
-  `(timestamp, level, trace_id)`）。当年不放服务打头的理由是「近 7 天 12823 次检索只有 3% 带服务筛选」，
+* **日志表的排序键要换成 `(service_name, timestamp, level, trace_id)`，服务打头**（2026-09-18 的结论，
+  之前是 `(timestamp, level, trace_id)`）。**线上还没换**：2026-09-21 查 `system.tables`，三个分片的
+  `app_log_local` 仍然是 `(timestamp, level, trace_id)`，下面这些收益都还没拿到。当年不放服务打头的理由是「近 7 天 12823 次检索只有 3% 带服务筛选」，
   到 2026-09 用法变了：近 7 天 584 次检索里 67% 带服务，关键字检索里 74% 带服务，而「服务 + 关键字」
   是最疼的一类——排序键里没有服务时，服务筛选**完全不减少读量**（message 按 granule 整块读，每个 granule
   里都有这个服务），3 小时以上的这类检索 61 次挂了 41 次（撞 20 GiB 护栏）。建了一张新键的试验表、

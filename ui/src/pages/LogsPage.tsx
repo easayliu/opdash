@@ -11,7 +11,7 @@ import { LogFilters, type LogFilterState } from '@/components/LogFilters'
 import { LogStream } from '@/components/LogStream'
 import { LogTable } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
-import { Button, EmptyState, ErrorBox, Select, Spinner } from '@/components/ui'
+import { Button, EmptyState, ErrorBox, Hint, Select, Spinner, linkClass } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/lib/time'
@@ -19,6 +19,7 @@ import { errorsHref, metricsHref, serviceHref, tracesHref } from '@/lib/links'
 import { splitList, useTimeRange, useUrlState } from '@/lib/url-state'
 import { useIsMobile } from '@/lib/media'
 import { positiveTerms } from '@/lib/query-syntax'
+import { usePageTitle } from '@/lib/title'
 
 const PAGE_SIZES = [100, 200, 500, 1000]
 
@@ -55,6 +56,7 @@ function Pager({ offset, limit, atEnd, hitCap, maxOffset, onPage }: PagerProps) 
 }
 
 export function LogsPage() {
+  usePageTitle('日志')
   const meta = useMeta()
   const isMobile = useIsMobile()
   const { params, set } = useUrlState()
@@ -106,19 +108,25 @@ export function LogsPage() {
 
   const byId = !!(filter.trace_id || filter.span_id)
   /**
-   * 按 id 查时要不要裁时间。
+   * 按 id 查时要不要裁时间。**一律要裁**，除非人自己点了「不限时间再找一次」。
    *
-   * 不裁的话 bloom filter 得把 30 天的分区全过一遍——线上实测直接撞 30 秒超时，等于这条路
-   * 根本不可用；URL 上有明确的起止时间就用它，同一条 trace 只读 0.76 M 行 / 26 MB（两个数量级）。
-   * 「在日志页打开」带过来的就是这条 trace 的实际跨度。
+   * span_id 上没有任何索引，trace_id 的 bloom filter 也只剪掉九成七，两条路不带时间范围都是
+   * 几十 GB 的全表扫描：2026-09-21 线上实测（关掉 query condition cache）span 点查 31.3 G 行 /
+   * 37.9 GiB / 8.8 s、trace 点查 1.03 G 行 / 5.4 GB / 14 s，而同一个 span 加上一小时窗口只要
+   * 8.3 M 行 / 158 MB / 0.18 s。
    *
-   * 相对范围（`range=1h` 这种）不算数：它只是页面的默认值，不是人冲着这条 id 选的。裁了之后
-   * 万一什么都没查到，空状态上有「不限时间再找一次」兜底，见下面的 EmptyState。
+   * 以前这里只认 URL 上字面写着的 `from` / `to`，`range=1h` 这种相对范围不算数，于是
+   * `logs?span_id=…&range=1h` 每打开一次就是一次 38 GB 的扫描，App.tsx 里粘 span id 跳过来
+   * 带的 `range=7d` 也白带。现在页面当前是什么范围就按什么范围裁，查不到再点空状态上的
+   * 「不限时间再找一次」兜底（见下面的 EmptyState）。
+   *
+   * 代价是跳进来的链接得自己带上合适的时间窗，不然会撞上 1 小时的默认值——拼链接的地方
+   * 都收在 `lib/links.ts` 的 `logsHref` 里，手上有确定时刻的调用方传 `around(ts)`。
    */
   const [unscoped, setUnscoped] = useState(false)
   // 换了 id 或时间范围就回到默认，不然「不限时间」会一直粘着后面每一次查询
   useEffect(() => setUnscoped(false), [filter.trace_id, filter.span_id, range.fromMs, range.toMs])
-  const scoped = !byId || (!unscoped && !!params.get('from') && !!params.get('to'))
+  const scoped = !byId || !unscoped
   const baseParams: Params = useMemo(
     () => ({
       ...(scoped ? { from: range.fromMs, to: range.toMs } : {}),
@@ -199,7 +207,9 @@ export function LogsPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <LogFilters state={filter} dims={dims} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
+      {/* 这一页的视觉设计没有标题栏，筛选条就是顶部；读屏靠标题层级找路，给它留一个 */}
+      <h1 className="sr-only">日志</h1>
+      <LogFilters state={filter} dims={dims} rangeParams={{ from: range.fromMs, to: range.toMs }} scoped={scoped} onChange={setFilter} />
       <CrossLinks service={filter.dims[serviceDim]?.[0]} win={{ fromMs: range.fromMs, toMs: range.toMs }} hasMetrics={!!meta.data?.metrics} />
       {!byId && (
         <section className="border-b border-border bg-card px-3 pt-2 pb-1.5 md:px-4 md:pt-3 md:pb-2">
@@ -246,12 +256,13 @@ export function LogsPage() {
         {(search.isFetching || (follow && tail.status !== 'live')) && <Spinner className="size-4" />}
         {/* 整词模式是后端按词长自动切的，不提示的话「搜 id 的前半截搜不到」会很费解 */}
         {!stale && !!search.data?.token_terms?.length && (
-          <span
-            className="text-2xs text-muted-fg"
-            title={`${search.data.token_terms.join('、')}：够长的标识符按整词匹配，走 message 上的 token 索引，快很多。要搜片段请用正则模式（.*）。`}
-          >
-            按整词匹配 · 已走索引
-          </span>
+          <Hint text={`${search.data.token_terms.join('、')}：够长的标识符按整词匹配，走 message 上的 token 索引，快很多。要搜片段请用正则模式（.*）。`}>
+            <span
+              className="text-2xs text-muted-fg"
+            >
+              按整词匹配 · 已走索引
+            </span>
+          </Hint>
         )}
         <StatsLine stats={follow ? tail.stats : search.data?.stats} className={cn('hidden text-2xs text-muted-fg sm:inline', stale && 'opacity-50')} />
         <div className="ml-auto flex items-center gap-2">
@@ -295,15 +306,19 @@ export function LogsPage() {
           )}
           {!follow && !byId && !isMobile && <Pager {...pager} />}
           {/* 导出在手机上没什么用，也省出一行 */}
-          <a href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })} className="hidden md:inline-flex" download title={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`}>
-            <Button size="sm">
-              <DownloadIcon className="size-4" />
-              CSV
-            </Button>
-          </a>
-          <a href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })} className="hidden md:inline-flex" download title="导出 JSON Lines">
-            <Button size="sm">JSONL</Button>
-          </a>
+          <Hint text={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`} asChild>
+            <a href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })} className="hidden md:inline-flex" download>
+              <Button size="sm">
+                <DownloadIcon className="size-4" />
+                CSV
+              </Button>
+            </a>
+          </Hint>
+          <Hint text="导出 JSON Lines" asChild>
+            <a href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })} className="hidden md:inline-flex" download>
+              <Button size="sm">JSONL</Button>
+            </a>
+          </Hint>
         </div>
       </div>
       <div className={cn('min-h-0 flex-1 overflow-auto bg-card', stale && 'opacity-40 transition-opacity')}>
@@ -341,10 +356,10 @@ export function LogsPage() {
                         {scoped && (
                           <>
                             {' '}也可能它不在当前时间范围里——
-                            <button type="button" className="text-accent hover:underline" onClick={() => setUnscoped(true)}>
+                            <button type="button" className={linkClass} onClick={() => setUnscoped(true)}>
                               不限时间再找一次
                             </button>
-                            （要把 30 天的分区全过一遍，会慢）。
+                            （要把 30 天的分区全过一遍，实测约 38 GB、十几秒）。
                           </>
                         )}
                       </>
@@ -402,9 +417,11 @@ function CrossLinks({ service, win, hasMetrics }: { service?: string; win: { fro
       <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)}>
         <Button size="xs">最慢的链路</Button>
       </Link>
-      <Link to={errorsHref({ service }, win)} title="这个服务在报哪几种错，按次数排">
-        <Button size="xs">错误分组</Button>
-      </Link>
+      <Hint text="这个服务在报哪几种错，按次数排" asChild>
+        <Link to={errorsHref({ service }, win)}>
+          <Button size="xs">错误分组</Button>
+        </Link>
+      </Hint>
       <Link to={tracesHref({ service, errorOnly: true }, win)}>
         <Button size="xs">出错的链路</Button>
       </Link>

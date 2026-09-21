@@ -131,9 +131,11 @@ export function logsHref(
     ...opts.dims,
   }
   if (opts.dim && opts.service) parts[opts.dim] = opts.service
-  // 按 id 查日志不带时间范围：两张表的 trace_id 都有 bloom filter，点查不需要时间条件，
-  // 带上反而会把三小时前的那条挡在外面
-  return `/logs?${qs(parts, opts.traceId || opts.spanId ? undefined : win)}`
+  // 按 id 查**也要**带时间范围。日志表上 span_id 没有任何索引，trace_id 的 bloom filter
+  // 只剪掉九成七，不带时间就是一次几十 GB 的全表扫描（2026-09-21 线上实测 span 点查
+  // 37.9 GiB / 8.8 s、trace 点查 5.4 GB / 14 s）。调用方手上有确定时刻的就传 `around(ts)`，
+  // 窗口没套住的情况日志页空状态上有「不限时间再找一次」兜底。
+  return `/logs?${qs(parts, win)}`
 }
 
 /* ------------------------------------------------ 指标某条线 → 另外两个信号的筛选条件 */

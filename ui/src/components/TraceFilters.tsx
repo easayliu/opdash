@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { FilterIcon, PlusIcon, XIcon } from 'lucide-react'
 import type { Params } from '@/api/client'
 import { useAttrKeys, useAttrValues, useTraceValues } from '@/api/queries'
-import { Button, Combobox, Input, Select, type ComboOption } from '@/components/ui'
+import { Button, Combobox, Hint, Input, Select, type ComboOption } from '@/components/ui'
 import { cn } from '@/lib/utils'
 
 /** facet 接口返回的 `{value, count}` → 下拉选项，条数放右边当灰字 */
@@ -89,18 +89,20 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
           className={cn('w-full md:w-96', !mobileOpen && 'hidden md:block')}
           title={state.service ? '接口 / 操作（span_name）' : '先选服务'}
         />
-        <div className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')} title="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
-          {KINDS.map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => onChange({ ...state, kinds: state.kinds.includes(k) ? state.kinds.filter((x) => x !== k) : [...state.kinds, k] })}
-              className={cn('h-full flex-1 rounded-sm px-1.5 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
-            >
-              {k}
-            </button>
-          ))}
-        </div>
+        <Hint text="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
+          <div className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')}>
+            {KINDS.map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => onChange({ ...state, kinds: state.kinds.includes(k) ? state.kinds.filter((x) => x !== k) : [...state.kinds, k] })}
+                className={cn('h-full flex-1 rounded-sm px-1.5 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+        </Hint>
         <Button size="md" active={state.error_only} className={cn(!mobileOpen && 'hidden md:inline-flex')} onClick={() => onChange({ ...state, error_only: !state.error_only })} title="只看 status = Error 的 span 所在的链路">
           只看错误
         </Button>
@@ -110,10 +112,12 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
           ~
           <Input value={maxMs} onChange={(e) => setMaxMs(e.target.value)} placeholder="≤ ms" className="w-20 md:w-24" inputMode="decimal" aria-label="最大耗时" />
         </span>
-        <Select value={state.sort} onChange={(e) => onChange({ ...state, sort: e.target.value === 'duration' ? 'duration' : 'time' })} title="排序" className={cn(!mobileOpen && 'hidden md:block')}>
-          <option value="time">最新在前</option>
-          <option value="duration">最慢在前</option>
-        </Select>
+        <Hint text="排序" asChild>
+          <Select value={state.sort} onChange={(e) => onChange({ ...state, sort: e.target.value === 'duration' ? 'duration' : 'time' })} className={cn(!mobileOpen && 'hidden md:block')}>
+            <option value="time">最新在前</option>
+            <option value="duration">最慢在前</option>
+          </Select>
+        </Hint>
         <Button type="submit" variant="primary" className="hidden px-5 md:inline-flex">
           查询
         </Button>
@@ -149,21 +153,24 @@ function AttrFilters({ attrs, service, rangeParams, onChange, className }: { att
       {attrs.map((a) => (
         <span key={a} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
           {a}
-          <button type="button" onClick={() => onChange(attrs.filter((x) => x !== a))} title="去掉">
-            <XIcon className="size-3.5" />
-          </button>
+          <Hint text="去掉" asChild>
+            <button type="button" onClick={() => onChange(attrs.filter((x) => x !== a))}>
+              <XIcon className="size-3.5" />
+            </button>
+          </Hint>
         </span>
       ))}
-      <Input
-        value={key}
-        onChange={(e) => setKey(e.target.value)}
-        list="attr-keys"
-        disabled={!service}
-        placeholder={service ? '属性名，如 http.route' : '属性名（先选服务）'}
-        title={service ? '属性名（span_attributes / resource_attributes）' : '先选服务'}
-        className="mono h-8 w-full text-xs md:w-64"
-        aria-label="属性名"
-      />
+      <Hint text={service ? '属性名（span_attributes / resource_attributes）' : '先选服务'} asChild>
+        <Input
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          list="attr-keys"
+          disabled={!service}
+          placeholder={service ? '属性名，如 http.route' : '属性名（先选服务）'}
+          className="mono h-8 w-full text-xs md:w-64"
+          aria-label="属性名"
+        />
+      </Hint>
       <datalist id="attr-keys">
         {(keys.data?.keys ?? []).map((k) => (
           <option key={k.key} value={k.key} />

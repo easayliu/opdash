@@ -7,7 +7,7 @@ import type { MetricAgg, MetricField, MetricInfo, MetricQueryResponse } from '@/
 import { LineChart, type ChartEvent, type ChartMarker, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Input, Select, Spinner } from '@/components/ui'
+import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Hint, Input, Select, Spinner, linkClass } from '@/components/ui'
 import { ColorAssigner, SERIES_SLOTS } from '@/lib/colors'
 import { coveredMetricNames, isErrorLabel, resolveDashboard, type ResolvedPanel } from '@/lib/dashboards'
 import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
@@ -18,6 +18,7 @@ import { useInView } from '@/lib/in-view'
 import { useIsMobile } from '@/lib/media'
 import { splitList, useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
 import { cn } from '@/lib/utils'
+import { usePageTitle } from '@/lib/title'
 
 /** 步长：不选就按时间范围自动挑（后端最多 60 个点）。 */
 const STEPS = [
@@ -146,6 +147,7 @@ function queryParams(
 }
 
 export function MetricsPage() {
+  usePageTitle('指标')
   const { range } = useTimeRange()
   const { params, set } = useUrlState()
   const rangeParams: Params = useMemo(() => ({ from: range.fromMs, to: range.toMs }), [range])
@@ -168,6 +170,8 @@ export function MetricsPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 pt-2 md:px-4">
+        {/* 页签本身就是这一页的导航，视觉上不再放标题；读屏仍需要一个 */}
+        <h1 className="sr-only">指标</h1>
         <nav className="order-last flex w-full items-stretch gap-1 md:order-none md:w-auto">
           {(['board', 'all'] as const).map((v) => (
             <button
@@ -183,13 +187,15 @@ export function MetricsPage() {
         </nav>
         <span className="flex items-center gap-2 py-2 md:ml-auto">
           {view === 'board' && (
-            <Select value={params.get('step') ?? ''} onChange={(e) => set({ step: e.target.value || null })} title="每个点多长时间">
-              {STEPS.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </Select>
+            <Hint text="每个点多长时间" asChild>
+              <Select value={params.get('step') ?? ''} onChange={(e) => set({ step: e.target.value || null })}>
+                {STEPS.map((s) => (
+                  <option key={s.value} value={s.value}>
+                    {s.label}
+                  </option>
+                ))}
+              </Select>
+            </Hint>
           )}
           <Combobox
             value={service}
@@ -322,9 +328,11 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
           {pageAttrs.map((a) => (
             <span key={a} className="mono inline-flex h-7 items-center gap-1.5 rounded-md bg-accent-soft px-2 text-xs text-accent">
               {a}
-              <button type="button" onClick={() => setAttrs(pageAttrs.filter((x) => x !== a))} title="去掉这个条件">
-                <XIcon className="size-3.5" />
-              </button>
+              <Hint text="去掉这个条件" asChild>
+                <button type="button" onClick={() => setAttrs(pageAttrs.filter((x) => x !== a))}>
+                  <XIcon className="size-3.5" />
+                </button>
+              </Hint>
             </span>
           ))}
           <button type="button" className="text-2xs text-muted-fg hover:text-fg" onClick={() => setAttrs([])}>
@@ -346,9 +354,11 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
             ，图上的虚线就是那一刻
           </span>
           {eventsQ.data!.events.slice(0, 6).map((e) => (
-            <span key={`${e.kind}${e.t_ms}${e.pod}`} className="mono" title={e.pod}>
-              {formatTs(e.t_ms, { ms: false, date: false })} {e.kind === 'restart' ? '重启' : '新起'} {e.pod.replace(/^.*?-(?=[0-9a-f]{6,}-)/, '…-')}
-            </span>
+            <Hint text={e.pod}>
+              <span key={`${e.kind}${e.t_ms}${e.pod}`} className="mono">
+                {formatTs(e.t_ms, { ms: false, date: false })} {e.kind === 'restart' ? '重启' : '新起'} {e.pod.replace(/^.*?-(?=[0-9a-f]{6,}-)/, '…-')}
+              </span>
+            </Hint>
           ))}
           {eventsQ.data!.events.length > 6 && <span>还有 {eventsQ.data!.events.length - 6} 次</span>}
         </div>
@@ -385,7 +395,7 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
       {uncovered > 0 && (
         <div className="pb-2 text-2xs text-muted-fg">
           这个服务还有 {uncovered} 个指标看板没画（Kafka 的细项、SDK 自己的导出指标之类），在
-          <button type="button" className="mx-1 text-accent hover:underline" onClick={() => set({ view: 'all' })}>
+          <button type="button" className={cn('mx-1', linkClass)} onClick={() => set({ view: 'all' })}>
             全部指标
           </button>
           里。
@@ -418,9 +428,11 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
         横向拖一段是缩小时间范围。整段跳：
       </span>
       {links.map((l) => (
-        <Link key={l.label} to={l.to} title={l.title}>
-          <Button size="xs">{l.label}</Button>
-        </Link>
+        <Hint text={l.title} asChild>
+          <Link key={l.label} to={l.to}>
+            <Button size="xs">{l.label}</Button>
+          </Link>
+        </Hint>
       ))}
     </div>
   )
@@ -605,30 +617,31 @@ function DashboardPanel({
       ref={ref}
       className={cn('flex flex-col', wide && 'lg:col-span-2')}
       title={
-        <button
-          type="button"
-          className="flex min-w-0 items-baseline gap-2 text-left hover:text-accent"
-          title={`${v.metric}　点开在「全部指标」里继续拆`}
-          onClick={() =>
-            set({
-              view: 'all',
-              metric: v.metric,
-              agg: v.agg,
-              field: v.field ?? 'value',
-              q: v.q ?? null,
-              by: null,
-              attr: null,
-            })
-          }
-        >
-          <span className="truncate">{panel.title}</span>
-          {panel.hint && (
-            <span className="hidden truncate text-2xs font-normal text-muted-fg lg:inline" title={panel.hint}>
-              {panel.hint}
-            </span>
-          )}
-          {data.isFetching && <Spinner className="size-3.5 shrink-0" />}
-        </button>
+        <Hint text={`${v.metric}　点开在「全部指标」里继续拆`} asChild>
+          <button
+            type="button"
+            className="flex min-w-0 items-baseline gap-2 text-left hover:text-accent"
+            onClick={() =>
+              set({
+                view: 'all',
+                metric: v.metric,
+                agg: v.agg,
+                field: v.field ?? 'value',
+                q: v.q ?? null,
+                by: null,
+                attr: null,
+              })
+            }
+          >
+            <span className="truncate">{panel.title}</span>
+            {panel.hint && (
+              <Hint text={panel.hint}>
+                <span className="hidden truncate text-2xs font-normal text-muted-fg lg:inline">{panel.hint}</span>
+              </Hint>
+            )}
+            {data.isFetching && <Spinner className="size-3.5 shrink-0" />}
+          </button>
+        </Hint>
       }
     >
       {data.isError ? (
@@ -878,21 +891,27 @@ function DrillPopover({
           {value != null && <span className="ml-1 font-semibold text-fg">{format(value)}</span>}
         </div>
         {ctx.label && (
-          <div className="mono mb-2 truncate text-2xs text-accent" title={ctx.label}>
-            {ctx.label}
-          </div>
+          <Hint text={ctx.label}>
+            <div className="mono mb-2 truncate text-2xs text-accent">
+              {ctx.label}
+            </div>
+          </Hint>
         )}
         <div className="flex flex-col gap-1">
           {links.map((l) => (
-            <Link key={l.label} to={l.to} title={l.title} onClick={onClose} className="rounded-md px-2 py-1 text-xs hover:bg-muted">
-              {l.label}
-            </Link>
+            <Hint text={l.title} asChild>
+              <Link key={l.label} to={l.to} onClick={onClose} className="rounded-md px-2 py-1 text-xs hover:bg-muted">
+                {l.label}
+              </Link>
+            </Hint>
           ))}
         </div>
         {errs.isSuccess && errGroups.length === 0 && (
-          <div className="mt-1.5 text-2xs text-muted-fg" title="这一格里这个服务没有出错的入口 span（Server / Consumer）">
-            这一格没有报错<span className="hidden sm:inline">——尖的是耗时不是错误</span>
-          </div>
+          <Hint text="这一格里这个服务没有出错的入口 span（Server / Consumer）">
+            <div className="mt-1.5 text-2xs text-muted-fg">
+              这一格没有报错<span className="hidden sm:inline">——尖的是耗时不是错误</span>
+            </div>
+          </Hint>
         )}
         {!ctx.useful && ctx.label === '' && (
           <div className="mt-1.5 text-2xs text-muted-fg">这个面板没有能带过去的标签，只按服务和这一格的时间筛</div>
@@ -943,38 +962,42 @@ function PanelLegend({
       {shown.map((s, i) => {
         const off = hidden?.has(s.name)
         return (
-          <button
-            key={s.name}
-            type="button"
-            disabled={!onToggle}
-            onClick={() => onToggle?.(s.name)}
-            title={onToggle ? `${s.name}（点一下只摘掉 / 加回这条线）` : s.name}
-            className={cn('inline-flex min-w-0 items-center gap-1.5 disabled:cursor-default', onToggle && 'hover:text-fg', off && 'opacity-40')}
-          >
-            {/* 色块形状跟着图走：柱状图是小方块，折线是短横 */}
-            <span
-              className={cn('inline-block shrink-0 rounded-sm', bars ? 'size-2' : 'h-0.5 w-3')}
-              style={{ background: series[i]?.color }}
-            />
-            <span className={cn('mono max-w-52 truncate', off && 'line-through')}>{labels[i]}</span>
-            <span className="shrink-0 tabular-nums text-fg">{values[i] != null ? format(values[i] as number) : '-'}</span>
-          </button>
+          <Hint text={onToggle ? `${s.name}（点一下只摘掉 / 加回这条线）` : s.name} asChild>
+            <button
+              key={s.name}
+              type="button"
+              disabled={!onToggle}
+              onClick={() => onToggle?.(s.name)}
+              className={cn('inline-flex min-w-0 items-center gap-1.5 disabled:cursor-default', onToggle && 'hover:text-fg', off && 'opacity-40')}
+            >
+              {/* 色块形状跟着图走：柱状图是小方块，折线是短横 */}
+              <span
+                className={cn('inline-block shrink-0 rounded-sm', bars ? 'size-2' : 'h-0.5 w-3')}
+                style={{ background: series[i]?.color }}
+              />
+              <span className={cn('mono max-w-52 truncate', off && 'line-through')}>{labels[i]}</span>
+              <span className="shrink-0 tabular-nums text-fg">{values[i] != null ? format(values[i] as number) : '-'}</span>
+            </button>
+          </Hint>
         )
       })}
       {more && (
-        <span className="text-muted-fg/80" title={more}>
-          还有更多
-        </span>
+        <Hint text={more}>
+          <span className="text-muted-fg/80">
+            还有更多
+          </span>
+        </Hint>
       )}
       {rows.length > LEGEND_MAX && (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="hover:text-fg"
-          title={expanded ? '收起' : rows.slice(LEGEND_MAX).map((s) => s.name).join('\n')}
-        >
-          {expanded ? '收起' : `+${rows.length - LEGEND_MAX} 条`}
-        </button>
+        <Hint text={expanded ? '收起' : rows.slice(LEGEND_MAX).map((s) => s.name).join('\n')} asChild>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="hover:text-fg"
+          >
+            {expanded ? '收起' : `+${rows.length - LEGEND_MAX} 条`}
+          </button>
+        </Hint>
       )}
     </div>
   )
@@ -1202,27 +1225,34 @@ function MetricExplorer({
           <>
             <header className="flex flex-col gap-2.5 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="mono min-w-0 max-w-full truncate text-sm font-semibold" title={info?.description || metric}>
-                  {metric}
-                </span>
+                <Hint text={info?.description || metric}>
+                  <span className="mono min-w-0 max-w-full truncate text-sm font-semibold">
+                    {metric}
+                  </span>
+                </Hint>
                 {info && <Badge tone={typeTone(info.type)}>{info.type}</Badge>}
                 {info?.unit && info.unit !== '1' && <Badge>{info.unit}</Badge>}
-                {info?.temporality === 'Cumulative' && <Badge title="存的是累计值，速率是查询时相减出来的">累计</Badge>}
+                {info?.temporality === 'Cumulative' && (
+                  <Hint text="存的是累计值，速率是查询时相减出来的">
+                    <Badge>累计</Badge>
+                  </Hint>
+                )}
                 <span className="ml-auto flex flex-wrap items-center gap-2">
-                  <Select
-                    value={choice.key}
-                    onChange={(e) => {
-                      const o = options.find((x) => x.key === e.target.value)
-                      if (o) set({ agg: o.agg, field: o.field })
-                    }}
-                    title={choice.hint}
-                  >
-                    {options.map((o) => (
-                      <option key={o.key} value={o.key}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </Select>
+                  <Hint text={choice.hint} asChild>
+                    <Select
+                      value={choice.key}
+                      onChange={(e) => {
+                        const o = options.find((x) => x.key === e.target.value)
+                        if (o) set({ agg: o.agg, field: o.field })
+                      }}
+                    >
+                      {options.map((o) => (
+                        <option key={o.key} value={o.key}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Hint>
                   {choice.agg === 'quantile' && (
                     <span className="flex h-9 items-center gap-0.5 rounded-md border border-input p-0.5">
                       {QUANTILES.map((q) => (
@@ -1240,13 +1270,15 @@ function MetricExplorer({
                       ))}
                     </span>
                   )}
-                  <Select value={step} onChange={(e) => set({ step: e.target.value || null })} title="每个点多长时间">
-                    {STEPS.map((s) => (
-                      <option key={s.value} value={s.value}>
-                        {s.label}
-                      </option>
-                    ))}
-                  </Select>
+                  <Hint text="每个点多长时间" asChild>
+                    <Select value={step} onChange={(e) => set({ step: e.target.value || null })}>
+                      {STEPS.map((s) => (
+                        <option key={s.value} value={s.value}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Hint>
                   <Button size="md" active={showExemplars} onClick={() => set({ ex: showExemplars ? '0' : null })} title="指标上挂的 trace id：点圆点直接跳那次请求">
                     exemplar
                   </Button>
@@ -1393,19 +1425,20 @@ function MetricList({
         <ul>
           {shown.map((m) => (
             <li key={`${m.name}:${m.type}`}>
-              <button
-                type="button"
-                onClick={() => onSelect(m.name)}
-                className={cn('row-hover block w-full border-b border-border/60 px-3 py-2 text-left', m.name === selected && 'row-selected')}
-                title={m.description || m.name}
-              >
-                <span className="mono block truncate text-xs">{m.name}</span>
-                <span className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-fg">
-                  <Badge tone={typeTone(m.type)}>{m.type}</Badge>
-                  {m.unit && m.unit !== '1' && <span>{m.unit}</span>}
-                  <span className="truncate">{m.services.length > 1 ? `${m.services.length} 个服务` : m.services[0]}</span>
-                </span>
-              </button>
+              <Hint text={m.description || m.name} asChild>
+                <button
+                  type="button"
+                  onClick={() => onSelect(m.name)}
+                  className={cn('row-hover block w-full border-b border-border/60 px-3 py-2 text-left', m.name === selected && 'row-selected')}
+                >
+                  <span className="mono block truncate text-xs">{m.name}</span>
+                  <span className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-fg">
+                    <Badge tone={typeTone(m.type)}>{m.type}</Badge>
+                    {m.unit && m.unit !== '1' && <span>{m.unit}</span>}
+                    <span className="truncate">{m.services.length > 1 ? `${m.services.length} 个服务` : m.services[0]}</span>
+                  </span>
+                </button>
+              </Hint>
             </li>
           ))}
         </ul>
@@ -1438,9 +1471,11 @@ function GroupBy({ metric, rangeParams, by, onChange }: { metric: string; rangeP
       {by.map((k) => (
         <span key={k} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
           {k}
-          <button type="button" onClick={() => onChange(by.filter((x) => x !== k))} title="去掉这个维度">
-            <XIcon className="size-3.5" />
-          </button>
+          <Hint text="去掉这个维度" asChild>
+            <button type="button" onClick={() => onChange(by.filter((x) => x !== k))}>
+              <XIcon className="size-3.5" />
+            </button>
+          </Hint>
         </span>
       ))}
       <Input
@@ -1497,9 +1532,11 @@ function LabelFilters({ metric, rangeParams, attrs, onChange }: { metric: string
       {attrs.map((a) => (
         <span key={a} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
           {a}
-          <button type="button" onClick={() => onChange(attrs.filter((x) => x !== a))} title="去掉">
-            <XIcon className="size-3.5" />
-          </button>
+          <Hint text="去掉" asChild>
+            <button type="button" onClick={() => onChange(attrs.filter((x) => x !== a))}>
+              <XIcon className="size-3.5" />
+            </button>
+          </Hint>
         </span>
       ))}
       <Input value={key} onChange={(e) => setKey(e.target.value)} list="metric-label-keys" placeholder="标签名" className="mono h-8 w-full text-xs md:w-48" aria-label="标签名" />

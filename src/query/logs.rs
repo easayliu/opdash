@@ -1,12 +1,17 @@
 //! 日志表（logpipe 的 `app_log`）的 SQL。
 //!
-//! 排序键是 `(service_name, timestamp, level, trace_id)`（2026-09-18 起服务打头，之前是时间打头）：
-//! 锁定一个服务时按 `ORDER BY timestamp, level, trace_id LIMIT n` 只读这个服务的那一段；不锁服务时要把
-//! 范围内各服务的排序列读出来排一遍，排序列很窄，实测墙钟没变差（见 README「排序键」一节）。
-//! 排序键以外的列参与排序会退化，见 [`order_by`]；
-//! 按 trace id 查走 `idx_trace_id`
-//! bloom filter，不带时间范围也不慢。`message` 上只有 token 索引（够长的标识符才用得上，见
-//! [`token_needles`]），一般关键字是逐行扫时间范围内的数据，所以时间范围是所有查询的第一道闸。
+//! 这里的 SQL 是按排序键 `(service_name, timestamp, level, trace_id)` 写的（服务打头，见 README
+//! 「排序键」一节）：锁定一个服务时按 `ORDER BY timestamp, level, trace_id LIMIT n` 只读这个服务的
+//! 那一段；不锁服务时要把范围内各服务的排序列读出来排一遍，排序列很窄，实测墙钟没变差。
+//! 排序键以外的列参与排序会退化，见 [`order_by`]。
+//!
+//! **换键这件事线上还没做**：2026-09-21 查 `system.tables`，三个分片的 `app_log_local` 仍然是
+//! `(timestamp, level, trace_id)`。两种键下这些 SQL 都对，只是服务筛选省不下读量。
+//!
+//! 索引只有三个，覆盖不到的列一律是扫：`trace_id` 有 `idx_trace_id` bloom filter，但默认误判率
+//! 2.5%，摊到 30 天的分区上只剪掉九成七（实测仍要 10.4 亿行 / 5.4 GB / 14 s）；**`span_id` 上没有
+//! 任何索引**；`message` 上只有 token 索引（够长的标识符才用得上，见 [`token_needles`]），一般
+//! 关键字是逐行扫时间范围内的数据。所以时间范围是所有查询的第一道闸，**按 id 查也不例外**。
 
 use serde::{Deserialize, Serialize};
 
@@ -409,7 +414,11 @@ impl Order {
 /// 日志筛选条件。列名都是白名单里的（调用方按 [`Table`] 校验过）。
 #[derive(Debug, Default, Clone)]
 pub struct LogFilter {
-    /// 没有时间范围只允许在给了 trace_id / span_id 时（走 bloom filter）。
+    /// 没有时间范围只允许在给了 trace_id / span_id 时，而且**这条路很贵**：`span_id` 上没有
+    /// 任何索引，`trace_id` 的 bloom filter 也只剪掉九成七。2026-09-21 线上实测（关掉 query
+    /// condition cache）span 点查扫 31.3 G 行 / 37.9 GiB / 8.8 s、trace 点查 1.03 G 行 /
+    /// 5.4 GB / 14 s，而同一个 span 加上一小时窗口只要 8.3 M 行 / 158 MB / 0.18 s。
+    /// 调用方手上只要有个大概时刻就该带上范围，不带是「实在不知道它是什么时候的」的兜底。
     pub range: Option<TimeRange>,
     pub q: String,
     /// `q` 按正则（ClickHouse `match`，RE2）而不是关键字语法（见 [`parse_query`]）

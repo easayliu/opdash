@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import { CalendarIcon, ChevronDownIcon, RefreshCwIcon } from 'lucide-react'
-import { Button, Input } from '@/components/ui'
+import { Button, Input, PopoverPanel } from '@/components/ui'
 import { useTimeRange } from '@/lib/url-state'
 import { QUICK_RANGES, formatTs, fromLocalInputValue, rangeLabel, toLocalInputValue } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -11,24 +11,14 @@ export function TimeRangePicker({ className }: { className?: string }) {
   const [open, setOpen] = useState(false)
   const [from, setFrom] = useState(toLocalInputValue(range.fromMs))
   const [to, setTo] = useState(toLocalInputValue(range.toMs))
-  const ref = useRef<HTMLDivElement>(null)
+  // 面板异步挂载，锚在这个按钮上（触发器留在首屏包里，见 `@/components/base-ui`）
+  const anchor = useRef<HTMLButtonElement>(null)
 
+  // 每次打开都拿当前范围重置两个输入框。点外面关、Escape 关、焦点进出都归 Base UI 管了
   useEffect(() => {
     if (!open) return
     setFrom(toLocalInputValue(range.fromMs))
     setTo(toLocalInputValue(range.toMs))
-    const onClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onClick)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onClick)
-      document.removeEventListener('keydown', onKey)
-    }
   }, [open, range.fromMs, range.toMs])
 
   const applyAbsolute = () => {
@@ -40,9 +30,10 @@ export function TimeRangePicker({ className }: { className?: string }) {
   }
 
   return (
-    <div ref={ref} className={cn('relative flex min-w-0 items-center gap-1', className)}>
+    <div className={cn('flex min-w-0 items-center gap-1', className)}>
       {/* 相对范围解析成的绝对窗口固定到下次刷新，挂在 title 上让人看得见自己在看哪一段 */}
       <Button
+        ref={anchor}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         title={`${formatTs(range.fromMs)} ~ ${formatTs(range.toMs)}`}
@@ -56,8 +47,13 @@ export function TimeRangePicker({ className }: { className?: string }) {
         <RefreshCwIcon className="size-4" />
       </Button>
       {open && (
-        // 手机上钉在视口顶部撑满宽度；桌面挂在按钮下面
-        <div className="fixed inset-x-3 top-14 z-30 rounded-lg border border-border bg-card p-4 shadow-lg md:absolute md:inset-x-auto md:top-full md:right-0 md:mt-1 md:w-[28rem]">
+        <Suspense fallback={null}>
+          <PopoverPanel
+            open={open}
+            onOpenChange={setOpen}
+            anchor={anchor}
+            className="w-[min(28rem,calc(100vw-1.5rem))] rounded-lg border border-border bg-card p-4 shadow-lg"
+          >
           <div className="mb-2 text-2xs font-semibold tracking-wide text-muted-fg uppercase">快捷范围</div>
           <div className="grid grid-cols-3 gap-1.5">
             {QUICK_RANGES.map((q) => (
@@ -76,9 +72,9 @@ export function TimeRangePicker({ className }: { className?: string }) {
           </div>
           <div className="mt-3 mb-2 text-2xs font-semibold tracking-wide text-muted-fg uppercase">自定义（本地时间）</div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <Input type="datetime-local" step={1} value={from} onChange={(e) => setFrom(e.target.value)} />
+            <Input type="datetime-local" step={1} value={from} onChange={(e) => setFrom(e.target.value)} aria-label="开始时间" />
             <span className="hidden text-muted-fg sm:block">~</span>
-            <Input type="datetime-local" step={1} value={to} onChange={(e) => setTo(e.target.value)} />
+            <Input type="datetime-local" step={1} value={to} onChange={(e) => setTo(e.target.value)} aria-label="结束时间" />
           </div>
           <div className="mt-2 flex justify-end gap-2">
             <Button size="sm" onClick={() => setOpen(false)}>
@@ -88,7 +84,8 @@ export function TimeRangePicker({ className }: { className?: string }) {
               应用
             </Button>
           </div>
-        </div>
+          </PopoverPanel>
+        </Suspense>
       )}
     </div>
   )

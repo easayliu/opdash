@@ -1,14 +1,15 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
-import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, CopyIcon, ListTreeIcon, XIcon } from 'lucide-react'
+import { ChevronDownIcon, ChevronRightIcon, ChevronsUpDownIcon, ListTreeIcon, XIcon } from 'lucide-react'
 import type { LogRow } from '@/api/types'
-import { Badge, Button, Combobox, levelTone, type ComboOption } from '@/components/ui'
+import { Badge, Button, Combobox, CopyButton, Hint, levelTone, linkClass, type ComboOption } from '@/components/ui'
+import { around, logsHref } from '@/lib/links'
 import { messageTruncated, rowKey, truncationNote, useRowKeys } from '@/lib/log-row'
 import { useIsMobile } from '@/lib/media'
 import { useFrom } from '@/lib/url-state'
 import { formatTs } from '@/lib/time'
-import { cn, copyText, scrollParent, splitFirstLine } from '@/lib/utils'
+import { cn, scrollParent, splitFirstLine } from '@/lib/utils'
 
 export interface LogTableProps {
   rows: LogRow[]
@@ -120,14 +121,28 @@ function useScrollToMarked(
   }, [anchorKey, rows])
 }
 
+/**
+ * 当前列的排序状态，给读屏用。
+ *
+ * `aria-sort` 要挂在 `th` 上，不是挂在里面那个按钮上。可排序但没在排的列显式写 `none`，读屏
+ * 才知道这列点了能排；不可排序的列不写这个属性。
+ */
+function ariaSort(col: string, sort?: LogSort, onSort?: (key: string) => void): 'ascending' | 'descending' | 'none' | undefined {
+  if (!onSort) return undefined
+  if (sort?.key !== col) return 'none'
+  return sort.dir === 'asc' ? 'ascending' : 'descending'
+}
+
 function SortHeader({ label, col, sort, onSort }: { label: string; col: string; sort?: LogSort; onSort?: (key: string) => void }) {
   if (!onSort) return <>{label}</>
   const active = sort?.key === col
   return (
-    <button type="button" onClick={() => onSort(col)} className={cn('inline-flex items-center gap-0.5 hover:text-fg', active && 'text-fg')} title="点击排序">
-      {label}
-      {active ? <span aria-hidden>{sort?.dir === 'asc' ? '▲' : '▼'}</span> : <ChevronsUpDownIcon className="size-3 opacity-50" />}
-    </button>
+    <Hint text="点击排序" asChild>
+      <button type="button" onClick={() => onSort(col)} className={cn('inline-flex items-center gap-0.5 hover:text-fg', active && 'text-fg')}>
+        {label}
+        {active ? <span aria-hidden>{sort?.dir === 'asc' ? '▲' : '▼'}</span> : <ChevronsUpDownIcon className="size-3 opacity-50" />}
+      </button>
+    </Hint>
   )
 }
 
@@ -150,9 +165,11 @@ function HeaderFilter({ col, filter }: { col: string; filter: ColFilter }) {
         title={value ? `只看 ${col} = ${value}，点击换一个` : `按 ${col} 筛选`}
       />
       {value && (
-        <button type="button" onClick={() => onChange('')} title="取消筛选" className="shrink-0 text-muted-fg hover:text-fg">
-          <XIcon className="size-3" />
-        </button>
+        <Hint text="取消筛选" asChild>
+          <button type="button" onClick={() => onChange('')} className="shrink-0 text-muted-fg hover:text-fg">
+            <XIcon className="size-3" />
+          </button>
+        </Hint>
       )}
     </span>
   )
@@ -275,10 +292,10 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
       <thead className="sticky top-0 z-[1] bg-card text-2xs text-muted-fg shadow-[inset_0_-1px_0_var(--border)]">
         <tr>
           <th className="w-7" />
-          <th className="w-[12.5rem] px-1.5 py-2 text-left font-medium">
+          <th aria-sort={ariaSort('ts_ms', sort, onSort)} className="w-[12.5rem] px-1.5 py-2 text-left font-medium">
             <SortHeader label="时间" col="ts_ms" sort={sort} onSort={onSort} />
           </th>
-          <th className={cn('px-1.5 py-2 text-left font-medium', colFilters?.level ? 'w-24' : 'w-16')}>
+          <th aria-sort={ariaSort('level', sort, onSort)} className={cn('px-1.5 py-2 text-left font-medium', colFilters?.level ? 'w-24' : 'w-16')}>
             {colFilters?.level ? (
               <span className="flex min-w-0 items-center gap-1.5">
                 <SortHeader label="级别" col="level" sort={sort} onSort={onSort} />
@@ -289,7 +306,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
             )}
           </th>
           {cols.map((c) => (
-            <th key={c} className={cn('px-1.5 py-2 text-left font-medium', c === 'pod' ? 'w-56' : 'w-40')}>
+            <th key={c} aria-sort={ariaSort(c, sort, onSort)} className={cn('px-1.5 py-2 text-left font-medium', c === 'pod' ? 'w-56' : 'w-40')}>
               {colFilters?.[c] ? (
                 <span className="flex min-w-0 items-center gap-1.5">
                   <SortHeader label={c} col={c} sort={sort} onSort={onSort} />
@@ -301,7 +318,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
             </th>
           ))}
           {!compact && (
-            <th className="w-48 px-1.5 py-2 text-left font-medium">
+            <th aria-sort={ariaSort('logger', sort, onSort)} className="w-48 px-1.5 py-2 text-left font-medium">
               <SortHeader label="logger" col="logger" sort={sort} onSort={onSort} />
             </th>
           )}
@@ -342,17 +359,18 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
               {cols.map((c) => (
                 <td key={c} className="truncate px-1.5 py-1.5 text-muted-fg" title={dimValue(r, c)}>
                   {onPivot ? (
-                    <button
-                      type="button"
-                      className="max-w-full truncate hover:text-accent hover:underline"
-                      title={`只看 ${c} = ${dimValue(r, c)}`}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onPivot(c, dimValue(r, c))
-                      }}
-                    >
-                      {dimValue(r, c) || '-'}
-                    </button>
+                    <Hint text={`只看 ${c} = ${dimValue(r, c)}`} asChild>
+                      <button
+                        type="button"
+                        className="max-w-full truncate hover:text-accent hover:underline"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onPivot(c, dimValue(r, c))
+                        }}
+                      >
+                        {dimValue(r, c) || '-'}
+                      </button>
+                    </Hint>
                   ) : (
                     dimValue(r, c) || '-'
                   )}
@@ -370,22 +388,25 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
                   {/* 展开时也标：标记要贴在文本断掉的那一点上，不然人得滚过一万六千字
                       才在下面的详情里看到「已截断」 */}
                   {messageTruncated(r) && (
-                    <span className="ml-1 text-warn" title={truncationNote(r)}>
-                      · 已截断
-                    </span>
+                    <Hint text={truncationNote(r)}>
+                      <span className="ml-1 text-warn">
+                        · 已截断
+                      </span>
+                    </Hint>
                   )}
                 </div>
               </td>
               <td className="mono px-1.5 py-1.5 text-2xs">
                 {r.trace_id ? (
-                  <Link
-                    to={`/traces/${r.trace_id}?at=${r.ts_ms}`} state={from}
-                    className="text-accent hover:underline"
-                    title={`查看链路 ${r.trace_id}`}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {r.trace_id.slice(0, 8)}…
-                  </Link>
+                  <Hint text={`查看链路 ${r.trace_id}`} asChild>
+                    <Link
+                      to={`/traces/${r.trace_id}?at=${r.ts_ms}`} state={from}
+                      className={linkClass}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {r.trace_id.slice(0, 8)}…
+                    </Link>
+                  </Hint>
                 ) : (
                   <span className="text-muted-fg">-</span>
                 )}
@@ -465,27 +486,29 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
               <Badge tone={levelTone(r.level)}>{r.level || '-'}</Badge>
               {primary && <span className="min-w-0 flex-1 truncate">{dimValue(r, primary) || '-'}</span>}
               {r.trace_id && (
-                <Link
-                  to={`/traces/${r.trace_id}?at=${r.ts_ms}`} state={from}
-                  className="mono shrink-0 text-accent"
-                  title={`查看链路 ${r.trace_id}`}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {r.trace_id.slice(0, 8)}…
-                </Link>
+                <Hint text={`查看链路 ${r.trace_id}`} asChild>
+                  <Link
+                    to={`/traces/${r.trace_id}?at=${r.ts_ms}`} state={from}
+                    className="mono shrink-0 text-accent"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {r.trace_id.slice(0, 8)}…
+                  </Link>
+                </Hint>
               )}
               {onContext && (
-                <button
-                  type="button"
-                  className="-my-1 -mr-1 shrink-0 p-1 text-muted-fg"
-                  title="查看这一行前后的日志"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onContext(r)
-                  }}
-                >
-                  <ListTreeIcon className="size-4" />
-                </button>
+                <Hint text="查看这一行前后的日志" asChild>
+                  <button
+                    type="button"
+                    className="-my-1 -mr-1 shrink-0 p-1 text-muted-fg"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onContext(r)
+                    }}
+                  >
+                    <ListTreeIcon className="size-4" />
+                  </button>
+                </Hint>
               )}
             </div>
             {open ? (
@@ -497,9 +520,11 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
                 <Highlight text={first} terms={highlight} />
                 {rest && <span className="ml-1 text-muted-fg">… +{rest.split('\n').length} 行</span>}
                 {messageTruncated(r) && (
-                  <span className="ml-1 text-warn" title={truncationNote(r)}>
-                    · 已截断
-                  </span>
+                  <Hint text={truncationNote(r)}>
+                    <span className="ml-1 text-warn">
+                      · 已截断
+                    </span>
+                  </Hint>
                 )}
               </div>
             )}
@@ -530,36 +555,49 @@ export function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; di
           {truncationNote(row)}。整条发给浏览器会把页面卡死（线上真有 41 MB 一条的），要全文请用日志页的「导出」——导出不截。
         </div>
       )}
-      <pre className="mono max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-3 text-xs leading-5 whitespace-pre-wrap break-all">
-        <Highlight text={row.message} terms={highlight} />
-      </pre>
+      <div>
+        <div className="mb-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
+          <span className="font-medium">message</span>
+          <CopyButton text={row.message} title="复制整条日志正文" size="xs" />
+          {messageTruncated(row) && <span className="text-warn">（复制的也是截断后的）</span>}
+        </div>
+        <pre className="mono max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-3 text-xs leading-5 whitespace-pre-wrap break-all">
+          <Highlight text={row.message} terms={highlight} />
+        </pre>
+      </div>
       <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
         {fields
           .filter(([, v]) => v)
           .map(([k, v]) => (
-            <Fragment key={k}>
+            // 跟 span 属性表同一种东西：图标扫到这一行才浮现，不然十来行糊出一列图标。
+            // 外面这层 display:contents 不生成盒子，键值照旧是 grid 的两个格子，只是 hover 有了着落
+            <div key={k} className="group contents">
               <span className="text-muted-fg">{k}</span>
               <span className="mono flex min-w-0 items-center gap-1 break-all">
                 {onPivot && !['file', 'trace_id', 'span_id', 'logger'].includes(k) ? (
-                  <button type="button" className="text-left hover:text-accent hover:underline" onClick={() => onPivot(k, v)} title={`只看 ${k} = ${v}`}>
-                    {v}
-                  </button>
+                  <Hint text={`只看 ${k} = ${v}`} asChild>
+                    <button type="button" className="text-left hover:text-accent hover:underline" onClick={() => onPivot(k, v)}>
+                      {v}
+                    </button>
+                  </Hint>
                 ) : k === 'trace_id' ? (
-                  <Link to={`/traces/${v}?at=${row.ts_ms}`} state={from} className="text-accent hover:underline">
+                  <Link to={`/traces/${v}?at=${row.ts_ms}`} state={from} className={linkClass}>
                     {v}
                   </Link>
                 ) : k === 'span_id' ? (
-                  <Link to={`/logs?span_id=${v}`} className="text-accent hover:underline" title="这个 span 的全部日志">
-                    {v}
-                  </Link>
+                  // 带上这条日志前后的时间窗：日志页按 id 查也要裁时间（见 logsHref），
+                  // 光给一个 span id 会落到它 1 小时的默认范围上，翻旧日志时就点空了
+                  <Hint text="这个 span 的全部日志" asChild>
+                    <Link to={logsHref({ spanId: v }, around(row.ts_ms))} className={linkClass}>
+                      {v}
+                    </Link>
+                  </Hint>
                 ) : (
                   v
                 )}
-                <button type="button" className="text-muted-fg hover:text-fg" title="复制" onClick={() => copyText(v)}>
-                  <CopyIcon className="size-3.5" />
-                </button>
+                <CopyButton text={v} title={`复制 ${k}`} reveal />
               </span>
-            </Fragment>
+            </div>
           ))}
       </div>
     </div>

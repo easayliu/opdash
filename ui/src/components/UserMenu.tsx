@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { KeyRoundIcon, LogOutIcon, UserIcon } from 'lucide-react'
 import { useAuthMe } from '@/api/queries'
 import { redirectToLogin } from '@/api/client'
-import { Button } from '@/components/ui'
+import { Button, Hint } from '@/components/ui'
 import { ApiKeyDialog } from '@/components/ApiKeyDialog'
 
 /**
@@ -22,13 +22,14 @@ export function UserMenu() {
   return (
     <div className="flex items-center gap-1 border-l border-border pl-3">
       {oidc && (
-        <span
-          className="hidden max-w-44 items-center gap-1.5 truncate text-sm text-muted-fg sm:flex"
-          title={user.email ?? user.name}
-        >
-          <UserIcon className="size-4 shrink-0" />
-          <span className="truncate">{user.name}</span>
-        </span>
+        <Hint text={user.email ?? user.name}>
+          <span
+            className="hidden max-w-44 items-center gap-1.5 truncate text-sm text-muted-fg sm:flex"
+          >
+            <UserIcon className="size-4 shrink-0" />
+            <span className="truncate">{user.name}</span>
+          </span>
+        </Hint>
       )}
       {data.api_keys && (
         <Button variant="ghost" className="px-2.5" title="生成 API key（给 Claude Code 等 MCP 客户端 / 脚本用）" onClick={() => setKeys(true)}>

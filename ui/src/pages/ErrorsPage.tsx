@@ -4,12 +4,13 @@ import { AlertTriangleIcon, SearchIcon } from 'lucide-react'
 import { useErrorGroups, useLogSearch, useMeta, useTraceValues } from '@/api/queries'
 import type { ErrorGroup } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Input, Spinner, type ComboOption } from '@/components/ui'
+import { Badge, Button, Card, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Input, Spinner, linkClass, type ComboOption } from '@/components/ui'
 import { errorTitle, errorTitleFull, errorWhere, hasDetail, shortException } from '@/lib/errors'
 import { errorsHref, logsHref, tracesHref, traceHref, type Window } from '@/lib/links'
 import { formatNumber, formatTs } from '@/lib/time'
 import { useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
 import { cn } from '@/lib/utils'
+import { usePageTitle } from '@/lib/title'
 
 /**
  * `kind` 三档。默认**入口错误**，因为服务总览上那个错误率就是按入口 span（Server /
@@ -38,6 +39,7 @@ const STACK_LOG_LIMIT = 5
 const STACK_WINDOW_MS = 60 * 60_000
 
 export function ErrorsPage() {
+  usePageTitle('错误')
   const meta = useMeta()
   const { range } = useTimeRange()
   const { params, set } = useUrlState()
@@ -80,9 +82,11 @@ export function ErrorsPage() {
         {spanName ? (
           <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
             <span className="truncate">{spanName}</span>
-            <button type="button" onClick={() => set({ span_name: null, g: null })} title="看整个服务的错误">
-              ✕
-            </button>
+            <Hint text="看整个服务的错误" asChild>
+              <button type="button" onClick={() => set({ span_name: null, g: null })}>
+                ✕
+              </button>
+            </Hint>
           </span>
         ) : (
           <span className="hidden text-xs text-muted-fg xl:inline">同一种报错归一组，按次数排</span>
@@ -92,15 +96,16 @@ export function ErrorsPage() {
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <span className="flex h-8 items-center rounded-md border border-input p-0.5">
             {KINDS.map((k) => (
-              <button
-                key={k.value}
-                type="button"
-                title={k.hint}
-                onClick={() => set({ kind: k.value === 'entry' ? null : k.value, g: null })}
-                className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', kind === k.value && 'bg-accent-soft text-accent')}
-              >
-                {k.label}
-              </button>
+              <Hint text={k.hint} asChild>
+                <button
+                  key={k.value}
+                  type="button"
+                  onClick={() => set({ kind: k.value === 'entry' ? null : k.value, g: null })}
+                  className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', kind === k.value && 'bg-accent-soft text-accent')}
+                >
+                  {k.label}
+                </button>
+              </Hint>
             ))}
           </span>
           <Combobox
@@ -180,33 +185,41 @@ function GroupRow({ g, win, open, onToggle, logDim }: { g: ErrorGroup; win: Wind
         <AlertTriangleIcon className={cn('size-4 shrink-0', hasDetail(g) ? 'text-danger' : 'text-warn')} />
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-baseline gap-2">
-            <span className="truncate text-xs font-semibold" title={errorTitleFull(g)}>
-              {errorTitle(g)}
-            </span>
+            <Hint text={errorTitleFull(g)}>
+              <span className="truncate text-xs font-semibold">
+                {errorTitle(g)}
+              </span>
+            </Hint>
             {g.exception && g.http_status && <Badge tone="muted">HTTP {g.http_status}</Badge>}
             {!hasDetail(g) && (
-              <Badge tone="warn" title="这些 span 上没有 exception 事件——异常多半被全局异常处理器接住了。展开看日志里的堆栈。">
-                无异常信息
-              </Badge>
+              <Hint text="这些 span 上没有 exception 事件——异常多半被全局异常处理器接住了。展开看日志里的堆栈。">
+                <Badge tone="warn">无异常信息</Badge>
+              </Hint>
             )}
           </span>
           {g.message && (
-            <span className="mono mt-0.5 block truncate text-2xs text-fg/80" title={g.message}>
-              {g.message}
-            </span>
+            <Hint text={g.message}>
+              <span className="mono mt-0.5 block truncate text-2xs text-fg/80">
+                {g.message}
+              </span>
+            </Hint>
           )}
-          <span className="mt-0.5 block truncate text-2xs text-muted-fg" title={errorWhere(g)}>
-            {errorWhere(g)}
-          </span>
+          <Hint text={errorWhere(g)}>
+            <span className="mt-0.5 block truncate text-2xs text-muted-fg">
+              {errorWhere(g)}
+            </span>
+          </Hint>
         </span>
         <span className="shrink-0 text-right">
           <span className="block text-sm font-semibold tabular-nums">{formatNumber(g.count)}</span>
           <span className="block text-2xs text-muted-fg tabular-nums">{formatNumber(g.traces)} 条链路</span>
         </span>
-        <span className="hidden shrink-0 text-right text-2xs text-muted-fg tabular-nums sm:block" title={`最早 ${formatTs(g.first_ms)}\n最后 ${formatTs(g.last_ms)}`}>
-          <span className="block">最后一次</span>
-          <span className="block">{formatTs(g.last_ms, { ms: false, date: false })}</span>
-        </span>
+        <Hint text={`最早 ${formatTs(g.first_ms)}\n最后 ${formatTs(g.last_ms)}`}>
+          <span className="hidden shrink-0 text-right text-2xs text-muted-fg tabular-nums sm:block">
+            <span className="block">最后一次</span>
+            <span className="block">{formatTs(g.last_ms, { ms: false, date: false })}</span>
+          </span>
+        </Hint>
       </button>
       {open && <GroupDetail g={g} win={win} logDim={logDim} />}
     </li>
@@ -217,18 +230,16 @@ function GroupRow({ g, win, open, onToggle, logDim }: { g: ErrorGroup; win: Wind
  * 展开后的详情。**这里才是「不用自己去选」兑现的地方**：
  *
  * * 异常全文和完整类名（列表上截短了）；
- * * 堆栈——按样本 trace id 去日志表点查（trace_id 上有 bloom filter，不带时间范围也快）。
+ * * 堆栈——按样本 trace id 去日志表点查，时间窗以这一组的 `last_ms` 为中心（见 STACK_WINDOW_MS）。
  *   span 上没有 exception 事件的那五分之四，原因只能在这儿拿到；
  * * 三个去处，每个都已经把服务、接口、时间填好了，点过去不用再筛一遍。
  */
 function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: string }) {
   const from = useFrom()
   /**
-   * 这里**要**带时间范围，和 `logsHref` 按 trace id 跳日志页的规矩相反。
-   *
-   * 那条规矩是「人手上只有一个 trace id，不知道它是什么时候的，收窄时间范围会把它挡掉」。
-   * 而这一组自己就带着 `last_ms`——`sample_trace` 正是 `argMax(trace_id, timestamp)` 取出来的，
-   * 两者指的是同一条 span，时刻是确定的。已知时刻还去扫全表没有道理，见 [`STACK_WINDOW_MS`]。
+   * 时间范围按这一组的 `last_ms` 前后各放 [`STACK_WINDOW_MS`]：`sample_trace` 正是
+   * `argMax(trace_id, timestamp)` 取出来的，和 `last_ms` 指的是同一条 span，时刻是确定的。
+   * 已知时刻还去扫全表没有道理——不带时间范围的 trace 点查线上实测 5.4 GB / 14 s。
    *
    * `count: 0` 关掉服务端那条并发的 `count()`：这里只显示前几条堆栈，不显示总数，
    * 白扫一遍同样的数据（单这一条就从 2.7 秒降到 1.9 秒）。
@@ -271,7 +282,10 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
         <div className="flex items-center gap-2 border-b border-border/60 px-2.5 py-1.5 text-2xs text-muted-fg">
           最近这条链路里的错误日志
           {logs.isFetching && <Spinner className="size-3" />}
-          <Link to={logsHref({ traceId: g.sample_trace })} className="ml-auto text-accent hover:underline">
+          <Link
+            to={logsHref({ traceId: g.sample_trace }, { fromMs: g.last_ms - STACK_WINDOW_MS, toMs: g.last_ms + STACK_WINDOW_MS })}
+            className={cn('ml-auto', linkClass)}
+          >
             全部日志
           </Link>
         </div>
@@ -286,9 +300,13 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
             <div className="flex flex-wrap items-baseline gap-x-2 text-2xs text-muted-fg">
               <span className="tabular-nums">{formatTs(r.ts_ms)}</span>
               <Badge tone={r.level === 'ERROR' ? 'danger' : 'warn'}>{r.level}</Badge>
-              <span className="mono truncate" title={r.logger}>
-                {shortException(r.logger)}
-              </span>
+              <Hint text={r.logger}>
+                <span className="mono truncate">
+                  {shortException(r.logger)}
+                </span>
+              </Hint>
+              {/* 这一页存在的意义就是看堆栈，贴工单、拿去搜全靠它 */}
+              <CopyButton text={r.message} title="复制这段堆栈" size="xs" className="ml-auto" />
             </div>
             {/* 堆栈本来就是多行，按原样排版；太长的截住，全文去日志页看 */}
             <pre className="mono mt-1 max-h-60 overflow-auto text-2xs leading-5 whitespace-pre-wrap text-fg/90">{r.message}</pre>
@@ -296,9 +314,10 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
         ))}
       </div>
       <div className="mt-2 text-2xs text-muted-fg">
-        样本链路 <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from} className="mono text-accent hover:underline">{g.sample_trace}</Link>
+        样本链路 <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from} className={cn('mono', linkClass)}>{g.sample_trace}</Link>
+        <CopyButton text={g.sample_trace} title="复制样本 trace id" size="xs" className="mx-1 align-text-bottom" />
         ，点进去会直接选中报错的那个 span。这一组还有{' '}
-        <Link to={errorsHref({ service: g.service, spanName: g.span_name }, win)} className="text-accent hover:underline">
+        <Link to={errorsHref({ service: g.service, spanName: g.span_name }, win)} className={linkClass}>
           同接口的其它报错
         </Link>
         。
