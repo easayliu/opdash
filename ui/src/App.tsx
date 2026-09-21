@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { Suspense, lazy, useEffect, useRef, useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { AnimatePresence, LazyMotion, MotionConfig } from 'motion/react'
@@ -12,14 +12,42 @@ import { Input } from '@/components/ui'
 import { useMeta } from '@/api/queries'
 import { useRangeMemory } from '@/lib/url-state'
 import { PAGE, TRANSITION } from '@/lib/motion'
+import { Spinner } from '@/components/ui'
 import { cn, isHexId } from '@/lib/utils'
-import { LogsPage } from '@/pages/LogsPage'
-import { TracesPage } from '@/pages/TracesPage'
-import { TraceDetailPage } from '@/pages/TraceDetailPage'
-import { ServicesPage } from '@/pages/ServicesPage'
-import { ErrorsPage } from '@/pages/ErrorsPage'
-import { ServiceDetailPage } from '@/pages/ServiceDetailPage'
-import { MetricsPage } from '@/pages/MetricsPage'
+
+/**
+ * 七个页面各自一个 chunk。
+ *
+ * 在这之前它们全打在首屏那一个包里：638 kB（gzip 201 kB），而**没有人一次要看七个页面**。
+ * 指标页一个人就 1568 行，还牵着一整套图表；瀑布图、SQL 美化、热力图同理——没部署
+ * metricpipe 的环境连指标页签都不显示，那几十 kB 却照样下载、照样解析。
+ *
+ * 按路由切开之后只剩「壳 + 你正在看的那一页」。代价是换页签时要多一次网络往返，所以照
+ * [`prefetchBaseUi`] 的老办法补一手：首屏画完之后趁空闲把其余几页捎带取回来。真去点的时候
+ * 基本已经在缓存里，而首屏的关键路径上不再背着它们。
+ */
+const LogsPage = lazy(() => import('@/pages/LogsPage').then((m) => ({ default: m.LogsPage })))
+const TracesPage = lazy(() => import('@/pages/TracesPage').then((m) => ({ default: m.TracesPage })))
+const TraceDetailPage = lazy(() => import('@/pages/TraceDetailPage').then((m) => ({ default: m.TraceDetailPage })))
+const ServicesPage = lazy(() => import('@/pages/ServicesPage').then((m) => ({ default: m.ServicesPage })))
+const ErrorsPage = lazy(() => import('@/pages/ErrorsPage').then((m) => ({ default: m.ErrorsPage })))
+const ServiceDetailPage = lazy(() => import('@/pages/ServiceDetailPage').then((m) => ({ default: m.ServiceDetailPage })))
+const MetricsPage = lazy(() => import('@/pages/MetricsPage').then((m) => ({ default: m.MetricsPage })))
+
+/** 首屏画完之后趁空闲把其余几页取回来（和 `prefetchBaseUi` 一个路数）。 */
+function prefetchPages(): void {
+  const load = () => {
+    void import('@/pages/ServicesPage')
+    void import('@/pages/LogsPage')
+    void import('@/pages/TracesPage')
+    void import('@/pages/ErrorsPage')
+    void import('@/pages/TraceDetailPage')
+    void import('@/pages/ServiceDetailPage')
+    void import('@/pages/MetricsPage')
+  }
+  if ('requestIdleCallback' in window) window.requestIdleCallback(load, { timeout: 5_000 })
+  else setTimeout(load, 2_000)
+}
 
 // 服务总览排第一、也是首页：打开先看「谁不对」，再去翻它的日志 / 链路 / 指标
 const NAV = [
@@ -124,17 +152,27 @@ function AppRoutes() {
         {/* 崩的只是内容区：顶栏、时间范围、页签都还在，换个页签就能接着用。
             这层跟着 `key={pathname}` 一起重挂，所以换页时错误状态自动清掉 */}
         <ErrorBoundary>
-          <Routes location={location}>
-            <Route path="/" element={<Navigate to="/services" replace />} />
-            <Route path="/logs" element={<LogsPage />} />
-            <Route path="/traces" element={<TracesPage />} />
-            <Route path="/traces/:traceId" element={<TraceDetailPage />} />
-            <Route path="/metrics" element={<MetricsPage />} />
-            <Route path="/errors" element={<ErrorsPage />} />
-            <Route path="/services" element={<ServicesPage />} />
-            <Route path="/services/:name" element={<ServiceDetailPage />} />
-            <Route path="*" element={<Navigate to="/services" replace />} />
-          </Routes>
+          {/* 页面的 chunk 还没到时给一个转圈。不给 Suspense 的话 React 会一路往上找，
+              最近的边界在根上，整页（连顶栏）都会闪一下 */}
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center py-16">
+                <Spinner />
+              </div>
+            }
+          >
+            <Routes location={location}>
+              <Route path="/" element={<Navigate to="/services" replace />} />
+              <Route path="/logs" element={<LogsPage />} />
+              <Route path="/traces" element={<TracesPage />} />
+              <Route path="/traces/:traceId" element={<TraceDetailPage />} />
+              <Route path="/metrics" element={<MetricsPage />} />
+              <Route path="/errors" element={<ErrorsPage />} />
+              <Route path="/services" element={<ServicesPage />} />
+              <Route path="/services/:name" element={<ServiceDetailPage />} />
+              <Route path="*" element={<Navigate to="/services" replace />} />
+            </Routes>
+          </Suspense>
         </ErrorBoundary>
       </m.div>
     </AnimatePresence>
@@ -142,6 +180,8 @@ function AppRoutes() {
 }
 
 export default function App() {
+  // 首屏画完之后趁空闲把其余几页的 chunk 取回来，换页签时不用等网络
+  useEffect(prefetchPages, [])
   // 没部署 metricpipe（指标表不存在）就不显示指标页签，点进去也只会看到一句「未启用」
   const meta = useMeta()
   const nav = NAV.filter((n) => n.needs !== 'metrics' || meta.data?.metrics)
