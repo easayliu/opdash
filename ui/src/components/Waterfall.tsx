@@ -453,6 +453,8 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
             <SpanRow
               key={id}
               node={n}
+              index={item.index}
+              total={rows.length}
               top={item.start - HEADER_H}
               isSel={selected === id}
               isTabStop={id === (selected ?? rows[0]?.span.span_id)}
@@ -475,6 +477,9 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
 
 interface RowProps {
   node: SpanNode
+  /** 这一行在整棵展开后的列表里排第几（从 0 起）、一共多少行——读屏要靠它报「第几个，共几个」 */
+  index: number
+  total: number
   /** 在列表里的纵向位置（px，不含表头） */
   top: number
   isSel: boolean
@@ -492,7 +497,7 @@ interface RowProps {
 }
 
 /** 一行 span。props 全是原始值和稳定引用，选中 / 折叠别的行时这一行不会重画。 */
-const SpanRow = memo(function SpanRow({ node: n, top, isSel, isTabStop, isCollapsed, color, leftW, isMobile, viewStartUs, viewLen, treeStartUs, onSelect, onToggle }: RowProps) {
+const SpanRow = memo(function SpanRow({ node: n, index, total, top, isSel, isTabStop, isCollapsed, color, leftW, isMobile, viewStartUs, viewLen, treeStartUs, onSelect, onToggle }: RowProps) {
   const s = n.span
   const isErr = s.status === 'Error'
   const hasKids = n.children.length > 0
@@ -518,6 +523,9 @@ const SpanRow = memo(function SpanRow({ node: n, top, isSel, isTabStop, isCollap
       data-span-id={s.span_id}
       role="option"
       aria-selected={isSel}
+      // 几千个 span 的 trace 只渲染视口里的几十行，不报这一对读屏就会说「第 3 个，共 40 个」
+      aria-setsize={total}
+      aria-posinset={index + 1}
       // 整列只留一个 tab 落点（选中的那行，没选中就是第一行），进来之后用方向键走
       tabIndex={isTabStop ? 0 : -1}
       aria-label={`${s.service} ${s.name}，耗时 ${dur}${isErr ? '，出错' : ''}`}

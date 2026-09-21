@@ -315,9 +315,16 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
   const padBottom = items.length ? virtualizer.getTotalSize() - (items[items.length - 1].end - margin) : 0
   const span = cols.length + (compact ? 4 : 5) + (onContext ? 1 : 0)
   return (
-    <table ref={tableRef} className="w-full table-fixed border-collapse text-xs">
+    /*
+     * `aria-rowcount` 报的是**全部**行数，不是 DOM 里这二十行。
+     *
+     * 虚拟列表只渲染视口里的那一屏，读屏照 DOM 数就会说「表格，共 22 行」——而实际上有一万两千
+     * 条，人会以为已经到底了。ARIA 给这种「行不全在 DOM 里」的表准备的就是这一对属性：表上报
+     * 总数，每行报自己是第几行（从 1 开始，表头占掉 1）。
+     */
+    <table ref={tableRef} aria-rowcount={rows.length + 1} className="w-full table-fixed border-collapse text-xs">
       <thead className="sticky top-0 z-[1] bg-card text-2xs text-muted-fg shadow-[inset_0_-1px_0_var(--border)]">
-        <tr>
+        <tr aria-rowindex={1}>
           <th className="w-7" />
           <th aria-sort={ariaSort('ts_ms', sort, onSort)} className="w-[12.5rem] px-1.5 py-2 text-left font-medium">
             <SortHeader label="时间" col="ts_ms" sort={sort} onSort={onSort} />
@@ -356,7 +363,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
       </thead>
       {/* 视口外的行用一段空白顶着，滚动条长度和全量渲染时一样 */}
       {padTop > 0 && (
-        <tbody>
+        <tbody aria-hidden>
           <tr style={{ height: padTop }}>
             <td colSpan={span} className="p-0" />
           </tr>
@@ -374,6 +381,8 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
         return (
           <tbody key={key} data-index={item.index} ref={virtualizer.measureElement}>
             <tr
+              // 表头是第 1 行，所以数据行从 2 起
+              aria-rowindex={item.index + 2}
               className={cn('row-hover cursor-pointer border-b border-border/60 align-top', isAnchor && 'row-selected', open && 'bg-muted/40')}
               data-selected={isAnchor ? '1' : undefined}
               onClick={() => toggle(key)}
@@ -469,7 +478,7 @@ function LogRows({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCon
         )
       })}
       {padBottom > 0 && (
-        <tbody>
+        <tbody aria-hidden>
           <tr style={{ height: padBottom }}>
             <td colSpan={span} className="p-0" />
           </tr>
@@ -510,6 +519,9 @@ function LogCards({ rows, dims, cols, highlight, anchorKey, selectedSpanId, onCo
             key={key}
             data-index={item.index}
             ref={virtualizer.measureElement}
+            // 同理：DOM 里只有视口那几条，这一对属性才说得出「第 1203 条，共 12345 条」
+            aria-setsize={rows.length}
+            aria-posinset={item.index + 1}
             data-selected={isAnchor ? '1' : undefined}
             className={cn('border-b border-border/60 px-3 py-2', isAnchor && 'row-selected', open && 'bg-muted/40')}
             onClick={() => toggle(key)}
