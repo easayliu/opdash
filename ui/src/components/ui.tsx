@@ -366,7 +366,16 @@ export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="rounded border border-border bg-muted px-1 font-mono text-2xs text-muted-fg">{children}</kbd>
 }
 
-/** 顶部带标题的小卡片。`ref` 是给「滚进视口才查」用的（见 useInView）。 */
+/**
+ * 顶部带标题的小卡片。`ref` 是给「滚进视口才查」用的（见 useInView）。
+ *
+ * 标题是 `<h2>`，卡片用 `aria-labelledby` 认它当自己的名字。两件事都不是摆设：
+ * 没有名字的 `<section>` 根本不会被曝露成地标，读屏的地标列表里一个卡片都没有；标题写成
+ * `<div>` 则是另一半——读屏用户找路最常用的就是「列出本页所有标题」，指标看板二十来张卡
+ * 全是 div 的话那个列表是空的，只能一路 Tab 过去。
+ *
+ * 层级固定 h2：页面标题是 h1（每页都有，视觉上没有的写成 `sr-only`），卡片是它下面一级。
+ */
 export function Card({
   title,
   extra,
@@ -380,11 +389,14 @@ export function Card({
   className?: string
   ref?: React.Ref<HTMLElement>
 }) {
+  const titleId = useId()
   return (
-    <section ref={ref} className={cn('rounded-lg border border-border bg-card', className)}>
+    <section ref={ref} aria-labelledby={title ? titleId : undefined} className={cn('rounded-lg border border-border bg-card', className)}>
       {(title || extra) && (
         <header className="flex h-11 items-center justify-between gap-2 border-b border-border px-4">
-          <div className="text-sm font-semibold text-fg">{title}</div>
+          <h2 id={titleId} className="min-w-0 text-sm font-semibold text-fg">
+            {title}
+          </h2>
           <div className="flex items-center gap-2">{extra}</div>
         </header>
       )}
