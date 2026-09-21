@@ -63,12 +63,34 @@ export function ErrorRate({ rate }: { rate: number }) {
   )
 }
 
-/** 健康度的那个点：红 / 黄 / 绿，hover 看原因 */
+const HEALTH_LABEL: Record<Health, string> = { ok: '正常', warn: '需要看一眼', bad: '异常' }
+
+/**
+ * 健康度的那个点：绿圆 / 黄菱 / 红方，hover 看原因。
+ *
+ * 两处不合规范，都在这八个像素上：
+ *
+ * 一是**只有颜色在说话**（WCAG 1.4.1）。红绿色觉障碍的人看这一列只能看出「有个点」，而这一页
+ * 的主问题就是「谁不对」。所以三档各给一个形状：正常是圆、需要看一眼是菱形、异常是方块——
+ * 尺寸不变，密度不变，不看颜色也分得开。
+ *
+ * 二是**读屏什么都听不到**。原来 Hint 会把解释当 `aria-label` 挂到这个裸 `<span>` 上，但
+ * ARIA 里 `span` 是 generic 角色，规范明确禁止它接受 author naming，浏览器直接把这个名字丢掉。
+ * 补一个 `role="img"` 就有了着落，顺带把档位本身念出来——光念原因不说「异常」还是「正常」，
+ * 听的人得自己推。
+ */
 function HealthDot({ level, reasons }: { level: Health; reasons: string[] }) {
   return (
     <Hint text={reasons.length ? reasons.join('；') : '正常'}>
       <span
-        className={cn('inline-block size-2 shrink-0 rounded-full', level === 'bad' && 'bg-danger', level === 'warn' && 'bg-warn', level === 'ok' && 'bg-ok')}
+        role="img"
+        aria-label={reasons.length ? `${HEALTH_LABEL[level]}：${reasons.join('；')}` : HEALTH_LABEL[level]}
+        className={cn(
+          'inline-block size-2 shrink-0',
+          level === 'ok' && 'rounded-full bg-ok',
+          level === 'warn' && 'rotate-45 rounded-[1px] bg-warn',
+          level === 'bad' && 'rounded-[1px] bg-danger',
+        )}
       />
     </Hint>
   )
