@@ -156,11 +156,14 @@ export function TracesPage() {
         </div>
       </section>
       <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-2 text-xs text-muted-fg md:px-4">
-        {search.data && (
-          <span className="font-medium text-fg">
-            {traces.length} 条链路{traces.length >= limit && `（只取前 ${limit} 条，${filter.sort === 'duration' ? '最慢在前' : '最新在前'}）`}
-          </span>
-        )}
+        {/* live region 要**先在 DOM 里**才播报得了「查回来几条」，所以容器常驻、只换里面的字 */}
+        <span role="status" className="font-medium text-fg">
+          {search.isFetching && !search.data
+            ? '查询中…'
+            : search.data
+              ? `${traces.length} 条链路${traces.length >= limit ? `（只取前 ${limit} 条，${filter.sort === 'duration' ? '最慢在前' : '最新在前'}）` : ''}`
+              : ''}
+        </span>
         {search.data && <StatsLine stats={search.data.stats} className="hidden text-2xs text-muted-fg sm:inline" />}
         {search.isFetching && <Spinner className="size-4" />}
         <span className="ml-auto flex items-center gap-2">

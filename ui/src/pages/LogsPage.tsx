@@ -242,7 +242,10 @@ export function LogsPage() {
         </section>
       )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2 text-xs md:px-4">
-        <span className="font-medium text-fg">
+        {/* 「共 12,345 条」「查询中…」「跟随中」是这一页唯一的查询反馈，原来是纯文本：
+            读屏用户点了查询之后听不到任何动静。`role="status"` 让它变了就播报一次（polite，
+            不打断当前朗读）。容器常驻、只换里面的字，这是 live region 能生效的前提 */}
+        <span role="status" className="font-medium text-fg">
           {stale
             ? '查询中…'
             : follow
@@ -327,7 +330,7 @@ export function LogsPage() {
           </Hint>
         </div>
       </div>
-      <div className={cn('min-h-0 flex-1 overflow-auto bg-card', stale && 'opacity-40 transition-opacity')}>
+      <div aria-busy={stale || undefined} className={cn('min-h-0 flex-1 overflow-auto bg-card', stale && 'opacity-40 transition-opacity')}>
         {search.isError && <ErrorBox error={search.error} onRetry={() => search.refetch()} />}
         {follow && tail.error && <ErrorBox error={{ message: tail.error }} />}
         {!follow && search.isPending && !search.isError && (

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { AnimatePresence, LazyMotion, MotionConfig } from 'motion/react'
@@ -78,6 +78,27 @@ function QuickJump() {
 }
 
 /**
+ * 换页之后把焦点收到主内容上。
+ *
+ * 单页应用换页时浏览器什么都不做：焦点还留在刚点的那个链接上（它已经不在页面上了，于是掉回
+ * body），读屏不会重新播报，键盘用户接着按 Tab 是从页面最顶上重来。把焦点放进 `<main>`
+ * （它有 `tabIndex={-1}`，专为接程序化焦点），读屏会念一遍新的主区域，Tab 也从内容开始。
+ *
+ * 第一次渲染不抢焦点——那会儿人可能正在地址栏或者刚打开标签页。`preventScroll` 是因为 main
+ * 本身就是滚动容器，聚焦它会把刚恢复的滚动位置顶掉。
+ */
+function useFocusMainOnNav(pathname: string): void {
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) {
+      first.current = false
+      return
+    }
+    document.getElementById('main')?.focus({ preventScroll: true })
+  }, [pathname])
+}
+
+/**
  * 路由出口。地址上没带时间范围时先补上记住的那一个再渲染页面——
  * 补参数走 replace，不会在历史里多留一条。
  */
@@ -86,6 +107,7 @@ function AppRoutes() {
   // 补时间范围是内部重定向，得把 state 原样带过去——面包屑的「来处」就放在里面，
   // 丢了的话从错误分组点进链路详情就没有返回按钮了（`traceHref` 不带 range，必走这条重定向）
   const location = useLocation()
+  useFocusMainOnNav(location.pathname)
   if (redirect) return <Navigate to={redirect} replace state={location.state} />
   return (
     /*
