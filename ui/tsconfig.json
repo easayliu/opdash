@@ -17,7 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": { "@/*": ["./src/*"] },
-    "types": ["vite/client"]
+    // jest-dom 的匹配器（toBeInTheDocument 这些）是通过它给 vitest 的 Assertion 加上去的
+    "types": ["vite/client", "@testing-library/jest-dom"]
   },
-  "include": ["src"]
+  "include": ["src", "vitest.setup.ts"]
 }

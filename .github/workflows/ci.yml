@@ -43,6 +43,10 @@ jobs:
         working-directory: ui
         run: pnpm lint
 
+      - name: Test ui
+        working-directory: ui
+        run: pnpm test
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
