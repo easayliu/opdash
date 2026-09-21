@@ -177,6 +177,8 @@ export function MetricsPage() {
             <button
               key={v}
               type="button"
+              // 这两个页签就是这一页的导航，当前在哪一页靠 `aria-current` 说，不能只靠底下那道橙线
+              aria-current={view === v ? 'page' : undefined}
               onClick={() => set({ view: v === 'board' ? null : v })}
               className={cn('cf-tab flex h-9 items-center px-3 text-sm font-medium text-muted-fg hover:text-fg', view === v && 'text-fg')}
               data-active={view === v ? 'true' : undefined}

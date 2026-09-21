@@ -157,12 +157,19 @@ export function LogFilters({ state, dims, rangeParams, scoped, onChange }: Props
         </div>
       )}
       <div className={cn('flex flex-wrap items-center gap-2', !mobileOpen && 'hidden md:flex')}>
+        {/* 一组互不排斥的开关：`role="group"` 给它一个整体的名字，每个按钮自己报 `aria-pressed`。
+            不写的话选中态只有颜色在说话，读屏听到的五个按钮一模一样 */}
         <Hint text="日志级别（可多选）">
-          <div className="flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto">
+          <div
+            role="group"
+            aria-label="日志级别（可多选）"
+            className="flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto"
+          >
             {LEVELS.map((l) => (
               <button
                 key={l}
                 type="button"
+                aria-pressed={state.levels.includes(l)}
                 onClick={() => toggleLevel(l)}
                 className={cn(
                   'h-full flex-1 rounded-sm px-2 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5',

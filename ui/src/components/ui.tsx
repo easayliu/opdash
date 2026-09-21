@@ -29,10 +29,35 @@ const MAX_COMBO_ROWS = 200
 /** 菜单最宽多少 px（值可能很长，比触发按钮宽），也用来判断要不要往左展开 */
 const COMBO_MENU_W = 420
 
-type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+export interface ButtonLook {
   variant?: 'default' | 'primary' | 'ghost' | 'danger'
   size?: 'sm' | 'md' | 'xs'
-  active?: boolean
+}
+
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & ButtonLook & { active?: boolean }
+
+/**
+ * 按钮的那身皮，单独拆出来给**链接**用。
+ *
+ * `<a>` 是交互内容，HTML 的内容模型不允许它里面再放 `<button>`——`<Link><Button/></Link>` 这种
+ * 写法读屏会念出两层可点的东西，键盘上也说不清该按 Enter 还是空格。跳转就该是一个 `<a>`，
+ * 长得像按钮而已，所以把类名拿出来挂在链接上，别再套一个按钮进去。
+ */
+export function buttonClass({ variant = 'default', size = 'md' }: ButtonLook = {}, className?: string): string {
+  return cn(
+    'inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-md border font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60 disabled:cursor-not-allowed disabled:opacity-50',
+    size === 'md' && 'h-9 px-3.5 text-sm',
+    size === 'sm' && 'h-8 px-3 text-xs',
+    size === 'xs' && 'h-7 px-2.5 text-2xs',
+    // Cloudflare：次级按钮是浅灰面 + hail 描边，主按钮是品牌橙；选中态用 marine 蓝
+    variant === 'default' &&
+      'border-input bg-face text-fg hover:bg-face-hover data-[active=true]:border-accent data-[active=true]:bg-accent-soft data-[active=true]:text-accent',
+    variant === 'primary' && 'border-brand bg-brand text-brand-fg hover:border-brand-strong hover:bg-brand-strong',
+    variant === 'ghost' &&
+      'border-transparent bg-transparent text-muted-fg hover:bg-muted hover:text-fg data-[active=true]:bg-accent-soft data-[active=true]:text-accent',
+    variant === 'danger' && 'border-danger/40 bg-card text-danger hover:bg-danger-soft',
+    className,
+  )
 }
 
 /** 子元素里有没有文字。只有图标的按钮要拿提示当无障碍名字，有文字的不能覆盖 */
@@ -49,21 +74,16 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       ref={ref}
       type={type}
       // 提示和无障碍名字都交给 Hint；原生 title 留着会跟气泡一起冒出来，同一句话显示两遍
-      className={cn(
-        'inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-md border font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60 disabled:cursor-not-allowed disabled:opacity-50',
-        size === 'md' && 'h-9 px-3.5 text-sm',
-        size === 'sm' && 'h-8 px-3 text-xs',
-        size === 'xs' && 'h-7 px-2.5 text-2xs',
-        // Cloudflare：次级按钮是浅灰面 + hail 描边，主按钮是品牌橙；选中态用 marine 蓝
-        variant === 'default' &&
-          'border-input bg-face text-fg hover:bg-face-hover data-[active=true]:border-accent data-[active=true]:bg-accent-soft data-[active=true]:text-accent',
-        variant === 'primary' && 'border-brand bg-brand text-brand-fg hover:border-brand-strong hover:bg-brand-strong',
-        variant === 'ghost' &&
-          'border-transparent bg-transparent text-muted-fg hover:bg-muted hover:text-fg data-[active=true]:bg-accent-soft data-[active=true]:text-accent',
-        variant === 'danger' && 'border-danger/40 bg-card text-danger hover:bg-danger-soft',
-        className,
-      )}
+      className={buttonClass({ variant, size }, className)}
       data-active={active ? 'true' : undefined}
+      /**
+       * 「按下去了」这件事**只有颜色在说**，读屏听到的和没选中时一模一样——所以 `active` 同时
+       * 落成 `aria-pressed`（WAI-ARIA 的 Toggle Button：名字、角色之外还得有「值」）。
+       *
+       * 自己带了 `aria-expanded` 的不算：那是开合浮层的按钮（收藏、更多筛选），它的「值」是
+       * 展开与否，`active` 在那儿只是顺带把图标点亮，再报一个 pressed 反而互相打架。
+       */
+      aria-pressed={active !== undefined && props['aria-expanded'] === undefined ? active : undefined}
       {...props}
     >
       {children}

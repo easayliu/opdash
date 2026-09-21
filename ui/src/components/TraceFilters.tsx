@@ -90,11 +90,16 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
           title={state.service ? '接口 / 操作（span_name）' : '先选服务'}
         />
         <Hint text="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
-          <div className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')}>
+          <div
+            role="group"
+            aria-label="span 类型（可多选）"
+            className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')}
+          >
             {KINDS.map((k) => (
               <button
                 key={k}
                 type="button"
+                aria-pressed={state.kinds.includes(k)}
                 onClick={() => onChange({ ...state, kinds: state.kinds.includes(k) ? state.kinds.filter((x) => x !== k) : [...state.kinds, k] })}
                 className={cn('h-full flex-1 rounded-sm px-1.5 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
               >

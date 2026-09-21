@@ -427,11 +427,12 @@ export function ServicesPage() {
               </Select>
             </Hint>
           )}
-          <span className="hidden h-8 items-center rounded-md border border-input p-0.5 md:flex">
+          <span role="group" aria-label="展示方式" className="hidden h-8 items-center rounded-md border border-input p-0.5 md:flex">
             {(['cards', 'table'] as const).map((v) => (
               <Hint key={v} text={v === 'cards' ? '卡片' : '表格'} asChild>
                 <button
                   type="button"
+                  aria-pressed={view === v}
                   onClick={() => set({ view: v === 'cards' ? null : v })}
                   className={cn('flex h-full items-center gap-1 rounded-sm px-2 text-xs text-muted-fg hover:text-fg', view === v && 'bg-accent-soft text-accent')}
                 >
