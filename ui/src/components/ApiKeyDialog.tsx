@@ -251,24 +251,33 @@ function KeyRow({ k, highlight, onRevoke }: { k: ApiKeyInfo; highlight: boolean;
   const soon = !k.expired && new Date(k.expires_at).getTime() - Date.now() < EXPIRING_SOON_DAYS * DAY_MS
   return (
     <tr className={highlight ? 'border-t border-border bg-brand/5' : 'row-hover border-t border-border'}>
-      <td className="max-w-40 truncate px-2.5 py-1.5 font-medium" title={`${k.name}（创建于 ${fmt(k.created_at)}）`}>
-        {k.name}
+      {/* 这一行四处解释原来都是原生 title。手机上没有 hover 就打不开，而这个对话框恰恰是
+          「在手机上照着抄一条命令」的场景——全换成 Hint（触摸设备上点一下就出来） */}
+      <td className="max-w-40 truncate px-2.5 py-1.5 font-medium">
+        <Hint text={`创建于 ${fmt(k.created_at)}`}>
+          <span className="block truncate">{k.name}</span>
+        </Hint>
       </td>
-      <td className="mono px-2.5 py-1.5 text-2xs text-muted-fg" title="key 的前半段，后半段服务端也没存">
-        {k.prefix}…
+      <td className="mono px-2.5 py-1.5 text-2xs text-muted-fg">
+        <Hint text="key 的前半段，后半段服务端也没存">
+          <span>{k.prefix}…</span>
+        </Hint>
       </td>
-      <td className="px-2.5 py-1.5 whitespace-nowrap" title={fmt(k.expires_at)}>
-        {k.expired ?
-          <Badge tone="danger">已过期</Badge>
-        : soon ?
-          <Badge tone="warn">{rel(k.expires_at)}</Badge>
-        : <span className="text-muted-fg">{rel(k.expires_at)}</span>}
+      <td className="px-2.5 py-1.5 whitespace-nowrap">
+        <Hint text={`到期时间 ${fmt(k.expires_at)}`}>
+          <span>
+            {k.expired ?
+              <Badge tone="danger">已过期</Badge>
+            : soon ?
+              <Badge tone="warn">{rel(k.expires_at)}</Badge>
+            : <span className="text-muted-fg">{rel(k.expires_at)}</span>}
+          </span>
+        </Hint>
       </td>
-      <td
-        className="hidden px-2.5 py-1.5 whitespace-nowrap text-muted-fg sm:table-cell"
-        title={k.last_used_at ? fmt(k.last_used_at) : '签出来之后一次都没用过'}
-      >
-        {k.last_used_at ? rel(k.last_used_at) : '从没用过'}
+      <td className="hidden px-2.5 py-1.5 whitespace-nowrap text-muted-fg sm:table-cell">
+        <Hint text={k.last_used_at ? `最近使用 ${fmt(k.last_used_at)}` : '签出来之后一次都没用过'}>
+          <span>{k.last_used_at ? rel(k.last_used_at) : '从没用过'}</span>
+        </Hint>
       </td>
       <td className="px-1.5 py-1.5 text-right">
         <Button
