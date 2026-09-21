@@ -5,6 +5,7 @@ import type { LogRow, TraceDetailResponse } from '@/api/types'
 import { LEVEL_RANK, LogTable, sortLogRows, type ColFilter, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
 import { Badge, Button, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
+import { AnimatePresence } from 'motion/react'
 import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
 import { WINDOW_AROUND_MS, around, logsHref, metricsHref, serviceHref } from '@/lib/links'
@@ -442,8 +443,11 @@ export function TraceDetailPage() {
             )}
           </section>
         </div>
+        {/* 点开 / 关掉 span 详情：面板淡入淡出，瀑布图这边不动 */}
+        <AnimatePresence initial={false}>
         {selectedSpanFull && (
           <SpanPanel
+            key="span-panel"
             span={selectedSpanFull}
             loading={attrs.isFetching && !attrsFor}
             error={attrs.error}
@@ -458,6 +462,7 @@ export function TraceDetailPage() {
             }}
           />
         )}
+        </AnimatePresence>
       </div>
     </div>
   )

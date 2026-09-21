@@ -428,8 +428,8 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
         横向拖一段是缩小时间范围。整段跳：
       </span>
       {links.map((l) => (
-        <Hint text={l.title} asChild>
-          <Link key={l.label} to={l.to}>
+        <Hint key={l.label} text={l.title} asChild>
+          <Link to={l.to}>
             <Button size="xs">{l.label}</Button>
           </Link>
         </Hint>
@@ -962,9 +962,8 @@ function PanelLegend({
       {shown.map((s, i) => {
         const off = hidden?.has(s.name)
         return (
-          <Hint text={onToggle ? `${s.name}（点一下只摘掉 / 加回这条线）` : s.name} asChild>
+          <Hint key={s.name} text={onToggle ? `${s.name}（点一下只摘掉 / 加回这条线）` : s.name} asChild>
             <button
-              key={s.name}
               type="button"
               disabled={!onToggle}
               onClick={() => onToggle?.(s.name)}

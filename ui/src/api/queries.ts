@@ -1,5 +1,6 @@
 /** react-query 封装。所有查询都用 placeholderData 保留上一次结果：重新查询时图表按住旧画面变淡，不闪白。 */
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query'
+import { useMemo } from 'react'
 import { apiGet, type Params } from './client'
 import type {
   ApiKeyInfo,
@@ -300,22 +301,55 @@ export function useOperations(service: string, params: Params) {
   })
 }
 
+/** 一条查询问几个服务，和后端的 `MAX_SERVICES_PER_QUERY` 对齐 */
+const OPS_PER_QUERY = 24
+
 /**
- * 一次问好几个服务的接口表。总览页每张异常卡上那句「主要是哪个接口」共用这一条。
+ * 一次问好几个服务的接口表，超过一条查询的上限就切几批并发问，合成一张表返回。
  *
  * 以前是一张卡一个 `useOperations`，十几个服务同时报警就是十几条查询（每条内部还要查当前窗
  * 和对比窗两遍）——而那正是最需要这一页的时候。同一页的「头号报错」「进程重启」早就是一条
  * 查全站再按服务分了。
+ *
+ * 切批而不是只问前 24 个，是因为总览页现在要拿接口级的变化判服务健不健康（见
+ * `latencyHotspot`）：没问到的服务就等于没判。批次按服务名切——问的是全部服务，谁分在哪一批
+ * 不影响结果，按名字切 queryKey 才稳定，不会因为流量排名抖动把几条查询全部作废重发。
  */
 export function useServiceOperations(services: string[], params: Params, enabled = true) {
   const list = [...services].sort().join(',')
-  return useQuery({
-    queryKey: ['services', 'operations', list, params],
-    queryFn: ({ signal }) => apiGet<OperationsResponse>('/services/operations', { ...params, service: list }, signal),
-    placeholderData: keepPreviousData,
-    staleTime: 60_000,
-    enabled: enabled && !!list,
+  const chunks = useMemo(() => {
+    const names = list ? list.split(',') : []
+    const out: string[][] = []
+    for (let i = 0; i < names.length; i += OPS_PER_QUERY) out.push(names.slice(i, i + OPS_PER_QUERY))
+    return out
+  }, [list])
+  return useQueries({
+    queries: chunks.map((names) => {
+      const service = names.join(',')
+      return {
+        queryKey: ['services', 'operations', service, params],
+        queryFn: ({ signal }: { signal: AbortSignal }) =>
+          apiGet<OperationsResponse>('/services/operations', { ...params, service }, signal),
+        placeholderData: keepPreviousData,
+        staleTime: 60_000,
+        enabled,
+      }
+    }),
+    combine: combineOperations,
   })
+}
+
+/**
+ * 几批结果拼成一张表。一批失败不该让整页的「主要是哪个接口」消失——拿到几批算几批。
+ *
+ * 写在外面是因为 react-query 按 `combine` 的引用判要不要重算：每次 render 新建一个箭头函数，
+ * 它就得把上万行接口拼一遍再深比一次，而这一页每敲一个字就 render。
+ */
+function combineOperations(results: { data?: OperationsResponse; isFetching: boolean }[]) {
+  return {
+    operations: results.flatMap((r) => r.data?.operations ?? []),
+    isFetching: results.some((r) => r.isFetching),
+  }
 }
 
 export function useTimeseries(service: string, params: Params) {

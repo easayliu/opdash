@@ -82,8 +82,9 @@ pub struct OverviewResponse {
     pub stats: Stats,
 }
 
-/// 一次最多问几个服务的接口表。总览页只对不健康的服务问，正常不会有这么多；真有的话
-/// `service_name IN` 的列表和返回的行数都会失控，宁可让页面退回一个一个问。
+/// 一次最多问几个服务的接口表。总览页要对每个服务问（接口级的变化也参与健康度判定），服务多
+/// 的集群会超过这个数——那时前端按这个上限切几批并发问，而不是把 `service_name IN` 的列表和
+/// 返回的行数一起放大到失控。
 const MAX_SERVICES_PER_QUERY: usize = 24;
 
 /// 接口表每个服务最多返回多少行（见 [`TraceQueries::operations`]）。`span_name` 的基数是不可控的

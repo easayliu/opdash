@@ -5,9 +5,12 @@ import type { OperationStat } from '@/api/types'
 import { LineChart, Legend, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
+import { AnimatePresence } from 'motion/react'
+import * as motion from 'motion/react-m'
 import { Badge, Button, Card, EmptyState, ErrorBox, Hint, Select, Spinner } from '@/components/ui'
 import { Delta, ErrorRate } from '@/pages/ServicesPage'
 import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Mover } from '@/lib/compare'
+import { FADE } from '@/lib/motion'
 import { change, pct } from '@/lib/health'
 import { errorsHref, logsHref, metricsHref, tracesHref } from '@/lib/links'
 import { formatDurationMs, formatNumber } from '@/lib/time'
@@ -251,9 +254,14 @@ export function ServiceDetailPage() {
               </div>
             ) : (
               <ul>
-                {(allMovers ? movers : movers.slice(0, 6)).map((m) => (
-                  <MoverRow key={`${m.op.kind}:${m.op.span_name}`} m={m} selected={op === m.op.span_name} onSelect={() => select(m.op.span_name)} />
-                ))}
+                {/* 「全部 N 个 / 只看前 6 个」一按，多出来的行是淡入的；换对比窗口重算变化榜同理 */}
+                <AnimatePresence initial={false}>
+                  {(allMovers ? movers : movers.slice(0, 6)).map((m) => (
+                    <motion.li key={`${m.op.kind}:${m.op.span_name}`} layout="position" {...FADE}>
+                      <MoverRow m={m} selected={op === m.op.span_name} onSelect={() => select(m.op.span_name)} />
+                    </motion.li>
+                  ))}
+                </AnimatePresence>
               </ul>
             )}
           </Card>
@@ -474,7 +482,7 @@ const MOVER_DOT: Record<Mover['tone'], string> = {
 /** 变化榜的一行：哪个接口、变成什么样了、影响面多大。点一行 = 下面的图只看它 */
 function MoverRow({ m, selected, onSelect }: { m: Mover; selected: boolean; onSelect: () => void }) {
   return (
-    <li>
+    <div>
       <Hint text={selected ? '再点一下看整个服务' : '只看这个接口的趋势'} asChild>
         <button
           type="button"
@@ -492,6 +500,6 @@ function MoverRow({ m, selected, onSelect }: { m: Mover; selected: boolean; onSe
           <Badge tone={m.tone}>{m.impact}</Badge>
         </button>
       </Hint>
-    </li>
+    </div>
   )
 }

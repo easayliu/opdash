@@ -3,8 +3,10 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router'
 import { AlertTriangleIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import type { AttrValue, Span } from '@/api/types'
+import * as m from 'motion/react-m'
 import { Badge, Button, CopyButton, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
 import type { ColorAssigner } from '@/lib/colors'
+import { FADE } from '@/lib/motion'
 import { formatDuration, formatTsMicro } from '@/lib/time'
 import { fillSqlParams, formatSql } from '@/lib/sql'
 import { useIsMobile } from '@/lib/media'
@@ -712,8 +714,9 @@ export function SpanPanel({
         ? entriesToJson(resource)
         : JSON.stringify(tab === 'events' ? span.events : span.links, null, 2)
   return (
-    // 手机上盖满整个视口（顶栏也盖掉），桌面是右侧固定宽度的侧栏
-    <aside className="fixed inset-0 z-30 flex min-h-0 flex-col bg-card md:static md:z-auto md:w-[30rem] md:shrink-0 md:border-l md:border-border">
+    // 手机上盖满整个视口（顶栏也盖掉），桌面是右侧固定宽度的侧栏。
+    // 进出场挂在 aside 自己身上：宽度、shrink-0 这些都在它的 className 里，外面再套一层会散架
+    <m.aside {...FADE} className="fixed inset-0 z-30 flex min-h-0 flex-col bg-card md:static md:z-auto md:w-[30rem] md:shrink-0 md:border-l md:border-border">
       <header className="border-b border-border px-4 py-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -866,6 +869,6 @@ export function SpanPanel({
             <div className="px-4 py-4 text-xs text-muted-fg">（无链接）</div>
           ))}
       </div>
-    </aside>
+    </m.aside>
   )
 }

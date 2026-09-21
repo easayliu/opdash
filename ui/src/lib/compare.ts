@@ -164,6 +164,36 @@ function moverFor(op: OperationStat): Mover | null {
   return null
 }
 
+/**
+ * 接口级的「慢点」：服务汇总看不见、但该看一眼的那种慢。
+ *
+ * 服务健康度只有三个输入（错误率、服务级 P95 倍数、从没错到开始出错，见 `serviceHealth`），
+ * 一个 605,323 次的服务里那个 149 次的接口从 31.8ms 变成 3.73s，三条全都不响：它占不到万分之
+ * 三的流量，服务 P95 是别的接口定的。可它这一小时多耗了 9 分钟，正是该点进去看的那个。
+ *
+ * 判定接着 `moverFor` 那一档走（P95 至少翻倍才是 `danger`，样本、绝对变化的门槛都在那边），
+ * 这里只多加一条影响面：多耗的总时间要占到窗口时长的 2%——一小时窗就是 72 秒。按窗口比例而
+ * 不是绝对秒数，是因为同样的 72 秒在 24 小时窗里什么都不是；短窗口再兜一个 10 秒的下限。
+ *
+ * 2% 是照着线上量出来的：一小时窗、83 个服务，候选按多耗的时间排下来是
+ * 4093s / 655s / 617s / 434s / 36s / 13s / 12s / 9s——真事故和噪声之间有一条一个数量级的缝，
+ * 2% 正落在缝里。1% 会多收一个 169ms → 389ms、多耗 36 秒的接口，那不值一张大卡。
+ */
+const HOTSPOT_SHARE = 0.02
+const HOTSPOT_MIN_MS = 10_000
+
+export function latencyHotspot(ops: OperationStat[], windowMs: number): Mover | null {
+  const floor = Math.max(HOTSPOT_MIN_MS, windowMs * HOTSPOT_SHARE)
+  let worst: Mover | null = null
+  for (const op of ops) {
+    const m = moverFor(op)
+    if (!m || m.kind !== 'latency' || m.better || m.tone !== 'danger') continue
+    if (m.score < floor) continue
+    if (!worst || m.score > worst.score) worst = m
+  }
+  return worst
+}
+
 /** 变化最大的几个接口，坏消息在前 */
 export function topMovers(ops: OperationStat[], limit = 6): Mover[] {
   const movers = ops.map(moverFor).filter((m): m is Mover => m !== null)

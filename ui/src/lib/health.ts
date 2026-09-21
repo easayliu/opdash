@@ -62,6 +62,16 @@ export function serviceHealth(s: ServiceStat): { level: Health; reasons: string[
   return { level, reasons }
 }
 
+/**
+ * 再加一条理由，级别至少抬到 warn。
+ *
+ * 给接口级的信号用：上面三条规则的输入全是服务级汇总，天生看不见「某一个小接口慢了 100 倍」
+ * ——那种事故的影响面在接口表里，见 `latencyHotspot`。
+ */
+export function withWarning(h: { level: Health; reasons: string[] }, reason: string): { level: Health; reasons: string[] } {
+  return { level: h.level === 'bad' ? 'bad' : 'warn', reasons: [...h.reasons, reason] }
+}
+
 export function pct(rate: number): string {
   const p = rate * 100
   if (p === 0) return '0%'

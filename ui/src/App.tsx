@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
+import { AnimatePresence, LazyMotion, MotionConfig } from 'motion/react'
+import * as m from 'motion/react-m'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
 import { SavedQueries } from '@/components/SavedQueries'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
@@ -8,6 +10,7 @@ import { UserMenu } from '@/components/UserMenu'
 import { Input } from '@/components/ui'
 import { useMeta } from '@/api/queries'
 import { useRangeMemory } from '@/lib/url-state'
+import { PAGE, TRANSITION } from '@/lib/motion'
 import { cn, isHexId } from '@/lib/utils'
 import { LogsPage } from '@/pages/LogsPage'
 import { TracesPage } from '@/pages/TracesPage'
@@ -26,6 +29,9 @@ const NAV = [
   { to: '/traces', label: '链路', icon: GitBranchIcon },
   { to: '/metrics', label: '指标', icon: ChartLineIcon, needs: 'metrics' as const },
 ]
+
+/** motion 的功能包异步加载（官方推荐的那条路，见 `@/lib/motion-features` 为什么要单独一个模块） */
+const loadMotionFeatures = () => import('@/lib/motion-features').then((mod) => mod.default)
 
 /**
  * 粘 trace id 直达时没有时刻可用，拿当前页面时间范围的中点当猜测。
@@ -79,20 +85,32 @@ function AppRoutes() {
   const redirect = useRangeMemory()
   // 补时间范围是内部重定向，得把 state 原样带过去——面包屑的「来处」就放在里面，
   // 丢了的话从错误分组点进链路详情就没有返回按钮了（`traceHref` 不带 range，必走这条重定向）
-  const { state } = useLocation()
-  if (redirect) return <Navigate to={redirect} replace state={state} />
+  const location = useLocation()
+  if (redirect) return <Navigate to={redirect} replace state={location.state} />
   return (
-    <Routes>
-      <Route path="/" element={<Navigate to="/services" replace />} />
-      <Route path="/logs" element={<LogsPage />} />
-      <Route path="/traces" element={<TracesPage />} />
-      <Route path="/traces/:traceId" element={<TraceDetailPage />} />
-      <Route path="/metrics" element={<MetricsPage />} />
-      <Route path="/errors" element={<ErrorsPage />} />
-      <Route path="/services" element={<ServicesPage />} />
-      <Route path="/services/:name" element={<ServiceDetailPage />} />
-      <Route path="*" element={<Navigate to="/services" replace />} />
-    </Routes>
+    /*
+     * 切页签时整页过一次场（见 `PAGE`）。`mode="wait"` 是官方给页面过渡的那档：旧页先淡出，
+     * 新页再进来，两页不会同时叠在一起——同时叠的话滚动容器里会短暂出现两份内容。
+     *
+     * `location` 要显式传给 `Routes`：不传的话旧页在退场那 120ms 里会被立刻换成新页的内容，
+     * 淡出的就不是你刚离开的那一页了。`initial={false}` 让冷启动不播——那会儿页面上只有一个
+     * 转圈，淡入一个转圈没有意义。
+     */
+    <AnimatePresence mode="wait" initial={false}>
+      <m.div key={location.pathname} {...PAGE} className="flex min-h-0 flex-1 flex-col">
+        <Routes location={location}>
+          <Route path="/" element={<Navigate to="/services" replace />} />
+          <Route path="/logs" element={<LogsPage />} />
+          <Route path="/traces" element={<TracesPage />} />
+          <Route path="/traces/:traceId" element={<TraceDetailPage />} />
+          <Route path="/metrics" element={<MetricsPage />} />
+          <Route path="/errors" element={<ErrorsPage />} />
+          <Route path="/services" element={<ServicesPage />} />
+          <Route path="/services/:name" element={<ServiceDetailPage />} />
+          <Route path="*" element={<Navigate to="/services" replace />} />
+        </Routes>
+      </m.div>
+    </AnimatePresence>
   )
 }
 
@@ -101,9 +119,13 @@ export default function App() {
   const meta = useMeta()
   const nav = NAV.filter((n) => n.needs !== 'metrics' || meta.data?.metrics)
   return (
-    // 外壳钉在视口高度，页面各自在内部滚（表头 sticky、瀑布图 / 日志分栏滚动、右侧 span 面板都靠这个），
-    // 顶栏和页脚固定；没自带滚动区的页面退回到 main 滚
-    <div className="flex h-dvh flex-col">
+    // 动效：功能包异步加载（`motion-features` 单独一个 chunk），口径全站一份见 `@/lib/motion`；
+    // strict 会拦住写成 `motion.div` 的地方——那样等于把整包同步拉进首屏
+    <LazyMotion features={loadMotionFeatures} strict>
+      <MotionConfig transition={TRANSITION} reducedMotion="user">
+        {/* 外壳钉在视口高度，页面各自在内部滚（表头 sticky、瀑布图 / 日志分栏滚动、右侧 span 面板
+            都靠这个），顶栏和页脚固定；没自带滚动区的页面退回到 main 滚 */}
+        <div className="flex h-dvh flex-col">
       {/* 平时看不见，Tab 第一下才冒出来：不给它的话，键盘用户每切一个页面都要把顶栏
           的六个页签和时间 / 主题 / 用户挨个 Tab 一遍才摸得到内容 */}
       <a
@@ -157,6 +179,8 @@ export default function App() {
       <footer className="hidden h-8 shrink-0 items-center justify-end gap-3 border-t border-border px-4 text-2xs text-muted-fg md:flex">
         <span>opdash v{__APP_VERSION__}</span>
       </footer>
-    </div>
+        </div>
+      </MotionConfig>
+    </LazyMotion>
   )
 }

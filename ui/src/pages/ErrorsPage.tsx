@@ -4,9 +4,12 @@ import { AlertTriangleIcon, SearchIcon } from 'lucide-react'
 import { useErrorGroups, useLogSearch, useMeta, useTraceValues } from '@/api/queries'
 import type { ErrorGroup } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
+import { AnimatePresence } from 'motion/react'
+import * as m from 'motion/react-m'
 import { Badge, Button, Card, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Input, Spinner, linkClass, type ComboOption } from '@/components/ui'
 import { errorTitle, errorTitleFull, errorWhere, hasDetail, shortException } from '@/lib/errors'
 import { errorsHref, logsHref, tracesHref, traceHref, type Window } from '@/lib/links'
+import { DISCLOSE, FADE } from '@/lib/motion'
 import { formatNumber, formatTs } from '@/lib/time'
 import { useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
 import { cn } from '@/lib/utils'
@@ -96,9 +99,8 @@ export function ErrorsPage() {
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <span className="flex h-8 items-center rounded-md border border-input p-0.5">
             {KINDS.map((k) => (
-              <Hint text={k.hint} asChild>
+              <Hint key={k.value} text={k.hint} asChild>
                 <button
-                  key={k.value}
                   type="button"
                   onClick={() => set({ kind: k.value === 'entry' ? null : k.value, g: null })}
                   className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', kind === k.value && 'bg-accent-soft text-accent')}
@@ -155,9 +157,13 @@ export function ErrorsPage() {
             {groups.length > 0 && (
               <Card className={cn('overflow-hidden', q.isFetching && 'opacity-70')}>
                 <ul>
+                  {/* 顶上打字筛报错时，行是淡出/淡入的；展开一组时下面的行平滑让位。
+                      动效挂在外面这层 li 上——GroupRow 是 memo 过的，挂在它里面的话
+                      留在原地的行每次重渲染都会重放一次入场（见 `@/lib/motion`） */}
+                  <AnimatePresence initial={false}>
                   {groups.map((g) => (
+                    <m.li key={g.id} layout="position" {...FADE}>
                     <GroupRow
-                      key={g.id}
                       g={g}
                       win={win}
                       open={opened === g.id}
@@ -166,7 +172,9 @@ export function ErrorsPage() {
                       onToggle={() => set({ g: opened === g.id ? null : g.id }, { replace: true })}
                       logDim={meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container'}
                     />
+                    </m.li>
                   ))}
+                  </AnimatePresence>
                 </ul>
               </Card>
             )}
@@ -180,7 +188,7 @@ export function ErrorsPage() {
 /** 一组报错。折叠时一行讲清「什么错、谁在错、多少次、最后一次什么时候」 */
 function GroupRow({ g, win, open, onToggle, logDim }: { g: ErrorGroup; win: Window; open: boolean; onToggle: () => void; logDim: string }) {
   return (
-    <li className={cn('border-b border-border/60 last:border-b-0', open && 'bg-muted/30')}>
+    <div className={cn('border-b border-border/60 last:border-b-0', open && 'bg-muted/30')}>
       <button type="button" onClick={onToggle} className="row-hover flex w-full items-center gap-3 px-3 py-2.5 text-left">
         <AlertTriangleIcon className={cn('size-4 shrink-0', hasDetail(g) ? 'text-danger' : 'text-warn')} />
         <span className="min-w-0 flex-1">
@@ -221,8 +229,14 @@ function GroupRow({ g, win, open, onToggle, logDim }: { g: ErrorGroup; win: Wind
           </span>
         </Hint>
       </button>
-      {open && <GroupDetail g={g} win={win} logDim={logDim} />}
-    </li>
+      <AnimatePresence initial={false}>
+        {open && (
+          <m.div key="detail" {...DISCLOSE} className="overflow-hidden">
+            <GroupDetail g={g} win={win} logDim={logDim} />
+          </m.div>
+        )}
+      </AnimatePresence>
+    </div>
   )
 }
 

@@ -1,14 +1,17 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link, useNavigate } from 'react-router'
+import { AnimatePresence } from 'motion/react'
+import * as m from 'motion/react-m'
 import { AlertTriangleIcon, ChartLineIcon, GitBranchIcon, LayoutGridIcon, RotateCwIcon, ScrollTextIcon, SearchIcon, TableIcon } from 'lucide-react'
 import { useErrorGroups, useMeta, useMetricEvents, useServiceOperations, useServices } from '@/api/queries'
 import type { ErrorGroup, MetricEvent, OperationStat, OverviewResponse, ServiceStat } from '@/api/types'
 import { Sparkline } from '@/components/charts/Sparkline'
 import { StatsLine } from '@/components/StatsLine'
 import { Button, Card, EmptyState, ErrorBox, Hint, Input, Select, Spinner } from '@/components/ui'
-import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Compare } from '@/lib/compare'
-import { change, changeTone, formatChange, healthRank, meaningfulLatency, pct, serviceHealth, type Health } from '@/lib/health'
+import { COMPARE, DEFAULT_COMPARE, compareShort, latencyHotspot, parseCompare, topMovers, type Compare, type Mover } from '@/lib/compare'
+import { change, changeTone, formatChange, healthRank, meaningfulLatency, pct, serviceHealth, withWarning, type Health } from '@/lib/health'
+import { FADE, RISE } from '@/lib/motion'
 import { errorTitle, errorTitleFull } from '@/lib/errors'
 import { errorsHref, logsHref, metricsHref, serviceHref, tracesHref, type Window } from '@/lib/links'
 import { formatDurationMs, formatNumber, formatTs } from '@/lib/time'
@@ -31,15 +34,15 @@ const COLUMNS: { key: SortKey; label: string; align?: 'right'; title?: string }[
   { key: 'max_ms', label: '最大', align: 'right' },
 ]
 
-/** 卡片排序 */
-/** 一次向后端问几个服务的接口表，和后端的 MAX_SERVICES_PER_QUERY 对齐。异常服务比这还多的话，
- *  排在后面的卡就不显示「主要是哪个接口」了——那种时候整个集群都在烧，这一行不是重点 */
-const MAX_CONTRIBUTORS = 24
+/** 最多向后端问几个服务的接口表（后端一条查询 24 个，多出来的由 `useServiceOperations` 切批并发）。
+ *  按流量降序取，所以真有几百个服务时切掉的是量最小的那些 */
+const MAX_OPS_SERVICES = 120
 
 /** 稳定的空数组：每次 render 新建 `[]` 会让下面那些 memo 组件全部白跑 */
 const NO_EVENTS: MetricEvent[] = []
 const NO_OPS: OperationStat[] = []
 
+/** 卡片排序 */
 const ORDERS = [
   { value: 'health', label: '异常在前' },
   { value: 'rps', label: '按请求量' },
@@ -134,16 +137,23 @@ function QuickLinks({ service, win, logDim, hasMetrics, className }: { service: 
  *
  * 数据由 [`ServicesPage`] 一条查询问回来再按服务分（见 `useServiceOperations`），这里只负责
  * 挑一行显示：以前是每张卡自己 `useOperations`，十几个服务同时报警就是十几条查询。
+ *
+ * `hot` 是把这个服务顶进「需要看一眼」的那个接口（见 `latencyHotspot`）：它已经写在上面的原因
+ * 行里了，这里就换下一个说——同一句话在一张卡上出现两遍，比少说一句更糟。而且只补同样是坏消息
+ * 的那种（出错、变慢、接口没了）：警告卡上写「某个接口变快了 75%」「某个接口次数涨了 49%」，
+ * 读的人得先想一下这跟警告有什么关系。剩不下别的就不说。
  */
-const Contributor = memo(function Contributor({ ops }: { ops: OperationStat[] }) {
+const Contributor = memo(function Contributor({ ops, hot }: { ops: OperationStat[]; hot?: Mover | null }) {
   const line = useMemo(() => {
-    const mover = topMovers(ops, 1)[0]
+    const movers = topMovers(ops, hot ? 4 : 1)
+    const mover = hot ? movers.find((m) => m.op.span_name !== hot.op.span_name && !m.better && m.tone !== 'muted') : movers[0]
     if (mover) return { name: mover.op.span_name, text: mover.detail, requests: mover.op.requests }
+    if (hot) return null
     const top = ops.filter((o) => o.requests >= 30).sort((a, b) => b.p95_ms - a.p95_ms)[0]
     if (!top) return null
     const from = top.prev ? `${formatDurationMs(top.prev.p95_ms)} → ` : ''
     return { name: top.span_name, text: `P95 ${from}${formatDurationMs(top.p95_ms)}`, requests: top.requests }
-  }, [ops])
+  }, [ops, hot])
   if (!line) return null
   return (
     <Hint text={`${line.name}（${formatNumber(line.requests)} 次）`}>
@@ -316,13 +326,13 @@ export function ServicesPage() {
     return m
   }, [errs.data])
 
-  const all = useMemo(() => (q.data?.services ?? []).map((s) => ({ s, health: serviceHealth(s) })), [q.data])
-
-  // 异常卡上的「主要是哪个接口」：所有异常服务一条查询问完再按服务分，和上面的错误分组、
-  // 重启事件一个路子。按 all 算而不是按过滤后的 bad，这样在搜索框里打字不会重新发查询
+  // 接口明细：全部服务都问，按流量降序（要切才切量最小的）。以前只问已经判为异常的服务，
+  // 那是个死循环——接口级的变化因此永远没机会把一个服务顶进「需要看一眼」。和上面的错误分组、
+  // 重启事件一个路子：一次问完再按服务分。不按搜索框过滤，打字不重新发查询
+  const services = useMemo(() => q.data?.services ?? [], [q.data])
   const contributorNames = useMemo(
-    () => all.filter((x) => x.health.level !== 'ok').map((x) => x.s.service).slice(0, MAX_CONTRIBUTORS),
-    [all],
+    () => [...services].sort((a, b) => b.requests - a.requests).slice(0, MAX_OPS_SERVICES).map((s) => s.service),
+    [services],
   )
   const contributors = useServiceOperations(
     contributorNames,
@@ -331,13 +341,29 @@ export function ServicesPage() {
   )
   const opsByService = useMemo(() => {
     const m = new Map<string, OperationStat[]>()
-    for (const o of contributors.data?.operations ?? []) {
+    for (const o of contributors.operations) {
       const list = m.get(o.service)
       if (list) list.push(o)
       else m.set(o.service, [o])
     }
     return m
-  }, [contributors.data])
+  }, [contributors.operations])
+
+  // 服务级的三条规则（`serviceHealth`）之外再看一眼接口表：整个服务的数字没动、某一个接口
+  // 自己慢了几倍且多耗的时间可观，也要进「需要看一眼」（见 `latencyHotspot`）。接口表比服务表
+  // 晚一步回来，所以这类服务是过一会儿才冒出来的
+  const all = useMemo(() => {
+    const windowMs = win.toMs - win.fromMs
+    return services.map((s) => {
+      const health = serviceHealth(s)
+      const hot = latencyHotspot(opsByService.get(s.service) ?? NO_OPS, windowMs)
+      // 影响面写在最前面：这一行会被截断，先说「多耗了多久」比先说接口名有用。前缀能省则省，
+      // 省下的字数都留给接口名和 P95——`多耗 11m 9s` 后面跟个接口名，不必再说一遍「一个接口」
+      return { s, hot, health: hot ? withWarning(health, `${hot.impact}：${hot.op.span_name} ${hot.detail}`) : health }
+    })
+  }, [services, opsByService, win])
+  // 接口明细第一次还没回来。之后的轮询有旧数据垫着（placeholderData），不必再提示
+  const opsPending = contributors.isFetching && !contributors.operations.length
   const shown = useMemo(() => {
     const n = needle.trim().toLowerCase()
     const list = all.filter((x) => !n || x.s.service.toLowerCase().includes(n)).filter((x) => !onlyBad || x.health.level !== 'ok')
@@ -354,10 +380,10 @@ export function ServicesPage() {
   const fine = shown.filter((x) => x.health.level === 'ok')
   const badCount = all.filter((x) => x.health.level !== 'ok').length
   const tableRows = useMemo(() => {
-    const list = shown.map((x) => x.s)
-    list.sort((a, b) => {
-      const va = a[tableSort.key]
-      const vb = b[tableSort.key]
+    const list = [...shown]
+    list.sort((x, y) => {
+      const va = x.s[tableSort.key]
+      const vb = y.s[tableSort.key]
       const c = typeof va === 'string' && typeof vb === 'string' ? va.localeCompare(vb) : Number(va) - Number(vb)
       return tableSort.desc ? -c : c
     })
@@ -370,7 +396,7 @@ export function ServicesPage() {
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
         <h1 className="text-base font-semibold">服务</h1>
         <span className="hidden text-xs text-muted-fg xl:inline">按入口 span（Server / Consumer）算</span>
-        {q.isFetching && <Spinner className="size-4" />}
+        {(q.isFetching || opsPending) && <Spinner className="size-4" />}
         <span className="ml-auto flex flex-wrap items-center gap-2">
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <Button size="sm" active={onlyBad} onClick={() => set({ bad: onlyBad ? null : '1' })} disabled={!badCount && !onlyBad} title="只看错误率或延迟异常的">
@@ -403,9 +429,8 @@ export function ServicesPage() {
           )}
           <span className="hidden h-8 items-center rounded-md border border-input p-0.5 md:flex">
             {(['cards', 'table'] as const).map((v) => (
-              <Hint text={v === 'cards' ? '卡片' : '表格'} asChild>
+              <Hint key={v} text={v === 'cards' ? '卡片' : '表格'} asChild>
                 <button
-                  key={v}
                   type="button"
                   onClick={() => set({ view: v === 'cards' ? null : v })}
                   className={cn('flex h-full items-center gap-1 rounded-sm px-2 text-xs text-muted-fg hover:text-fg', view === v && 'bg-accent-soft text-accent')}
@@ -429,22 +454,46 @@ export function ServicesPage() {
         {q.data && all.length > 0 && (
           <>
             <Summary data={q.data} all={all} restarts={events.data?.events.filter((e) => e.kind === 'restart').length ?? 0} cmpShort={cmpShort} />
-            {!shown.length && <EmptyState title={onlyBad ? '没有异常的服务' : '没有匹配的服务'} hint={onlyBad ? '错误率都在 1% 以下，P95 也没比对比窗口明显变差。' : undefined} />}
+            {!shown.length && <EmptyState title={onlyBad ? '没有异常的服务' : '没有匹配的服务'} hint={onlyBad ? (opsPending ? '接口明细还在查，可能还会有服务冒出来。' : '错误率都在 1% 以下，服务和单个接口的 P95 也没比对比窗口明显变差。') : undefined} />}
 
+            {/* 分区外面也要一层：最后一张卡被过滤掉时，整段（标题 + 网格）是淡出的，不是瞬间消失 */}
+            <AnimatePresence initial={false}>
             {view === 'cards' && bad.length > 0 && (
-              <section className="mb-5">
-                <h2 className="mb-2 flex items-baseline gap-2 text-sm font-semibold">
+              <m.section key="bad" {...FADE} className="mb-5">
+                <h2 className="mb-2 flex flex-wrap items-baseline gap-x-2 text-sm font-semibold">
                   需要看一眼
-                  <span className="text-2xs font-normal text-muted-fg">
-                    {bad.length} 个<span className="hidden sm:inline"> · 错误率 ≥ 1%，或 P95 比{cmpShort}高 1.5 倍以上（两边都至少 300 次请求才比）</span>
-                  </span>
+                  {/* 判定口径有三条，写全了是一行半的小字。标题只留一句人话，口径收进气泡 */}
+                  <Hint text={`错误率 ≥ 1%，或服务 P95 比${cmpShort}高 1.5 倍以上（两个窗口都至少 300 次请求才比），或某一个接口 P95 翻倍、多耗的时间够长`}>
+                    <span className="text-2xs font-normal text-muted-fg">
+                      {bad.length} 个<span className="hidden sm:inline"> · 错误率、服务延迟，或单个接口明显变慢</span>
+                    </span>
+                  </Hint>
+                  <AnimatePresence initial={false}>
+                    {opsPending && (
+                      <m.span key="ops-pending" {...FADE} className="text-2xs font-normal text-muted-fg">
+                        · 接口明细还在查，可能还会多
+                      </m.span>
+                    )}
+                  </AnimatePresence>
                 </h2>
                 <div className={cn('grid gap-3 sm:grid-cols-2 xl:grid-cols-3', q.isFetching && 'opacity-70')}>
-                  {bad.map(({ s, health }) => (
+                  {/* 接口明细晚一步回来，卡是一张张冒出来的；搜索、切对比窗口又会让它们成片消失。
+                      AnimatePresence 管进出场。**这里不开 `layout`**：网格是二维的，一次冒出好几张卡时
+                      每张都从旧格子 FLIP 到新格子，第二行会横着穿插、互相压在一起（实测很难看）。
+                      一维的列表（下面的表格行、错误分组、变化榜）才适合 layout，那是纯上下挪。
+
+                      动效挂在外面这层 div 上、而不是卡自己身上，是踩出来的：AnimatePresence 的直接
+                      子节点如果是 `memo` 过的组件（BigCard 就是），列表每重渲染一次——搜索框敲一个
+                      字、换一次排序——留在原地的卡都会把入场动画重放一遍（实测 opacity 被写回 0 再
+                      涨回 1）。把 m.div 摆成直接子节点就不会。卡自己保持普通 Link，加 h-full 撑满
+                      这层包装，网格的等高才不变 */}
+                  <AnimatePresence initial={false}>
+                  {bad.map(({ s, health, hot }) => (
+                    <m.div key={s.service} {...RISE}>
                     <BigCard
-                      key={s.service}
                       s={s}
                       health={health}
+                      hot={hot}
                       win={win}
                       compare={compare}
                       events={eventsByService.get(s.service) ?? NO_EVENTS}
@@ -453,13 +502,15 @@ export function ServicesPage() {
                       logDim={logDim}
                       hasMetrics={hasMetrics}
                     />
+                    </m.div>
                   ))}
+                  </AnimatePresence>
                 </div>
-              </section>
+              </m.section>
             )}
 
             {view === 'cards' && fine.length > 0 && (
-              <section>
+              <m.section key="fine" {...FADE}>
                 {bad.length > 0 && (
                   <h2 className="mb-2 flex items-baseline gap-2 text-sm font-semibold">
                     正常 <span className="text-2xs font-normal text-muted-fg">{fine.length} 个</span>
@@ -478,8 +529,9 @@ export function ServicesPage() {
                   )}
                   <FineList items={fine} win={win} compare={compare} eventsByService={eventsByService} logDim={logDim} hasMetrics={hasMetrics} mobile={isMobile} />
                 </Card>
-              </section>
+              </m.section>
             )}
+            </AnimatePresence>
 
             {view === 'table' && tableRows.length > 0 && (
               <Card className="overflow-hidden">
@@ -500,11 +552,13 @@ export function ServicesPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {tableRows.map((s) => (
-                      <tr key={s.service} className="row-hover cursor-pointer border-b border-border/60 last:border-b-0" onClick={() => navigate(serviceHref(s.service, win, compare))}>
+                    {/* 表格没有虚拟化，可以整行挪：换排序列、搜服务的时候行是滑过去的，不是跳过去的 */}
+                    <AnimatePresence initial={false}>
+                    {tableRows.map(({ s, health }) => (
+                      <m.tr key={s.service} layout="position" {...FADE} className="row-hover cursor-pointer border-b border-border/60 last:border-b-0" onClick={() => navigate(serviceHref(s.service, win, compare))}>
                         <td className="truncate px-4 py-2.5 font-medium" title={s.service}>
                           <span className="mr-2 inline-block align-middle">
-                            <HealthDot {...serviceHealth(s)} />
+                            <HealthDot {...health} />
                           </span>
                           {/* 整行点哪儿都能进去是给鼠标的方便；键盘和读屏靠这个真链接，
                               不然首页这张表根本走不进服务详情 */}
@@ -526,8 +580,9 @@ export function ServicesPage() {
                         <td className="px-4 py-2.5 text-right tabular-nums">{formatDurationMs(s.p95_ms)}</td>
                         <td className="px-4 py-2.5 text-right font-medium tabular-nums">{formatDurationMs(s.p99_ms)}</td>
                         <td className="px-4 py-2.5 text-right text-muted-fg tabular-nums">{formatDurationMs(s.max_ms)}</td>
-                      </tr>
+                      </m.tr>
                     ))}
+                    </AnimatePresence>
                   </tbody>
                 </table>
               </Card>
@@ -610,11 +665,11 @@ function Summary({ data, all, restarts, cmpShort }: { data: OverviewResponse; al
  * 里面的趋势图全部重新渲染一遍。前提是传进来的 props 引用稳定——`win` 在上面 useMemo 过，
  * 空数组用的是 NO_EVENTS / NO_OPS 这两个常量。
  */
-const BigCard = memo(function BigCard({ s, health, win, compare, events, topError, ops, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; win: Window; compare: Compare; events: MetricEvent[]; topError?: ErrorGroup; ops: OperationStat[]; logDim: string; hasMetrics: boolean }) {
+const BigCard = memo(function BigCard({ s, health, hot, win, compare, events, topError, ops, logDim, hasMetrics }: { s: ServiceStat; health: { level: Health; reasons: string[] }; hot: Mover | null; win: Window; compare: Compare; events: MetricEvent[]; topError?: ErrorGroup; ops: OperationStat[]; logDim: string; hasMetrics: boolean }) {
   const latencyOk = meaningfulLatency(s.p95_ms)
   const isMobile = useIsMobile()
   return (
-    <Link to={serviceHref(s.service, win, compare)} className={cn('group row-hover flex flex-col rounded-lg border bg-card p-3.5', health.level === 'bad' ? 'border-danger/50' : 'border-warn/50')}>
+    <Link to={serviceHref(s.service, win, compare)} className={cn('group row-hover flex h-full flex-col rounded-lg border bg-card p-3.5', health.level === 'bad' ? 'border-danger/50' : 'border-warn/50')}>
       <div className="flex items-center gap-2">
         <HealthDot level={health.level} reasons={health.reasons} />
         <Hint text={s.service}>
@@ -631,7 +686,7 @@ const BigCard = memo(function BigCard({ s, health, win, compare, events, topErro
           {health.reasons.join('；')}
         </div>
       </Hint>
-      <Contributor ops={ops} />
+      <Contributor ops={ops} hot={hot} />
       {topError && <TopError g={topError} win={win} />}
       {/* 原因区可能是一行也可能两行（带主因），指标和火花图贴底对齐，同一行的卡片才对得齐 */}
       <div className="mt-auto grid grid-cols-3 gap-2 pt-3">
