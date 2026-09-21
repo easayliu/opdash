@@ -7,6 +7,7 @@
  * 只切不预取的话第一次悬停要等网络，所以配 [`prefetchBaseUi`] 在首屏画完之后的空闲时段捎带
  * 加载：既不占首屏的关键路径，等人真去悬停 / 点击时又基本已经就位。
  */
+import { Dialog } from '@base-ui/react/dialog'
 import { Popover } from '@base-ui/react/popover'
 import { Tooltip } from '@base-ui/react/tooltip'
 import type { ReactElement, ReactNode, RefObject } from 'react'
@@ -113,5 +114,46 @@ export function PopoverPanel({
         </Popover.Positioner>
       </Popover.Portal>
     </Popover.Root>
+  )
+}
+
+/**
+ * 模态对话框 / 抽屉的壳：遮罩 + 浮层，焦点、滚动、Escape、点外面关全归 Base UI。
+ *
+ * 这四件事原来是自己写的（那个 `useModal`），而且有一条是空转的：它把滚动锁在
+ * `document.body` 上，但这个应用 body 不滚——外壳是 `h-dvh`，真正滚的是 `<main>`，
+ * 于是对话框开着背景照滚。手写的焦点陷阱也只认 Tab 键，管不了 `inert`、管不了开着之后
+ * 才插进来的可聚焦节点。
+ *
+ * `modal`（默认开）这一个属性就包含：焦点关在里面、背景不可点也不滚、Escape 关、关掉之后
+ * 焦点还回触发它的那个元素。
+ *
+ * 和 [`PopoverPanel`] 一样收在这个异步 chunk 里：对话框和抽屉都不是首屏内容。
+ */
+export function ModalPanel({
+  open,
+  onOpenChange,
+  className,
+  backdropClassName = 'fixed inset-0 z-40 bg-black/30',
+  labelledBy,
+  children,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  className?: string
+  backdropClassName?: string
+  /** 标题元素的 id：对话框的无障碍名字从它来 */
+  labelledBy?: string
+  children: ReactNode
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className={backdropClassName} />
+        <Dialog.Popup aria-labelledby={labelledBy} className={className}>
+          {children}
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }

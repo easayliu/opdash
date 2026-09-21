@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { KeyRoundIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { apiDelete, apiPost } from '@/api/client'
 import { useApiKeys } from '@/api/queries'
 import type { ApiKeyCreated, ApiKeyInfo, AuthMe } from '@/api/types'
-import { Badge, Button, CopyButton, Hint, Input, Select, Spinner } from '@/components/ui'
-import { useModal } from '@/lib/modal'
+import { Badge, Button, CopyButton, Hint, Input, ModalPanel, Select, Spinner } from '@/components/ui'
 
 /** 有效期的几档。上限来自后端的 `--api-key-ttl`，比上限长的档不显示 */
 const TTL_OPTIONS = [
@@ -66,17 +65,6 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
   const [error, setError] = useState<string | null>(null)
   const [created, setCreated] = useState<ApiKeyCreated | null>(null)
 
-  // 焦点关在对话框里、关掉还回去、背景不滚——见 useModal
-  const box = useModal<HTMLDivElement>()
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
-
   const refresh = () => qc.invalidateQueries({ queryKey: ['auth', 'keys'] })
 
   const submit = async (e: React.FormEvent) => {
@@ -118,14 +106,13 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
   const user = me.user
 
   return (
-    <>
-      <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} aria-hidden />
-      <div
-        ref={box}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="api-key-title"
-        tabIndex={-1}
+    // 焦点关在里面、背景不可点也不滚、Escape 关、关掉焦点还回「API key」那个按钮，
+    // 全归 Base UI 的 Dialog（见 ModalPanel）；面板在异步 chunk 里，点开才加载
+    <Suspense fallback={null}>
+      <ModalPanel
+        open
+        onOpenChange={(next) => !next && onClose()}
+        labelledBy="api-key-title"
         className="fixed inset-x-3 top-16 z-50 mx-auto flex max-h-[calc(100dvh-5rem)] max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[44rem] md:-translate-x-1/2"
       >
         <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3">
@@ -248,8 +235,8 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
             )}
           </section>
         </div>
-      </div>
-    </>
+      </ModalPanel>
+    </Suspense>
   )
 }
 

@@ -164,6 +164,7 @@ interface HintChildProps {
  */
 export const HintPopup = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.HintPopup })))
 export const PopoverPanel = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.PopoverPanel })))
+export const ModalPanel = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.ModalPanel })))
 
 export function prefetchBaseUi(): void {
   const load = () => void import('@/components/base-ui')

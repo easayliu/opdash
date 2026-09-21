@@ -164,15 +164,8 @@ export function LogsPage() {
   // 跟随：一条 SSE 长连接，服务端按游标推增量（见 src/api/tail.rs）
   const tail = useLogTail(baseParams, follow)
 
+  // Escape 关抽屉归 Dialog 管（见 ContextDrawer），这里不再自己监听全局键盘
   const [contextRow, setContextRow] = useState<LogRow | null>(null)
-  useEffect(() => {
-    if (!contextRow) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setContextRow(null)
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [contextRow])
 
   const highlight = useMemo(() => (filter.regex ? [] : positiveTerms(filter.q)), [filter.regex, filter.q])
   const rows = follow ? tail.rows : (search.data?.rows ?? [])
