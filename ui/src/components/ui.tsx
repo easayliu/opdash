@@ -26,6 +26,8 @@ import { cn, copyText } from '@/lib/utils'
 
 /** 下拉一次最多画多少行：服务 / 接口的候选能到几百，全画出来白费力气，让人接着敲 */
 const MAX_COMBO_ROWS = 200
+/** PageUp / PageDown 一次走几行 */
+const PAGE_ROWS = 10
 /** 菜单最宽多少 px（值可能很长，比触发按钮宽），也用来判断要不要往左展开 */
 const COMBO_MENU_W = 420
 
@@ -464,6 +466,7 @@ export function Combobox({
   const inline = variant === 'inline'
   const box = useRef<HTMLDivElement>(null)
   const listBox = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
   /**
    * 给读屏用的 id。焦点一直在搜索框里，高亮项只是 `cursor` 这个下标——不把它写成
    * `aria-activedescendant`，读屏就只知道「编辑框」，上下键按半天听不到任何动静。
@@ -485,6 +488,7 @@ export function Combobox({
   useEffect(() => {
     if (!open) return
     input.current?.focus()
+    // 点外面关：人已经把焦点送到别处了，别再抢回触发器
     const onClick = (e: MouseEvent) => {
       if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
     }
@@ -517,15 +521,41 @@ export function Combobox({
     setCursor(idx > 0 && idx < MAX_COMBO_ROWS ? idx : 0)
     setOpen(true)
   }
+  /**
+   * 关菜单时**必须**把焦点还给触发器。
+   *
+   * 焦点这会儿在菜单里的搜索框上，而菜单一关那个 input 就卸载了——焦点无处可去，掉回
+   * `<body>`。对键盘用户的实际后果是：选完一个服务之后再按 Tab，是从整页最顶上重新开始走，
+   * 而不是接着走筛选栏的下一个控件。
+   */
+  const close = (backToTrigger = true) => {
+    setOpen(false)
+    if (backToTrigger) triggerRef.current?.focus()
+  }
   const commit = (v: string) => {
     onChange(v)
-    setOpen(false)
+    close()
   }
+  /** 往下走 n 行（负数往上），到头绕回去 */
+  const move = (n: number) => setCursor((c) => (capped.length ? (((c + n) % capped.length) + capped.length) % capped.length : 0))
+  /**
+   * 键盘。除了上下和回车，APG 的 combobox 还要求 Home / End 跳首尾、PageUp / PageDown 翻一屏
+   * ——候选到几百个的时候（服务、pod、指标名），只有上下键意味着按住方向键滚半天。
+   */
   const onKey = (e: ReactKeyboardEvent) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
       if (!open) return openMenu()
-      setCursor((c) => (capped.length ? (c + (e.key === 'ArrowDown' ? 1 : capped.length - 1)) % capped.length : 0))
+      move(e.key === 'ArrowDown' ? 1 : -1)
+    } else if (e.key === 'PageDown' || e.key === 'PageUp') {
+      if (!open) return
+      e.preventDefault()
+      move(e.key === 'PageDown' ? PAGE_ROWS : -PAGE_ROWS)
+    } else if (e.key === 'Home' || e.key === 'End') {
+      // 搜索框里 Home / End 本来是移动光标的，只有菜单开着才抢过来当「跳到首尾」
+      if (!open || !capped.length) return
+      e.preventDefault()
+      setCursor(e.key === 'Home' ? 0 : capped.length - 1)
     } else if (e.key === 'Enter') {
       // 筛选栏都在 <form> 里，回车不能让它提交
       e.preventDefault()
@@ -533,18 +563,22 @@ export function Combobox({
       else if (capped[cursor]) commit(capped[cursor].value)
     } else if (e.key === 'Escape') {
       if (open) e.stopPropagation()
+      close(open)
+    } else if (e.key === 'Tab' && open) {
+      // Tab 走人就当选好了看完了：收起来，别留一个浮层挂在那儿
       setOpen(false)
     }
   }
 
   const triggerBtn = (
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         aria-label={title}
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={() => (open ? setOpen(false) : openMenu())}
+        onClick={() => (open ? close(false) : openMenu())}
         onKeyDown={onKey}
         className={cn(
           inline
@@ -612,27 +646,32 @@ export function Combobox({
               />
             </div>
           </div>
-          <div ref={listBox} id={listId} role="listbox" className="max-h-72 overflow-auto py-1">
+          <div ref={listBox} id={listId} role="listbox" aria-label={title ?? placeholder} className="max-h-72 overflow-auto py-1">
             {capped.map((o, i) => (
-              <button
+              /*
+               * 选项是 `div role="option"`，不是 `button role="option"`：ARIA in HTML 明说
+               * 别把 option 这类角色盖在 button 上——按钮的语义被覆盖掉，只剩一个「进不了
+               * tab 序列的按钮」。焦点全程留在搜索框里，高亮靠 `aria-activedescendant` 指过来，
+               * 所以选项自己不进 tab 序列（APG 的 combobox 就是这么规定的）。
+               */
+              // eslint-disable-next-line jsx-a11y/click-events-have-key-events
+              <div
                 key={o.value || '__all__'}
                 id={optId(i)}
-                type="button"
                 role="option"
                 aria-selected={o.value === value}
-                // 焦点留在搜索框里，选项不进 tab 序列——上下键走的是 activedescendant
                 tabIndex={-1}
                 onMouseEnter={() => setCursor(i)}
                 onClick={() => commit(o.value)}
                 className={cn(
-                  'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs',
+                  'flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-xs',
                   i === cursor && 'bg-accent-soft',
                   o.value === value && 'font-semibold text-accent',
                 )}
               >
                 <span className={cn('min-w-0 flex-1 truncate', mono && o.value && 'mono')}>{o.label ?? o.value ?? ''}</span>
                 {o.note && <span className="shrink-0 text-2xs text-muted-fg">{o.note}</span>}
-              </button>
+              </div>
             ))}
             {capped.length === 0 && <div className="px-3 py-6 text-center text-xs text-muted-fg">{loading ? '加载中…' : emptyText}</div>}
           </div>
