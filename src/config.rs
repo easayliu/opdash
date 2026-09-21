@@ -149,6 +149,11 @@ pub struct Config {
     /// 多副本要共享同一个文件
     #[arg(long, env = "OPDASH_API_KEY_FILE", default_value = "api-keys.json")]
     pub api_key_file: std::path::PathBuf,
+
+    /// 用户收藏的查询存在哪个文件（按用户区分；没开认证就是大家共用一份）。
+    /// 和 API key 文件一样要挂成卷、多副本共享同一个
+    #[arg(long, env = "OPDASH_SAVED_QUERY_FILE", default_value = "saved-queries.json")]
+    pub saved_query_file: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]

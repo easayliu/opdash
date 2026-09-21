@@ -37,7 +37,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/opdash /usr/local/bin/opdash
-# 用户生成的 API key 文件（只存哈希）默认落在工作目录：把它挂成卷，重启不丢
+# 用户生成的 API key 文件（只存哈希）和收藏的查询默认落在工作目录：把它挂成卷，重启不丢
 WORKDIR /var/lib/opdash
 VOLUME /var/lib/opdash
 EXPOSE 4880

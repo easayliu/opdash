@@ -325,9 +325,13 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
         N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let key_file = key_file.to_string_lossy().into_owned();
+    let saved_file = key_file.replace("-keys-", "-saved-");
     let mut args = vec!["opdash", "--clickhouse-url", endpoint];
     if !extra_args.contains(&"--api-key-file") {
         args.extend_from_slice(&["--api-key-file", &key_file]);
+    }
+    if !extra_args.contains(&"--saved-query-file") {
+        args.extend_from_slice(&["--saved-query-file", &saved_file]);
     }
     args.extend_from_slice(extra_args);
     let config = Config::parse_from(args);
@@ -349,7 +353,10 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
         &config.metric_table,
     ));
     let auth = opdash::auth::Auth::from_config(&config).expect("打开 API key 文件");
-    let state = AppState::new(config, client, schema);
+    let saved = Arc::new(
+        opdash::saved::SavedQueryStore::open(&config.saved_query_file).expect("打开收藏文件"),
+    );
+    let state = AppState::new(config, client, schema, saved);
     api::app(state, auth)
 }
 
@@ -426,6 +433,31 @@ pub async fn post_full(
         .collect();
     let body = response.into_body().collect().await.unwrap().to_bytes().to_vec();
     (status, headers, body)
+}
+
+/// 发一个 JSON 体的 PUT，拿回 (状态码, 响应体 JSON)。
+pub async fn put_json(
+    app: &axum::Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (u16, serde_json::Value) {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let mut req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let response =
+        app.clone().oneshot(req.body(Body::from(body.to_owned())).unwrap()).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
 }
 
 pub async fn delete_full(

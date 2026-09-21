@@ -34,6 +34,8 @@ macro_rules! e2e_or_skip {
 fn config(url: &str) -> Config {
     let user = std::env::var("OPDASH_E2E_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
     let password = std::env::var("OPDASH_E2E_CLICKHOUSE_PASSWORD").unwrap_or_default();
+    // 收藏文件放临时目录，别在仓库里留下 saved-queries.json
+    let saved = std::env::temp_dir().join(format!("opdash-e2e-saved-{}.json", std::process::id()));
     Config::parse_from([
         "opdash",
         "--clickhouse-url",
@@ -42,6 +44,8 @@ fn config(url: &str) -> Config {
         &user,
         "--clickhouse-password",
         &password,
+        "--saved-query-file",
+        &saved.to_string_lossy(),
     ])
 }
 
@@ -65,7 +69,10 @@ async fn app(url: &str) -> (axum::Router, Client) {
         &config.metric_table,
     ));
     schema.refresh().await.expect("读表结构");
-    let state = AppState::new(config, client.clone(), schema);
+    let saved = Arc::new(
+        opdash::saved::SavedQueryStore::open(&config.saved_query_file).expect("打开收藏文件"),
+    );
+    let state = AppState::new(config, client.clone(), schema, saved);
     (api::app(state, opdash::auth::Auth::disabled()), client)
 }
 

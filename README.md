@@ -154,8 +154,30 @@ exemplar），所以返回目标不能写死。跳过去时用 react-router 的 
 是从什么时候开始的。按 trace id / span id 查日志则**不带**时间范围，理由见下面「查询是怎么写的」。
 
 顶栏：时间范围（相对 / 绝对）、直达框（粘一个 trace id 直接开链路，16 位 hex 当 span id，其它当关键字搜日志）、
-深浅色。**所有筛选条件都在 URL 里**，链接复制给同事就是同一个视图；相对范围（`range=1h`）打开时按当时的
-时间算，绝对范围（`from=&to=`）永远是那一段。
+书签（收藏当前查询，见下面「收藏查询」）、深浅色。**所有筛选条件都在 URL 里**，链接复制给同事就是同一个视图；
+相对范围（`range=1h`）打开时按当时的时间算，绝对范围（`from=&to=`）永远是那一段。
+
+### 收藏查询
+
+常用的那几条——「order 服务最近 24 小时的 ERROR」「payment 最慢的入口链路」——设好条件之后点顶栏的书签
+图标收藏，起个名字（默认按条件拼一句），下次在任何一页打开书签点一下就到。能收藏的是日志 / 链路 / 错误 /
+指标 / 服务总览 / 服务详情这些**列表和看板页**；链路详情是一条具体的 trace，30 天后就没了，不算查询。
+
+收藏的就是页面地址（路径 + 查询串）：页面状态本来全在 URL 里，不用给每种筛选另写一套序列化，新加一个筛选
+参数也自动能收藏。存的时候去掉**这一次**的状态——翻页位置和绝对时间窗（`from` / `to`）；相对范围（`range=24h`）
+留着，它是查询的一部分。打开一条没带范围的收藏，会补上这个标签页正在用的时间范围。
+
+**按账号区分**：收藏归在登录账号名下（OIDC 的 `preferred_username` / Basic 的用户名，和 API key 同一套），
+列表只列本人的，换台机器登录还在；拿本人的 API key 也能读写（key 代表这个人）。没开认证的部署没有「用户」，
+所有人共用一份。同一个人同一个地址只存一条（再收藏是 409），每人最多 200 条。存在 `--saved-query-file`
+（一个几 KB 的 JSON），为什么是文件不是 ClickHouse、多副本怎么办和 API key 文件一样，见下面「API key」。
+
+```text
+GET    /api/saved        我的收藏，新的在前
+POST   /api/saved        {"name": "订单超时", "path": "/logs", "query": "q=timeout&level=ERROR"}；name 可省
+PUT    /api/saved/{id}   改名 {"name"}，或换地址 {"path", "query"} 一起给
+DELETE /api/saved/{id}   删掉；别人的和不存在的一样是 404
+```
 
 按 trace id / span id 查日志时**不带时间范围**：两张表的 `trace_id` 都有 bloom filter，点查不需要时间条件，
 而 3 小时前的 trace id 在「最近 15 分钟」下本来就查不到。
@@ -213,6 +235,7 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--session-secret` | `OPDASH_SESSION_SECRET` | 随机 | 会话 cookie 的签名密钥。不配则每次启动随机生成（重启后要重新登录）；多副本必须配同一个 |
 | `--api-key-file` | `OPDASH_API_KEY_FILE` | `api-keys.json` | 用户自己生成的 API key（给 MCP / 脚本用）存在哪个文件，只存哈希。**容器里把所在目录挂成卷**（镜像的工作目录是 `/var/lib/opdash`），不然重启就没了；多副本共享同一个文件 |
 | `--api-key-ttl` | `OPDASH_API_KEY_TTL` | `90d` | API key 最长有效多久，生成时可以选更短的 |
+| `--saved-query-file` | `OPDASH_SAVED_QUERY_FILE` | `saved-queries.json` | 用户收藏的查询存在哪个文件（按账号区分），和 API key 文件一样挂成卷、多副本共享，见上面「收藏查询」 |
 
 `RUST_LOG=opdash=debug` 能看到每条 SQL 和绑定的参数。
 
@@ -660,29 +683,6 @@ MCP 的 `search_logs` 同样默认 `count=0`（模型要总数用 `log_histogram
      没被截断、窗口又已经探到头时不追到「不限时间」那一档：窗口里的 span 是全的，为一个抄错的 id
      扫全部分区不值。同样的定位也给 `/api/traces/{id}/spans/{span_id}`——不带主键前缀提示时它原来
      是定位整条 trace 再从里面挑，超上限的 trace 上会挑不着。
-
-  整页实测（线上那条 trace，`at` + `span` 都带着）：详情 1.5 s + 关联日志 0.40 s + span 属性 0.81 s
-  ≈ 3.0 s；改之前关联日志一趟就 1.42 s / 1.6 GB，而且那个 span 根本选不中。
-* 日志检索只取**显示得了的列**：字符串 / 数字 / 时间列，也就是 `/api/meta` 里给前端的那些维度。
-  线上的 `app_log` 物理上带着整套 span 列（`resource_attributes JSON`、`events.attributes Array(JSON)`
-  ……，logpipe 不写，全是默认值），照单全收只是白读白传：一小时窗口取 200 行 0.129 GB → 0.098 GB。
-* 属性过滤写成子列标识符 `` span_attributes.`http.route` ``：只读那一个子列（线上 10 分钟数据 12 MB、
-  40 ms）。`getSubcolumn(col, {path:String})` 虽然能把路径当参数，但 MergeTree 上会把整个 JSON 列读出来
-  （同一查询 5.9 GB、5 秒）。路径进 SQL 前按标识符规则校验（不含反引号 / 反斜杠 / 控制字符）。
-* **指标：累积量的速率是查询时相减出来的。** metricpipe 按 OTLP 原样存，counter 是进程启动以来的累计
-  值（`temporality = 'Cumulative'`）——当初选择不在采集端转 delta，是因为多副本路由下很难做对。所以
-  `agg=rate` / `increase` 的 SQL 是：桶内取最后一个累计值 → `lagInFrame` 拿上一个桶的 → 相减。
-  `cur < prev` 当成进程重启（计数器归零），按 Prometheus 的做法把当前值整个算成增量。`Delta` 的桶内
-  求和就完事，两种 temporality 在同一条 SQL 里用 `if(temp = 'Cumulative', ...)` 分开，不用先查一次表
-  才知道是哪种。速率除的是**两个点的真实间隔**而不是桶宽：上报周期 60s、步长 30s 时除桶宽会把速率
-  砍一半。
-* **相减必须按时间线分，而时间线包括 resource 属性。** 同一个服务的两个 pod 报的是两条独立的计数器，
-  混在一起相减会得到一串负数（然后被当成重启）。表上没有 series_id 列，只能现算
-  `cityHash64(service_name, scope_name, toString(resource_attributes), toString(attributes))`，代价是把两个
-  JSON 属性列整列读出来。查询已经锁死一个 `metric_name`，读的行数有限，认了；只做 `avg` / `last` 这类
-  不用相减的聚合时不算这一步。
-* 直方图分位数：把各时间线的 `bucket_counts` **先按时间线相减、再逐元素相加**（`sumForEach`），
-  最后在服务端从桶计数和 `explicit_bounds` 插值。分位数不能对多条时间线取平均——那是把 p95 又平均了
   4. **没带 `at` 时锚在「现在」往回探**（2026-09-20 加）：原来没有 `at` 就没有中心点，直接发不限时间
      那一档。线上近 24 小时走过兜底的 11 条 trace 里有 8 条**一趟带窗口的查询都没发过**（也就是根本
      没带 `at`），正好是最慢的那几条——86.9 s / 36.7 s / 28.8 s / 20.0 s / 19.6 s，它们一家吃掉这个
@@ -710,6 +710,29 @@ MCP 的 `search_logs` 同样默认 `count=0`（模型要总数用 `log_histogram
      mutation「重写整个 part」，实测只写索引文件、其余列走硬链接）。新建表要一步到位的话，一个
      `bloom_filter(0.000025)` 跟这两个叠加等价、占用也一样（bit 数正比于 `-ln(p)`，`0.025 × 0.001`
      和 `0.000025` 的账是一样的）。
+
+  整页实测（线上那条 trace，`at` + `span` 都带着）：详情 1.5 s + 关联日志 0.40 s + span 属性 0.81 s
+  ≈ 3.0 s；改之前关联日志一趟就 1.42 s / 1.6 GB，而且那个 span 根本选不中。
+* 日志检索只取**显示得了的列**：字符串 / 数字 / 时间列，也就是 `/api/meta` 里给前端的那些维度。
+  线上的 `app_log` 物理上带着整套 span 列（`resource_attributes JSON`、`events.attributes Array(JSON)`
+  ……，logpipe 不写，全是默认值），照单全收只是白读白传：一小时窗口取 200 行 0.129 GB → 0.098 GB。
+* 属性过滤写成子列标识符 `` span_attributes.`http.route` ``：只读那一个子列（线上 10 分钟数据 12 MB、
+  40 ms）。`getSubcolumn(col, {path:String})` 虽然能把路径当参数，但 MergeTree 上会把整个 JSON 列读出来
+  （同一查询 5.9 GB、5 秒）。路径进 SQL 前按标识符规则校验（不含反引号 / 反斜杠 / 控制字符）。
+* **指标：累积量的速率是查询时相减出来的。** metricpipe 按 OTLP 原样存，counter 是进程启动以来的累计
+  值（`temporality = 'Cumulative'`）——当初选择不在采集端转 delta，是因为多副本路由下很难做对。所以
+  `agg=rate` / `increase` 的 SQL 是：桶内取最后一个累计值 → `lagInFrame` 拿上一个桶的 → 相减。
+  `cur < prev` 当成进程重启（计数器归零），按 Prometheus 的做法把当前值整个算成增量。`Delta` 的桶内
+  求和就完事，两种 temporality 在同一条 SQL 里用 `if(temp = 'Cumulative', ...)` 分开，不用先查一次表
+  才知道是哪种。速率除的是**两个点的真实间隔**而不是桶宽：上报周期 60s、步长 30s 时除桶宽会把速率
+  砍一半。
+* **相减必须按时间线分，而时间线包括 resource 属性。** 同一个服务的两个 pod 报的是两条独立的计数器，
+  混在一起相减会得到一串负数（然后被当成重启）。表上没有 series_id 列，只能现算
+  `cityHash64(service_name, scope_name, toString(resource_attributes), toString(attributes))`，代价是把两个
+  JSON 属性列整列读出来。查询已经锁死一个 `metric_name`，读的行数有限，认了；只做 `avg` / `last` 这类
+  不用相减的聚合时不算这一步。
+* 直方图分位数：把各时间线的 `bucket_counts` **先按时间线相减、再逐元素相加**（`sumForEach`），
+  最后在服务端从桶计数和 `explicit_bounds` 插值。分位数不能对多条时间线取平均——那是把 p95 又平均了
   一次，没有意义。桶边界不一样的时间线合不到一起，`explicit_bounds` 因此进了分组键：真出现两套边界
   就是两条线，而不是悄悄算错。
 * **查之前先问一句这个指标是什么类型。** 五种类型共用一张表、用不上的列留默认值，所以直方图行的
@@ -828,6 +851,7 @@ OPDASH_E2E_CLICKHOUSE_URL=http://host:8123 OPDASH_E2E_CLICKHOUSE_USER=x OPDASH_E
 GET /api/meta                 表结构、维度列、上限
 GET /api/health               ping ClickHouse + 表结构状态，不认证
 GET /api/auth/*               登录相关，见上面「登录」，不认证
+    /api/saved                收藏的查询（GET / POST / PUT / DELETE），按账号区分，见上面「收藏查询」
 GET /api/logs/search          ?from&to&q&regex&level&logger&thread&host&trace_id&span_id&<维度列>&order&limit&offset
 GET /api/logs/histogram       同 search 的筛选参数
 GET /api/logs/facets          ?field=level|logger|host|<维度列>&limit

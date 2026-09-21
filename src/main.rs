@@ -96,7 +96,12 @@ async fn run() -> anyhow::Result<()> {
             tracing::info!("没配 --session-secret，会话密钥随机生成：重启后需要重新登录");
         }
     }
-    let state = AppState::new(config, client, schema);
+    let saved = Arc::new(
+        opdash::saved::SavedQueryStore::open(&config.saved_query_file)
+            .map_err(anyhow::Error::msg)?,
+    );
+    tracing::info!(file = %saved.path().display(), "收藏文件已打开（容器里请把它所在目录挂成卷）");
+    let state = AppState::new(config, client, schema, saved);
     let app = api::app(state, auth.clone());
 
     let listener =

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
 import { TimeRangePicker } from '@/components/TimeRangePicker'
+import { SavedQueries } from '@/components/SavedQueries'
 import { ThemeSwitcher } from '@/components/ThemeSwitcher'
 import { UserMenu } from '@/components/UserMenu'
 import { Input } from '@/components/ui'
@@ -135,6 +136,7 @@ export default function App() {
           </nav>
           <div className="ml-auto flex min-w-0 items-center gap-1 py-2 md:gap-2 md:py-2.5">
             <QuickJump />
+            <SavedQueries />
             <TimeRangePicker />
             <ThemeSwitcher />
             <UserMenu />

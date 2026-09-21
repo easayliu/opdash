@@ -21,6 +21,7 @@ import type {
   SpanAttrsResponse,
   OperationsResponse,
   OverviewResponse,
+  SavedQueryList,
   Stats,
   TimeseriesResponse,
   TraceDetailResponse,
@@ -43,6 +44,16 @@ export function useApiKeys(enabled: boolean) {
     queryKey: ['auth', 'keys'],
     queryFn: () => apiGet<{ keys: ApiKeyInfo[] }>('/auth/keys'),
     enabled,
+    retry: false,
+  })
+}
+
+/** 我的收藏。顶栏的书签图标要靠它判断「当前视图收藏过没有」，所以一直开着 */
+export function useSavedQueries() {
+  return useQuery({
+    queryKey: ['saved'],
+    queryFn: () => apiGet<SavedQueryList>('/saved'),
+    staleTime: 5 * 60_000,
     retry: false,
   })
 }

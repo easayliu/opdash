@@ -66,11 +66,15 @@ export function apiPost<T>(path: string, body: unknown): Promise<T> {
   return apiSend<T>('POST', path, body)
 }
 
+export function apiPut<T>(path: string, body: unknown): Promise<T> {
+  return apiSend<T>('PUT', path, body)
+}
+
 export function apiDelete(path: string): Promise<void> {
   return apiSend<void>('DELETE', path)
 }
 
-async function apiSend<T>(method: 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
+async function apiSend<T>(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     headers: { accept: 'application/json', ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },

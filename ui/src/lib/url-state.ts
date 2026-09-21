@@ -96,9 +96,9 @@ function subscribeAnchor(notify: () => void): () => void {
 
 const readAnchor = () => anchorMs
 
-/** 刷新要重查的是数据，不包括表结构和登录态。 */
+/** 刷新要重查的是数据，不包括表结构、登录态和收藏列表。 */
 function isDataQuery(key: readonly unknown[]): boolean {
-  return key[0] !== 'meta' && key[0] !== 'auth'
+  return key[0] !== 'meta' && key[0] !== 'auth' && key[0] !== 'saved'
 }
 
 /** 时间范围（读自 URL）。相对范围按共享锚点解析，见 [`advanceAnchor`]。 */

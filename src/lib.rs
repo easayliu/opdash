@@ -17,5 +17,6 @@ pub mod config;
 pub mod error;
 pub mod mcp;
 pub mod query;
+pub mod saved;
 pub mod schema;
 pub mod ui;

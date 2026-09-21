@@ -53,6 +53,24 @@ export interface ApiKeyCreated extends ApiKeyInfo {
   mcp_url: string
 }
 
+/** GET /api/saved 里的一条收藏：一个页面地址（路径 + 查询串）加名字，全是本人的。 */
+export interface SavedQuery {
+  id: string
+  name: string
+  /** `/logs` / `/traces` / `/services/order` 这样 */
+  path: string
+  /** 不带开头的 `?`，可以为空 */
+  query: string
+  created_at: string
+  updated_at: string
+}
+
+export interface SavedQueryList {
+  queries: SavedQuery[]
+  /** 每个人最多多少条 */
+  max: number
+}
+
 export interface Meta {
   version: string
   database: string

@@ -34,3 +34,7 @@ deploy/
 
 # 给 Claude Code 看的约定，只留本地
 CLAUDE.md
+
+# 本地跑 cargo run 时落在仓库目录的运行时文件（容器里在 /var/lib/opdash）
+api-keys.json
+saved-queries.json

@@ -286,9 +286,11 @@ impl Auth {
     }
 }
 
-/// 中间件：没认出人就拒。
-pub async fn require(State(auth): State<Auth>, req: Request, next: Next) -> Response {
-    if auth.identify(req.headers()).is_some() {
+/// 中间件：没认出人就拒。认出来的身份放进请求的 extensions，后面的处理器
+/// （收藏这类要按人归属的）直接取，不用再解一遍 cookie / 头。
+pub async fn require(State(auth): State<Auth>, mut req: Request, next: Next) -> Response {
+    if let Some(who) = auth.identify(req.headers()) {
+        req.extensions_mut().insert(who);
         return next.run(req).await;
     }
     if auth.oidc().is_some() && is_navigation(&req) {

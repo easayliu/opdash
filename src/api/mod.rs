@@ -5,6 +5,7 @@ pub mod logs;
 pub mod meta;
 pub mod metrics;
 pub mod params;
+pub mod saved;
 pub mod services;
 pub mod tail;
 pub mod traces;
@@ -18,6 +19,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{self as authn, Auth};
 use crate::clickhouse::Client;
 use crate::config::Config;
+use crate::saved::SavedQueryStore;
 use crate::schema::SchemaCache;
 use crate::ui;
 
@@ -31,10 +33,17 @@ pub struct AppState {
     pub tails: Arc<Semaphore>,
     /// 指标名 → 这个指标是什么类型，见 [`metrics::metric_kind`]。
     pub metric_kinds: Arc<MetricKinds>,
+    /// 用户收藏的查询（`--saved-query-file`），见 [`crate::saved`]。
+    pub saved: Arc<SavedQueryStore>,
 }
 
 impl AppState {
-    pub fn new(config: Config, client: Client, schema: Arc<SchemaCache>) -> Self {
+    pub fn new(
+        config: Config,
+        client: Client,
+        schema: Arc<SchemaCache>,
+        saved: Arc<SavedQueryStore>,
+    ) -> Self {
         let tails = Arc::new(Semaphore::new(config.max_tail_streams.max(1)));
         Self {
             config: Arc::new(config),
@@ -42,6 +51,7 @@ impl AppState {
             schema,
             tails,
             metric_kinds: Arc::new(MetricKinds::default()),
+            saved,
         }
     }
 
@@ -98,6 +108,7 @@ pub fn api_router(state: AppState) -> Router {
         .merge(traces::routes())
         .merge(metrics::routes())
         .merge(services::routes())
+        .merge(saved::routes())
         .with_state(state)
 }
 
