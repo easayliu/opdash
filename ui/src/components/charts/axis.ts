@@ -44,3 +44,25 @@ export function timeTicks(fromMs: number, toMs: number): number[] {
   for (let t = first; t < toMs; t += step) ticks.push(t)
   return ticks
 }
+
+/**
+ * 横轴的定义域：`[fromMs, toMs]` 是**不够**的，它盖不住要画的那些桶。
+ *
+ * 后端按固定网格分桶（原点是本地零点），首尾两个桶因此会越界：
+ * `first_index = floor((from - origin) / width)`，所以第一个桶最早能比 `from` 早整整一格；
+ * 末桶同理会越过 `to`。把桶按 `[from, to]` 去定位，第一根柱子就画到了坐标轴左边的刻度栏里，
+ * 正好压在「0」那个标签上——线上截图里就是这么糊的。
+ *
+ * 所以定义域取「请求的范围」和「实际拿到的桶」的并集。直方图的横轴本来就该是整格的。
+ */
+export function bucketDomain(fromMs: number, toMs: number, buckets: { t_ms: number }[], widthMs: number): { x0: number; x1: number } {
+  const w = Math.max(1, widthMs)
+  let x0 = fromMs
+  let x1 = toMs
+  // 扫一遍取最早 / 最晚，不假设入参有序：热力图的格子是按「时间桶 × 耗时档」聚合出来的，顺序不保证
+  for (const b of buckets) {
+    if (b.t_ms < x0) x0 = b.t_ms
+    if (b.t_ms + w > x1) x1 = b.t_ms + w
+  }
+  return { x0, x1 }
+}

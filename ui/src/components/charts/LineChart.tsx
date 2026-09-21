@@ -2,7 +2,7 @@ import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
 import { MAX_SPOKEN_SERIES, andMore, chartSummary } from './describe'
 import { useWidth } from './useWidth'
-import { niceMax, niceTicks, timeTicks } from './axis'
+import { bucketDomain, niceMax, niceTicks, timeTicks } from './axis'
 import { formatTick, formatTs } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
@@ -68,6 +68,8 @@ interface Props {
 // 右边留够半个刻度标签的宽度：最后一格是 `23:10` 这种居中标签，只留 8px 会被切掉半个字
 const M = { left: 52, right: 24, top: 8, bottom: 22 }
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
+
 /** 多条折线 + 十字线读数（2px 线、所有系列一起读）。 */
 export function LineChart({
   fromMs,
@@ -95,13 +97,16 @@ export function LineChart({
   const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
   const W = Math.max(0, width - M.left - M.right)
   const H = height - M.top - M.bottom
-  const span = Math.max(1, toMs - fromMs)
-  const xOf = (t: number) => M.left + ((t - fromMs + widthMs / 2) / span) * W
-  const tOf = (x: number) => fromMs + ((x - M.left) / Math.max(1, W)) * span
+  // 横轴要盖住实际拿到的点，不能只按请求的范围算——首尾两个桶会越界（见 bucketDomain）。
+  // 点画在桶的中间，所以 xOf 里还要加半格
+  const { x0, x1 } = bucketDomain(fromMs, toMs, points, widthMs)
+  const span = Math.max(1, x1 - x0)
+  const xOf = (t: number) => M.left + ((t - x0 + widthMs / 2) / span) * W
+  const tOf = (x: number) => x0 + ((x - M.left) / Math.max(1, W)) * span
   const max = useMemo(() => Math.max(0, ...points.flatMap((p) => series.map((s) => p.values[s.key] ?? 0))), [points, series])
   const yMax = niceMax(max)
   const yOf = (v: number) => M.top + H - (yMax > 0 ? (v / yMax) * H : 0)
-  const ticks = useMemo(() => timeTicks(fromMs, toMs), [fromMs, toMs])
+  const ticks = useMemo(() => timeTicks(x0, x1), [x0, x1])
 
   /**
    * 读屏念的那句话：什么图、哪一段时间、每条线最新多少、最高多少（见 ./describe）。
@@ -304,9 +309,10 @@ export function LineChart({
           )}
           {brush && Math.abs(brush.x1 - brush.x0) > 2 && (
             <rect
-              x={Math.min(brush.x0, brush.x1)}
+              // 框在画布里：从刻度栏上起手拖的话，选框会盖住纵轴的数字
+              x={clamp(Math.min(brush.x0, brush.x1), M.left, M.left + W)}
               y={M.top}
-              width={Math.abs(brush.x1 - brush.x0)}
+              width={clamp(Math.max(brush.x0, brush.x1), M.left, M.left + W) - clamp(Math.min(brush.x0, brush.x1), M.left, M.left + W)}
               height={H}
               fill="var(--accent)"
               opacity={0.15}

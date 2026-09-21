@@ -2,7 +2,7 @@ import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
 import { chartSummary } from './describe'
 import { useWidth } from './useWidth'
-import { timeTicks } from './axis'
+import { bucketDomain, timeTicks } from './axis'
 import { formatDurationMs, formatNumber, formatTick, formatTs } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
@@ -40,6 +40,8 @@ interface Props {
 }
 
 const M = { left: 52, right: 8, top: 8, bottom: 22 }
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 /** 格子之间留的底色缝，让密集区域仍能数出桶 */
 const GAP = 1
 /** 至少画这么多个数量级，数据都挤在一档时图不至于只剩几条大横带 */
@@ -62,11 +64,13 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
 
   const W = Math.max(0, width - M.left - M.right)
   const H = height - M.top - M.bottom
-  const span = Math.max(1, toMs - fromMs)
   const bins = Math.max(1, binsPerDecade)
   const bucketMs = Math.max(1, widthMs)
-  const xOf = (t: number) => M.left + ((t - fromMs) / span) * W
-  const tOf = (x: number) => fromMs + ((x - M.left) / Math.max(1, W)) * span
+  // 横轴要盖住实际拿到的格子，不能只按请求的范围算——首尾两列会越界（见 bucketDomain）
+  const { x0, x1 } = bucketDomain(fromMs, toMs, cells, bucketMs)
+  const span = Math.max(1, x1 - x0)
+  const xOf = (t: number) => M.left + ((t - x0) / span) * W
+  const tOf = (x: number) => x0 + ((x - M.left) / Math.max(1, W)) * span
 
   // 纵轴取到整数量级，刻度落在 10 倍边界上；没数据时给个 0.1ms ~ 10s 的默认范围。
   // 桶的起点对齐到服务端的原点（本地零点），不一定对齐 fromMs，相位从任一格推出来。
@@ -171,7 +175,7 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
     setBrush(null)
   }
 
-  const ticks = useMemo(() => timeTicks(fromMs, toMs), [fromMs, toMs])
+  const ticks = useMemo(() => timeTicks(x0, x1), [x0, x1])
   // 每个数量级一条刻度；高度不够时隔档抽稀
   const decades: number[] = []
   for (let lvl = lvlLo; lvl <= lvlHi; lvl += bins) decades.push(lvl)
@@ -233,9 +237,10 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
           ))}
           {brush && Math.abs(brush.x1 - brush.x0) > 4 && (
             <rect
-              x={Math.min(brush.x0, brush.x1)}
+              // 框在画布里：从刻度栏上起手拖的话，选框会盖住纵轴的数字
+              x={clamp(Math.min(brush.x0, brush.x1), M.left, M.left + W)}
               y={M.top}
-              width={Math.abs(brush.x1 - brush.x0)}
+              width={clamp(Math.max(brush.x0, brush.x1), M.left, M.left + W) - clamp(Math.min(brush.x0, brush.x1), M.left, M.left + W)}
               height={H}
               fill="var(--accent)"
               fillOpacity={0.15}
