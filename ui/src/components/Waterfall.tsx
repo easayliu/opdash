@@ -6,7 +6,7 @@ import type { AttrValue, Span } from '@/api/types'
 import * as m from 'motion/react-m'
 import { Badge, Button, CopyButton, ErrorBox, Hint, Spinner, buttonClass, linkClass } from '@/components/ui'
 import type { ColorAssigner } from '@/lib/colors'
-import { FADE } from '@/lib/motion'
+import { FADE, scrollBehavior } from '@/lib/motion'
 import { formatDuration, formatTsMicro } from '@/lib/time'
 import { fillSqlParams, formatSql } from '@/lib/sql'
 import { useIsMobile } from '@/lib/media'
@@ -239,7 +239,7 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
     const visibleTop = box.scrollTop + HEADER_H
     const visibleBottom = box.scrollTop + box.clientHeight
     if (top >= visibleTop && top + ROW_H <= visibleBottom) return
-    box.scrollTo({ top: Math.max(0, top - (box.clientHeight - ROW_H) / 2), behavior: 'smooth' })
+    box.scrollTo({ top: Math.max(0, top - (box.clientHeight - ROW_H) / 2), behavior: scrollBehavior() })
   })
 
   const full = useMemo<TimeWindow>(() => ({ startUs: tree.startUs, endUs: tree.endUs }), [tree])

@@ -14,6 +14,7 @@ import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
 import { errorTitle } from '@/lib/errors'
 import { errorsHref, logsHref, msFactor, seriesContext, serviceHref, traceHref, tracesHref } from '@/lib/links'
 import { formatBytes, formatDuration, formatDurationMs, formatTs } from '@/lib/time'
+import { scrollBehavior } from '@/lib/motion'
 import { useInView } from '@/lib/in-view'
 import { useIsMobile } from '@/lib/media'
 import { splitList, useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
@@ -461,21 +462,36 @@ function SectionNav({ sections }: { sections: ReturnType<typeof resolveDashboard
     return () => io.disconnect()
   }, [sections])
   if (sections.length < 2) return <div className="h-3 md:h-4" />
+  const current = active ?? sections[0].key
   return (
-    <nav className="sticky top-0 z-10 -mx-3 mb-3 flex gap-1 overflow-x-auto border-b border-border bg-bg px-3 py-2 md:-mx-4 md:px-4">
+    <nav aria-label="看板分区" className="sticky top-0 z-10 -mx-3 mb-3 flex gap-1 overflow-x-auto border-b border-border bg-bg px-3 py-2 md:-mx-4 md:px-4">
       {sections.map((s) => (
-        <button
+        /*
+         * 页内目录就该是锚点链接，不是按钮：焦点会跟着跳过去（按钮版滚过去了，焦点还留在
+         * 目录上，接着按 Tab 又回到页首），地址栏留得下、右键复制得走。`aria-current` 说
+         * 现在停在哪一节——只靠那一小块蓝底，读屏是看不见的。
+         *
+         * 仍然自己接管滚动：默认跳转是硬跳，而且这条目录是 sticky 的，浏览器会把标题顶到
+         * 它下面藏起来。关了动效的人拿到瞬间到位（见 scrollBehavior）。
+         */
+        <a
           key={s.key}
-          type="button"
-          onClick={() => document.getElementById(`sec-${s.key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+          href={`#sec-${s.key}`}
+          aria-current={current === s.key ? true : undefined}
+          onClick={(e) => {
+            const el = document.getElementById(`sec-${s.key}`)
+            if (!el) return
+            e.preventDefault()
+            el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' })
+          }}
           className={cn(
-            'shrink-0 rounded-md px-2.5 py-1 text-xs text-muted-fg hover:bg-muted hover:text-fg',
-            (active ?? sections[0].key) === s.key && 'bg-accent-soft text-accent',
+            'shrink-0 rounded-md px-2.5 py-1 text-xs text-muted-fg hover:bg-muted hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60',
+            current === s.key && 'bg-accent-soft text-accent',
           )}
         >
           {s.title}
           <span className="ml-1 text-2xs opacity-70">{s.panels.length}</span>
-        </button>
+        </a>
       ))}
     </nav>
   )

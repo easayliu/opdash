@@ -62,3 +62,15 @@ export const DISCLOSE = {
   animate: { height: 'auto', opacity: 1 },
   exit: { height: 0, opacity: 0 },
 }
+
+/**
+ * 原生滚动要不要带过场。
+ *
+ * `MotionConfig reducedMotion="user"` 只管 motion 画的那些动效，管不到
+ * `scrollIntoView({ behavior: 'smooth' })`——那是浏览器自己的动画，CSS 的
+ * `@media (prefers-reduced-motion)` 也盖不住 JS 传进去的这个值。系统里关了动效的人
+ * （前庭功能敏感是常见原因）该拿到的是「瞬间到位」，所以统一问一次这个媒体查询。
+ */
+export function scrollBehavior(): ScrollBehavior {
+  return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+}

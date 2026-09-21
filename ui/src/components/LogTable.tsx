@@ -7,6 +7,7 @@ import { Badge, Button, Combobox, CopyButton, Hint, levelTone, linkClass, type C
 import { around, logsHref } from '@/lib/links'
 import { messageTruncated, rowKey, truncationNote, useRowKeys } from '@/lib/log-row'
 import { useIsMobile } from '@/lib/media'
+import { scrollBehavior } from '@/lib/motion'
 import { useFrom } from '@/lib/url-state'
 import { formatTs } from '@/lib/time'
 import { cn, scrollParent, splitFirstLine } from '@/lib/utils'
@@ -106,7 +107,7 @@ function useScrollToMarked(
   useEffect(() => {
     if (!selectedSpanId) return
     const idx = rows.findIndex((r) => r.span_id === selectedSpanId)
-    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: 'start', behavior: 'smooth' })
+    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: 'start', behavior: scrollBehavior() })
     // rows 换了（重新排序）也要跟着滚，virtualizer 本身稳定
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSpanId, rows])
