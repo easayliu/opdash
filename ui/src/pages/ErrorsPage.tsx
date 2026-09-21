@@ -6,7 +6,7 @@ import type { ErrorGroup } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
 import { AnimatePresence } from 'motion/react'
 import * as m from 'motion/react-m'
-import { Badge, Button, Card, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Input, Spinner, linkClass, type ComboOption } from '@/components/ui'
+import { Badge, Card, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Input, Spinner, buttonClass, linkClass, type ComboOption } from '@/components/ui'
 import { errorTitle, errorTitleFull, errorWhere, hasDetail, shortException } from '@/lib/errors'
 import { errorsHref, logsHref, tracesHref, traceHref, type Window } from '@/lib/links'
 import { DISCLOSE, FADE } from '@/lib/motion'
@@ -277,16 +277,14 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
         </div>
       )}
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from}>
-          <Button size="xs" variant="primary">
-            看最近这一条链路
-          </Button>
+        <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from} className={buttonClass({ size: 'xs', variant: 'primary' })}>
+          看最近这一条链路
         </Link>
-        <Link to={tracesHref({ service: g.service, spanName: g.span_name, errorOnly: true }, win)}>
-          <Button size="xs">这个接口的全部错误链路</Button>
+        <Link to={tracesHref({ service: g.service, spanName: g.span_name, errorOnly: true }, win)} className={buttonClass({ size: 'xs' })}>
+          这个接口的全部错误链路
         </Link>
-        <Link to={logsHref({ dim: logDim, service: g.service, levels: 'ERROR,WARN' }, win)}>
-          <Button size="xs">这个服务的错误日志</Button>
+        <Link to={logsHref({ dim: logDim, service: g.service, levels: 'ERROR,WARN' }, win)} className={buttonClass({ size: 'xs' })}>
+          这个服务的错误日志
         </Link>
         <span className="text-2xs text-muted-fg">
           {formatTs(g.first_ms)} 起，共 {formatNumber(g.count)} 次

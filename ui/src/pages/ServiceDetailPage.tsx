@@ -7,7 +7,7 @@ import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
 import { AnimatePresence } from 'motion/react'
 import * as motion from 'motion/react-m'
-import { Badge, Button, Card, EmptyState, ErrorBox, Hint, Select, Spinner } from '@/components/ui'
+import { Badge, Button, Card, EmptyState, ErrorBox, Hint, Select, Spinner, buttonClass } from '@/components/ui'
 import { Delta, ErrorRate } from '@/pages/ServicesPage'
 import { COMPARE, DEFAULT_COMPARE, compareShort, parseCompare, topMovers, type Mover } from '@/lib/compare'
 import { FADE } from '@/lib/motion'
@@ -161,24 +161,24 @@ export function ServiceDetailPage() {
               ))}
             </Select>
           </Hint>
-          <Link to={tracesHref({ service, spanName: op || undefined, kinds: 'Server,Consumer', sort: 'duration' }, win)}>
-            <Button size="sm">最慢的链路</Button>
+          <Link to={tracesHref({ service, spanName: op || undefined, kinds: 'Server,Consumer', sort: 'duration' }, win)} className={buttonClass({ size: 'sm' })}>
+            最慢的链路
           </Link>
           {/* 「错误分组」在「出错的链路」前面：先问是什么错，再决定要不要一条条看链路 */}
-          <Link to={errorsHref({ service, spanName: op || undefined }, win)}>
-            <Button size="sm">错误分组</Button>
+          <Link to={errorsHref({ service, spanName: op || undefined }, win)} className={buttonClass({ size: 'sm' })}>
+            错误分组
           </Link>
-          <Link to={tracesHref({ service, spanName: op || undefined, errorOnly: true }, win)}>
-            <Button size="sm">出错的链路</Button>
+          <Link to={tracesHref({ service, spanName: op || undefined, errorOnly: true }, win)} className={buttonClass({ size: 'sm' })}>
+            出错的链路
           </Link>
-          <Link to={logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win)}>
-            <Button size="sm">错误日志</Button>
+          <Link to={logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win)} className={buttonClass({ size: 'sm' })}>
+            错误日志
           </Link>
           {/* 指标表可能没有（没部署 metricpipe），有才给入口 */}
           {meta.data?.metrics && (
             <Hint text="JVM、连接池、Kafka 这些链路里看不到的" asChild>
-              <Link to={metricsHref(service, win)}>
-                <Button size="sm">指标看板</Button>
+              <Link to={metricsHref(service, win)} className={buttonClass({ size: 'sm' })}>
+                指标看板
               </Link>
             </Hint>
           )}

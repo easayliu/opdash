@@ -7,7 +7,7 @@ import type { MetricAgg, MetricField, MetricInfo, MetricQueryResponse } from '@/
 import { LineChart, type ChartEvent, type ChartMarker, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Hint, Input, Select, Spinner, linkClass } from '@/components/ui'
+import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Hint, Input, Select, Spinner, buttonClass, linkClass } from '@/components/ui'
 import { ColorAssigner, SERIES_SLOTS } from '@/lib/colors'
 import { coveredMetricNames, isErrorLabel, resolveDashboard, type ResolvedPanel } from '@/lib/dashboards'
 import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
@@ -431,8 +431,8 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
       </span>
       {links.map((l) => (
         <Hint key={l.label} text={l.title} asChild>
-          <Link to={l.to}>
-            <Button size="xs">{l.label}</Button>
+          <Link to={l.to} className={buttonClass({ size: 'xs' })}>
+            {l.label}
           </Link>
         </Hint>
       ))}

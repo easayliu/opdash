@@ -4,7 +4,7 @@ import { useMeta, useSpanAttrs, useTraceDetail, useTraceLogs } from '@/api/queri
 import type { LogRow, TraceDetailResponse } from '@/api/types'
 import { LEVEL_RANK, LogTable, sortLogRows, type ColFilter, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
+import { Badge, Button, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Spinner, buttonClass, linkClass } from '@/components/ui'
 import { AnimatePresence } from 'motion/react'
 import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
@@ -296,21 +296,22 @@ export function TraceDetailPage() {
           <div className="flex flex-wrap items-center gap-2">
             {meta.data?.metrics && (
               <Hint text={`${root.service} 在这前后半小时的指标`} asChild>
-                <Link to={metricsHref(root.service, around(tree.startUs / 1000))}>
-                  <Button size="xs">服务指标</Button>
+                <Link to={metricsHref(root.service, around(tree.startUs / 1000))} className={buttonClass({ size: 'xs' })}>
+                  服务指标
                 </Link>
               </Hint>
             )}
-            <Link to={serviceHref(root.service, around(tree.startUs / 1000))}>
-              <Button size="xs">服务概览</Button>
+            <Link to={serviceHref(root.service, around(tree.startUs / 1000))} className={buttonClass({ size: 'xs' })}>
+              服务概览
             </Link>
             {/* 时间窗按这条 trace 的实际跨度前后放宽：日志页按 id 查也要裁时间（见 logsHref），
                 不带窗口就会撞上它 1 小时的默认值 */}
             <Hint text="这条链路的全部日志" asChild>
               <Link
                 to={logsHref({ traceId }, { fromMs: tree.startUs / 1000 - WINDOW_AROUND_MS, toMs: tree.endUs / 1000 + WINDOW_AROUND_MS })}
+                className={buttonClass({ size: 'xs' })}
               >
-                <Button size="xs">全部日志</Button>
+                全部日志
               </Link>
             </Hint>
           </div>

@@ -6,7 +6,7 @@ import type { TraceSummary } from '@/api/types'
 import { Heatmap, type HeatCellRange } from '@/components/charts/Heatmap'
 import { StatsLine } from '@/components/StatsLine'
 import { TraceFilters, type TraceFilterState } from '@/components/TraceFilters'
-import { Badge, Button, CopyButton, EmptyState, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
+import { Badge, CopyButton, EmptyState, ErrorBox, Hint, Spinner, buttonClass, linkClass } from '@/components/ui'
 import { formatDuration, formatTsMicro, writeRange } from '@/lib/time'
 import { errorsHref, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { splitList, useFrom, useTimeRange, useUrlState } from '@/lib/url-state'
@@ -108,8 +108,8 @@ export function TracesPage() {
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 md:px-4">
           <span className="text-2xs text-muted-fg">{filter.service} 这段时间的</span>
           {meta.data?.metrics && (
-            <Link to={metricsHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })}>
-              <Button size="xs">指标看板</Button>
+            <Link to={metricsHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })} className={buttonClass({ size: 'xs' })}>
+              指标看板
             </Link>
           )}
           <Link
@@ -117,16 +117,17 @@ export function TracesPage() {
               { dim: meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container', service: filter.service, levels: 'ERROR,WARN' },
               { fromMs: range.fromMs, toMs: range.toMs },
             )}
+            className={buttonClass({ size: 'xs' })}
           >
-            <Button size="xs">错误日志</Button>
+            错误日志
           </Link>
           <Hint text="这个服务在报哪几种错，按次数排" asChild>
-            <Link to={errorsHref({ service: filter.service }, { fromMs: range.fromMs, toMs: range.toMs })}>
-              <Button size="xs">错误分组</Button>
+            <Link to={errorsHref({ service: filter.service }, { fromMs: range.fromMs, toMs: range.toMs })} className={buttonClass({ size: 'xs' })}>
+              错误分组
             </Link>
           </Hint>
-          <Link to={serviceHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })}>
-            <Button size="xs">服务概览</Button>
+          <Link to={serviceHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })} className={buttonClass({ size: 'xs' })}>
+            服务概览
           </Link>
         </div>
       )}

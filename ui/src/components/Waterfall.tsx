@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { AlertTriangleIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import type { AttrValue, Span } from '@/api/types'
 import * as m from 'motion/react-m'
-import { Badge, Button, CopyButton, ErrorBox, Hint, Spinner, linkClass } from '@/components/ui'
+import { Badge, Button, CopyButton, ErrorBox, Hint, Spinner, buttonClass, linkClass } from '@/components/ui'
 import type { ColorAssigner } from '@/lib/colors'
 import { FADE } from '@/lib/motion'
 import { formatDuration, formatTsMicro } from '@/lib/time'
@@ -768,10 +768,8 @@ export function SpanPanel({
           <span className="ml-auto flex items-center gap-1">
             {metricsLink && (
               <Hint text={`${span.service} 在这一刻前后的指标（GC、连接池、CPU……）`} asChild>
-                <Link to={metricsLink}>
-                  <Button size="xs" variant="ghost">
-                    这个服务的指标
-                  </Button>
+                <Link to={metricsLink} className={buttonClass({ size: 'xs', variant: 'ghost' })}>
+                  这个服务的指标
                 </Link>
               </Hint>
             )}

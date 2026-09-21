@@ -11,7 +11,7 @@ import { LogFilters, type LogFilterState } from '@/components/LogFilters'
 import { LogStream } from '@/components/LogStream'
 import { LogTable } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
-import { Button, EmptyState, ErrorBox, Hint, Select, Spinner, linkClass } from '@/components/ui'
+import { Button, EmptyState, ErrorBox, Hint, Select, Spinner, buttonClass, linkClass } from '@/components/ui'
 import { levelColor } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/lib/time'
@@ -307,16 +307,22 @@ export function LogsPage() {
           {!follow && !byId && !isMobile && <Pager {...pager} />}
           {/* 导出在手机上没什么用，也省出一行 */}
           <Hint text={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`} asChild>
-            <a href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })} className="hidden md:inline-flex" download>
-              <Button size="sm">
-                <DownloadIcon className="size-4" />
-                CSV
-              </Button>
+            <a
+              href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })}
+              className={buttonClass({ size: 'sm' }, 'hidden md:inline-flex')}
+              download
+            >
+              <DownloadIcon className="size-4" />
+              CSV
             </a>
           </Hint>
           <Hint text="导出 JSON Lines" asChild>
-            <a href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })} className="hidden md:inline-flex" download>
-              <Button size="sm">JSONL</Button>
+            <a
+              href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })}
+              className={buttonClass({ size: 'sm' }, 'hidden md:inline-flex')}
+              download
+            >
+              JSONL
             </a>
           </Hint>
         </div>
@@ -410,23 +416,23 @@ function CrossLinks({ service, win, hasMetrics }: { service?: string; win: { fro
     <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 md:px-4">
       <span className="text-2xs text-muted-fg">{service} 这段时间的</span>
       {hasMetrics && (
-        <Link to={metricsHref(service, win)}>
-          <Button size="xs">指标看板</Button>
+        <Link to={metricsHref(service, win)} className={buttonClass({ size: 'xs' })}>
+          指标看板
         </Link>
       )}
-      <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)}>
-        <Button size="xs">最慢的链路</Button>
+      <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)} className={buttonClass({ size: 'xs' })}>
+        最慢的链路
       </Link>
       <Hint text="这个服务在报哪几种错，按次数排" asChild>
-        <Link to={errorsHref({ service }, win)}>
-          <Button size="xs">错误分组</Button>
+        <Link to={errorsHref({ service }, win)} className={buttonClass({ size: 'xs' })}>
+          错误分组
         </Link>
       </Hint>
-      <Link to={tracesHref({ service, errorOnly: true }, win)}>
-        <Button size="xs">出错的链路</Button>
+      <Link to={tracesHref({ service, errorOnly: true }, win)} className={buttonClass({ size: 'xs' })}>
+        出错的链路
       </Link>
-      <Link to={serviceHref(service, win)}>
-        <Button size="xs">服务概览</Button>
+      <Link to={serviceHref(service, win)} className={buttonClass({ size: 'xs' })}>
+        服务概览
       </Link>
     </div>
   )
