@@ -332,16 +332,26 @@ export function ServiceDetailPage() {
           {rows.length > 0 && isMobile && (
             <ul className="text-xs">
               {rows.map((o) => (
+                // 整行可点是给手指的；键盘走接口名那个按钮
+                // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
                 <li
                   key={`${o.kind}:${o.span_name}`}
                   className={cn('row-hover cursor-pointer border-b border-border/60 px-3 py-2.5 last:border-b-0', op === o.span_name && 'row-selected')}
                   onClick={() => select(o.span_name)}
                 >
                   <div className="flex items-center gap-2">
-                    <Hint text={o.span_name}>
-                      <span className="min-w-0 flex-1 truncate font-medium">
+                    <Hint text={`只看这个接口的趋势：${o.span_name}`} asChild>
+                      <button
+                        type="button"
+                        aria-pressed={op === o.span_name}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          select(o.span_name)
+                        }}
+                        className="min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+                      >
                         {o.span_name} <span className="text-2xs font-normal text-muted-fg">{o.kind}</span>
-                      </span>
+                      </button>
                     </Hint>
                     <OpTag o={o} />
                     <ErrorRate rate={o.error_rate} />
@@ -370,17 +380,25 @@ export function ServiceDetailPage() {
                   {cols.map((c) => (
                     <th
                       key={c.key}
+                      // 排序状态挂在 th 上，不是里面那个按钮上（和日志表、服务总览同一个口径）
+                      aria-sort={sort.key !== c.key ? 'none' : sort.desc ? 'descending' : 'ascending'}
                       className={cn(
-                        'cursor-pointer px-4 py-2.5 font-medium select-none hover:text-fg',
+                        'px-4 py-2.5 font-medium select-none',
                         c.right ? 'w-28 text-right' : 'text-left',
                         sort.key === c.key && 'text-accent',
                         byDelta && !isComparable(c.key) && c.key !== 'span_name' && 'opacity-50',
                       )}
-                      onClick={() => setSort((s) => ({ key: c.key, desc: s.key === c.key ? !s.desc : c.key !== 'span_name' }))}
-                      title={byDelta && isComparable(c.key) ? `按「${c.label}和${cmpShort}比的变化」排` : undefined}
                     >
-                      {c.label}
-                      {sort.key === c.key && (sort.desc ? ' ▾' : ' ▴')}
+                      <Hint text={byDelta && isComparable(c.key) ? `按「${c.label}和${cmpShort}比的变化」排` : '点击排序'} asChild>
+                        <button
+                          type="button"
+                          className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+                          onClick={() => setSort((s) => ({ key: c.key, desc: s.key === c.key ? !s.desc : c.key !== 'span_name' }))}
+                        >
+                          {c.label}
+                          {sort.key === c.key && <span aria-hidden>{sort.desc ? '▾' : '▴'}</span>}
+                        </button>
+                      </Hint>
                     </th>
                   ))}
                 </tr>
@@ -393,8 +411,23 @@ export function ServiceDetailPage() {
                     onClick={() => select(o.span_name)}
                     title="点击只看这个操作的趋势"
                   >
-                    <td className="truncate px-4 py-2" title={o.span_name}>
-                      <span className="font-medium">{o.span_name}</span> <span className="text-2xs font-normal text-muted-fg">{o.kind}</span> <OpTag o={o} />
+                    <td className="truncate px-4 py-2">
+                      {/* 整行可点是给鼠标的方便；「只看这个接口」这个动作本身得有个真按钮，
+                          不然键盘和读屏在这张表里什么都选不了 */}
+                      <Hint text={`只看这个接口的趋势：${o.span_name}`} asChild>
+                        <button
+                          type="button"
+                          aria-pressed={op === o.span_name}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            select(o.span_name)
+                          }}
+                          className="max-w-full cursor-pointer truncate rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+                        >
+                          <span className="font-medium">{o.span_name}</span> <span className="text-2xs font-normal text-muted-fg">{o.kind}</span>
+                        </button>
+                      </Hint>{' '}
+                      <OpTag o={o} />
                     </td>
                     {cols.slice(1).map((c) => (
                       <OpCell key={c.key} o={o} col={c} />
