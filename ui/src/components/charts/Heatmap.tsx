@@ -1,5 +1,6 @@
 import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
+import { chartSummary } from './describe'
 import { useWidth } from './useWidth'
 import { timeTicks } from './axis'
 import { formatDurationMs, formatNumber, formatTick, formatTs } from '@/lib/time'
@@ -33,6 +34,8 @@ interface Props {
   onBrush?: (fromMs: number, toMs: number) => void
   /** 点一格 → 只看这个时间桶里、这一档耗时的链路 */
   onCellClick?: (range: HeatCellRange) => void
+  /** 读屏念的那句话里，这张图叫什么。不给就是「耗时热力图」 */
+  label?: string
   className?: string
 }
 
@@ -52,7 +55,7 @@ function lvlMs(lvl: number, bins: number): number {
  * 格子数有上限，任意时间范围都能一次画出全貌，不像散点只能画检索出来的前 N 条。
  * 颜色深浅 = 数量（对数标定），偏红 = 错误占比。
  */
-export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 170, stale, onBrush, onCellClick, className }: Props) {
+export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 170, stale, onBrush, onCellClick, label, className }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; cell: HeatCell } | null>(null)
   const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
@@ -94,6 +97,31 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
   /** 档的下边缘 y */
   const yOf = (lvl: number) => M.top + H - (lvl - lvlLo) * rowH
   const bucketStart = (t: number) => t - ((((t - phase) % bucketMs) + bucketMs) % bucketMs)
+
+  /**
+   * 读屏念的那句话（见 ./describe）：这张图的信息量全在「多少条、多慢、错了多少」，
+   * 格子本身念不出来也没必要念。
+   */
+  const summary = useMemo(() => {
+    let count = 0
+    let errors = 0
+    let lo = Infinity
+    let hi = -Infinity
+    for (const c of cells) {
+      count += c.count
+      errors += c.errors
+      lo = Math.min(lo, c.lvl)
+      hi = Math.max(hi, c.lvl + 1)
+    }
+    if (!count) return chartSummary(label ?? '耗时热力图', fromMs, toMs, '')
+    const range = `耗时 ${formatDurationMs(lvlMs(lo, bins))} 到 ${formatDurationMs(lvlMs(hi, bins))}`
+    return chartSummary(
+      label ?? '耗时热力图',
+      fromMs,
+      toMs,
+      `共 ${formatNumber(count)} 条，${range}${errors ? `，其中 ${formatNumber(errors)} 条出错` : '，没有出错的'}`,
+    )
+  }, [cells, bins, fromMs, toMs, label])
 
   // 数量是重尾的：几个格子里挤着大部分请求，线性标定会让其它格子全都发白，用对数
   const alphaOf = (count: number) => 0.15 + 0.85 * (Math.log1p(count) / Math.max(1e-9, Math.log1p(maxCount)))
@@ -156,6 +184,8 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
         <svg
           width={width}
           height={height}
+          role="img"
+          aria-label={summary}
           className={cn('block touch-pan-y', hover && onCellClick && 'cursor-pointer', brush && 'cursor-col-resize')}
           onPointerMove={onMove}
           onPointerDown={onDown}

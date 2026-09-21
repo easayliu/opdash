@@ -210,6 +210,7 @@ export function LogsPage() {
             <ErrorBox error={histogram.error} />
           ) : (
             <StackedBars
+              label="日志量直方图，按级别堆叠"
               fromMs={histogram.data?.from_ms ?? range.fromMs}
               toMs={histogram.data?.to_ms ?? range.toMs}
               widthMs={histogram.data?.width_ms ?? 60_000}

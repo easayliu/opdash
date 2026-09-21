@@ -660,6 +660,7 @@ function DashboardPanel({
           ) : v.kind === 'bars' ? (
             // 计数 / 速率画堆叠柱：按状态码、按接口堆起来，构成一眼看得出（和服务详情页一致）
             <StackedBars
+              label={panel.title}
               fromMs={data.data?.from_ms ?? Number(rangeParams.from)}
               toMs={data.data?.to_ms ?? Number(rangeParams.to)}
               widthMs={data.data?.width_ms ?? 60_000}
@@ -676,6 +677,7 @@ function DashboardPanel({
             />
           ) : (
             <LineChart
+              label={panel.title}
               fromMs={data.data?.from_ms ?? Number(rangeParams.from)}
               toMs={data.data?.to_ms ?? Number(rangeParams.to)}
               widthMs={data.data?.width_ms ?? 60_000}
@@ -1306,6 +1308,7 @@ function MetricExplorer({
                 ) : (
                   <div className="relative px-2 pt-3 pb-1 md:px-3">
                     <LineChart
+                      label={metric}
                       fromMs={data.data?.from_ms ?? range.fromMs}
                       toMs={data.data?.to_ms ?? range.toMs}
                       widthMs={data.data?.width_ms ?? 60_000}

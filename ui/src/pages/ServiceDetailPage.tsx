@@ -194,6 +194,7 @@ export function ServiceDetailPage() {
                 <>
                   <Legend series={TRAFFIC_SERIES} className="px-1" />
                   <StackedBars
+                    label={`请求量与错误${op ? `：${op}` : ''}`}
                     fromMs={ts.data?.from_ms ?? range.fromMs}
                     toMs={ts.data?.to_ms ?? range.toMs}
                     widthMs={ts.data?.width_ms ?? 60_000}
@@ -215,6 +216,7 @@ export function ServiceDetailPage() {
                 <>
                   <Legend series={latencySeries} className="px-1" />
                   <LineChart
+                    label={`延迟分位${op ? `：${op}` : ''}`}
                     fromMs={ts.data?.from_ms ?? range.fromMs}
                     toMs={ts.data?.to_ms ?? range.toMs}
                     widthMs={ts.data?.width_ms ?? 60_000}

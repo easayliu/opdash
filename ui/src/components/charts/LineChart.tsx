@@ -1,5 +1,6 @@
 import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
+import { MAX_SPOKEN_SERIES, andMore, chartSummary } from './describe'
 import { useWidth } from './useWidth'
 import { niceMax, niceTicks, timeTicks } from './axis'
 import { formatTick, formatTs } from '@/lib/time'
@@ -60,6 +61,8 @@ interface Props {
   /** 每个真实数据点画一个小圆点：点稀疏时只有线段是看不见的（单点线段画不出东西） */
   dots?: boolean
   markers?: ChartMarker[]
+  /** 读屏念的那句话里，这张图叫什么。不给就是「折线图」 */
+  label?: string
 }
 
 // 右边留够半个刻度标签的宽度：最后一格是 `23:10` 这种居中标签，只留 8px 会被切掉半个字
@@ -85,6 +88,7 @@ export function LineChart({
   connectGaps,
   dots,
   markers,
+  label,
 }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; point: LinePoint } | null>(null)
@@ -98,6 +102,27 @@ export function LineChart({
   const yMax = niceMax(max)
   const yOf = (v: number) => M.top + H - (yMax > 0 ? (v / yMax) * H : 0)
   const ticks = useMemo(() => timeTicks(fromMs, toMs), [fromMs, toMs])
+
+  /**
+   * 读屏念的那句话：什么图、哪一段时间、每条线最新多少、最高多少（见 ./describe）。
+   * 「最新」取最后一个有值的点——指标是采样的，末尾常常是空桶。
+   */
+  const summary = useMemo(() => {
+    const told = series
+      .map((s) => {
+        let last: number | null = null
+        let top = -Infinity
+        for (const p of points) {
+          const v = p.values[s.key]
+          if (v === undefined || v === null || !Number.isFinite(v)) continue
+          last = v
+          if (v > top) top = v
+        }
+        return last === null ? null : `${s.label} 最新 ${format(last)}，最高 ${format(top)}`
+      })
+      .filter((x): x is string => x !== null)
+    return chartSummary(label ?? '折线图', fromMs, toMs, told.length ? andMore(told.slice(0, MAX_SPOKEN_SERIES), told.length) : '')
+  }, [points, series, format, fromMs, toMs, label])
 
   const nearest = (x: number): LinePoint | null => {
     let best: LinePoint | null = null
@@ -169,6 +194,8 @@ export function LineChart({
         <svg
           width={width}
           height={height}
+          role="img"
+          aria-label={summary}
           className={cn('block touch-pan-y', (onBrush || onPointClick) && 'cursor-crosshair', brush && 'cursor-col-resize')}
           onPointerMove={onMove}
           onPointerLeave={onLeave}

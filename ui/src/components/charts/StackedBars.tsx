@@ -1,5 +1,6 @@
 import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
+import { MAX_SPOKEN_SERIES, andMore, chartSummary } from './describe'
 import { useWidth } from './useWidth'
 import { formatCompact, niceMax, niceTicks, timeTicks } from './axis'
 import { formatTick, formatTs } from '@/lib/time'
@@ -45,13 +46,15 @@ interface Props {
    *  还是「今天不一样」（和总览卡上的迷你趋势同一套读法）。值从 `values[ghost.key]` 取，
    *  不参与堆叠，但会算进纵轴最大值，不然影子会撑出画布 */
   ghost?: { key: string; label: string }
+  /** 读屏念的那句话里，这张图叫什么。不给就是「堆叠柱状图」 */
+  label?: string
   className?: string
 }
 
 const M = { left: 48, right: 8, top: 8, bottom: 22 }
 
 /** 按时间分桶的堆叠柱状图：日志直方图、请求量 / 错误数都用它。 */
-export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, onPointClick, events, syncTs, onHoverTs, format = formatCompact, ghost, className }: Props) {
+export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, onPointClick, events, syncTs, onHoverTs, format = formatCompact, ghost, label, className }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; bucket: BarBucket } | null>(null)
   const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
@@ -121,12 +124,25 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
   const ticks = useMemo(() => timeTicks(fromMs, toMs), [fromMs, toMs])
   const yTicks = niceTicks(yMax)
 
+  // 读屏念的那句话：什么图、哪一段时间、合计多少、各系列各多少（见 ./describe）
+  const summary = useMemo(() => {
+    const totals = series
+      .map((s) => ({ label: s.label, v: buckets.reduce((n, b) => n + (b.values[s.key] ?? 0), 0) }))
+      .filter((t) => t.v > 0)
+    if (!totals.length) return chartSummary(label ?? '堆叠柱状图', fromMs, toMs, '')
+    const all = totals.reduce((n, t) => n + t.v, 0)
+    const parts = totals.slice(0, MAX_SPOKEN_SERIES).map((t) => `${t.label} ${format(t.v)}`)
+    return chartSummary(label ?? '堆叠柱状图', fromMs, toMs, `合计 ${format(all)}；${andMore(parts, totals.length)}`)
+  }, [buckets, series, format, fromMs, toMs, label])
+
   return (
     <div ref={ref} className={cn('relative w-full select-none', stale && 'chart-stale', className)} style={{ height }}>
       {width > 0 && (
         <svg
           width={width}
           height={height}
+          role="img"
+          aria-label={summary}
           className={cn('block touch-pan-y', (onBrush || onPointClick) && 'cursor-crosshair')}
           onPointerMove={onMove}
           onPointerLeave={() => {

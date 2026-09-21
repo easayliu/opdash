@@ -134,6 +134,7 @@ export function TracesPage() {
       <section className="border-b border-border bg-card px-3 pt-2 pb-1.5 md:px-4 md:pt-3 md:pb-2">
         {heat.isError && <ErrorBox error={heat.error} onRetry={() => heat.refetch()} />}
         <Heatmap
+          label="链路耗时热力图"
           fromMs={range.fromMs}
           toMs={range.toMs}
           widthMs={heat.data?.width_ms ?? Math.max(1, (range.toMs - range.fromMs) / 120)}
