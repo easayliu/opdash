@@ -14,11 +14,11 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
-    AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, DETAIL_PROBE_WINDOWS,
-    ENTRY_KINDS, ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS,
-    SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries,
-    TraceSort, TraceSummary, ValueRow, candidate_range, dedup_by_trace, detail_probe_hit,
-    normalize_kind, normalize_span_id, normalize_trace_id,
+    AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, ENTRY_KINDS,
+    ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span,
+    SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary,
+    ValueRow, candidate_range, dedup_by_trace, detail_probe_hit, detail_probes, normalize_kind,
+    normalize_span_id, normalize_trace_id,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -480,11 +480,12 @@ struct Located {
     narrowed: bool,
 }
 
-/// 按 [`DETAIL_PROBE_WINDOWS`] 从窄到宽探，命中一档就收工。
+/// 按 [DETAIL_PROBE_WINDOWS](crate::query::traces::DETAIL_PROBE_WINDOWS) 从窄到宽探，命中一档就收工。
 ///
 /// `at` 是这条 trace 大概在什么时候——从列表页点进来是它的开始时间，从日志点进来是那条日志的
-/// 时间，顶栏直达时是页面当前时间范围的猜测，也可能干脆没有。不管哪种，最后一档不限时间的
-/// 兜底都保证查得全，猜错只是多跑两趟空查询。
+/// 时间，顶栏直达时是页面当前时间范围的猜测。**一个都没有就锚在「现在」**往回探
+/// （[DETAIL_NOW_WINDOWS](crate::query::traces::DETAIL_NOW_WINDOWS)：手点进来的 trace 几乎都是刚发生的）。不管哪种，最后一档不限时间
+/// 的兜底都保证查得全，猜错只是多跑两趟空查询。
 ///
 /// **装不下就退回窄窗口**（2026-09-16 加）。span 数超过 `--max-trace-spans` 时，宽窗口那一档
 /// 取回来的是「按时间从早往晚的前 5000 个」——对被复用的 trace id（常驻消费者一直用同一个，
@@ -511,18 +512,12 @@ async fn locate_spans(
     // 探过的最后一档：没探中也没装不下时就用它（原来的行为）
     let mut last: Option<(Vec<LocatedSpan>, Option<TimeRange>)> = None;
     let mut done: Option<(Vec<LocatedSpan>, Option<TimeRange>, bool, bool)> = None;
-    for probe in DETAIL_PROBE_WINDOWS {
-        let window = match (at, probe) {
-            (Some(at), Some((before, after))) => {
-                Some(TimeRange { from_ms: (at - before).max(0), to_ms: at + after })
-            }
-            // 没有 at 就没有中心点，前面几档无从谈起，直接用最后那档
-            (None, Some(_)) => continue,
-            // 最后这档是全表扫（线上 5.1 GB / 39 s）。上一档已经装了半个上限还多，这条 trace
-            // 无论如何都放不下，扫回来也只会被截断、再退回窄窗口——那一趟纯亏
-            (_, None) if last.as_ref().is_some_and(|(r, _)| r.len() * 2 > max as usize) => break,
-            (_, None) => None,
-        };
+    for window in detail_probes(at, state.now_ms()) {
+        // 最后这档是全表扫（线上 5.1 GB / 39 s）。上一档已经装了半个上限还多，这条 trace
+        // 无论如何都放不下，扫回来也只会被截断、再退回窄窗口——那一趟纯亏
+        if window.is_none() && last.as_ref().is_some_and(|(r, _)| r.len() * 2 > max as usize) {
+            break;
+        }
         let r = state
             .client
             .rows::<LocatedSpan>(queries.detail_locate(trace_id, max, window.as_ref())?)
@@ -554,7 +549,8 @@ async fn locate_spans(
     Ok(Located { rows, stats, truncated, window, narrowed })
 }
 
-/// 单独定位 URL 上 `span=` 指名的那一个 span，窗口同样按 [`DETAIL_PROBE_WINDOWS`] 从窄往宽探。
+/// 单独定位 URL 上 `span=` 指名的那一个 span，窗口同样按 [DETAIL_PROBE_WINDOWS](crate::query::traces::DETAIL_PROBE_WINDOWS)
+/// （没有 `at` 时按 [DETAIL_NOW_WINDOWS](crate::query::traces::DETAIL_NOW_WINDOWS)）从窄往宽探。
 ///
 /// `deep`：要不要走最后那档不限时间的兜底。主查询被截断（这条 trace 的 span 可能散在探到的
 /// 窗口之外），或者它本来就没带时间条件时才走；否则窗口里已经是这条 trace 的全部 span，
@@ -568,15 +564,10 @@ async fn locate_one(
     deep: bool,
 ) -> Result<(Option<LocatedSpan>, Stats)> {
     let mut stats = Stats::default();
-    for probe in DETAIL_PROBE_WINDOWS {
-        let window = match (at, probe) {
-            (Some(at), Some((before, after))) => {
-                Some(TimeRange { from_ms: (at - before).max(0), to_ms: at + after })
-            }
-            (None, Some(_)) => continue,
-            (_, None) if !deep => continue,
-            (_, None) => None,
-        };
+    for window in detail_probes(at, state.now_ms()) {
+        if window.is_none() && !deep {
+            continue;
+        }
         let r = state
             .client
             .rows::<LocatedSpan>(queries.detail_locate_span(trace_id, span_id, window.as_ref())?)

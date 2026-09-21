@@ -208,3 +208,48 @@ async fn a_hopeless_trace_never_scans_all_partitions() {
     assert!(sql.iter().all(|q| q.contains("timestamp >=")), "不该有不限时间的查询: {sql:?}");
     assert_eq!(body["windowed"], true);
 }
+
+/// 没带 `at`（顶栏粘一个 trace id 直达、手贴链接）：先锚在「现在」往回探，别一上来就扫全部分区。
+#[tokio::test]
+async fn without_at_it_probes_around_now_first() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &["--max-trace-spans", "30"]).await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // 近 15 分钟这一档就命中：5 个 span，都在窗口正中间
+    fake.respond(located_many(5, now_ms - 60_000)).respond(span_rows(5, (now_ms - 60_000) * 1000));
+
+    let (status, body) = get_json(&app, &format!("/api/traces/{TRACE}")).await;
+    assert_eq!(status, 200, "{body}");
+
+    let sql = sql(&fake);
+    assert_eq!(sql.len(), 2, "一档定位 + 一趟取数: {sql:?}");
+    assert!(sql[0].contains("timestamp >="), "第一趟就该带时间条件: {sql:?}");
+    assert_eq!(body["windowed"], true);
+    assert_eq!(body["spans"].as_array().unwrap().len(), 5);
+    let from = body["window_from_ms"].as_i64().unwrap();
+    let to = body["window_to_ms"].as_i64().unwrap();
+    assert_eq!(to - from, 30 * 60_000, "±15 分钟那一档: {body}");
+    assert!((from - (now_ms - 15 * 60_000)).abs() < 5_000, "窗口该锚在现在: {body}");
+}
+
+/// 三档都没探中才落到不限时间那一档——兜底还在，老 trace 照样查得全。
+#[tokio::test]
+async fn without_at_the_full_scan_is_still_the_last_resort() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &["--max-trace-spans", "30"]).await;
+    let old = AT_MS; // 2025 年的时间戳，锚在「现在」的三档窗口都够不着
+    fake.respond("")
+        .respond("")
+        .respond("")
+        .respond(located_many(5, old))
+        .respond(span_rows(5, old * 1000));
+
+    let (status, body) = get_json(&app, &format!("/api/traces/{TRACE}")).await;
+    assert_eq!(status, 200, "{body}");
+
+    let sql = sql(&fake);
+    assert_eq!(sql.len(), 5, "三档空 + 不限时间 + 取数: {sql:?}");
+    assert!(!sql[3].contains("timestamp >="), "最后一趟是不限时间的兜底: {sql:?}");
+    assert_eq!(body["windowed"], false);
+    assert_eq!(body["spans"].as_array().unwrap().len(), 5);
+}

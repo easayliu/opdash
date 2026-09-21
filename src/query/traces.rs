@@ -247,15 +247,52 @@ pub fn candidate_range(rows: &[CandidateRow]) -> Option<TimeRange> {
 /// p99.9 = 34.5 s；超过 1 分钟的占 0.134%，超过 15 分钟的占 0.0057%。第一档就命中 99.87%，
 /// 剩下那些多跑一两趟（每趟约 250 ms）换的是少读两个数量级。
 ///
-/// 最后那档不限时间的兜底不能省：`at` 可能压根没有（顶栏粘一个 trace id 直达），也可能是**猜**
-/// 的（页面拿当前时间范围当中心点）。猜错了前几档全空，靠它兜回来——代价是多读约 27%，
-/// 猜中省的是两个数量级。
+/// 最后那档不限时间的兜底不能省：`at` 可能是**猜**的（页面拿当前时间范围当中心点），猜错了
+/// 前几档全空，靠它兜回来——代价是多读约 27%，猜中省的是两个数量级。没有 `at` 时探哪些窗口
+/// 见 [`DETAIL_NOW_WINDOWS`]。
 pub const DETAIL_PROBE_WINDOWS: &[Option<(i64, i64)>] = &[
     Some((60_000, 60_000)),
     Some((15 * 60_000, 15 * 60_000)),
     Some((3_600_000, 24 * 3_600_000)),
     None,
 ];
+
+/// 没有 `at` 时锚在「现在」往回探的窗口（`(往前, 往后)`，毫秒）。
+///
+/// 2026-09-20 加。在这之前没有 `at` 就直接跳到不限时间那档，而线上近 24 小时走过兜底的 11 条
+/// trace 里有 8 条**一趟带窗口的查询都没发过**（也就是根本没带 `at`），正好是最慢的那几条：
+/// 86.9 s / 36.7 s / 28.8 s / 20.0 s / 19.6 s，它们一家就吃掉这个接口 97% 的读取量。
+///
+/// 而手点进来的 trace 几乎都是刚发生的：那 8 条被查时有多新——7 条在 75 分钟以内（最近的一条
+/// 只隔了 36 秒），最老的一条 13.3 小时。所以锚在 `now()` 往回探三档就够。窗口往后的那一半
+/// 落在未来，分区还不存在，不花钱；真正的成本只有往前的那一半（近 15 分钟约 0.3 s、近 2 小时
+/// 约 0.6 s、近一天约 3.2 s）。三档都没探中才落到不限时间那档，多花约 4 秒——对着它自己的
+/// 25 秒全分区扫描，这是笔划算的赌。
+///
+/// 为什么前后对称：探中与否要过 [`detail_probe_hit`] 的「没贴着窗口边」这一关，边距是窗口宽度
+/// 的 1/10。往后只留一点点的话，刚发生的 trace 会贴着右边的 `now` 判成没探中，白白往宽里走。
+pub const DETAIL_NOW_WINDOWS: &[(i64, i64)] =
+    &[(15 * 60_000, 15 * 60_000), (2 * 3_600_000, 2 * 3_600_000), (26 * 3_600_000, 26 * 3_600_000)];
+
+/// 这次详情按什么顺序探窗口：有 `at` 就围着它按 [`DETAIL_PROBE_WINDOWS`]，没有就锚在 `now_ms`
+/// 按 [`DETAIL_NOW_WINDOWS`]，两条路末尾都是不限时间的兜底（`None`）。
+pub fn detail_probes(at: Option<i64>, now_ms: i64) -> Vec<Option<TimeRange>> {
+    let window = |center: i64, before: i64, after: i64| TimeRange {
+        from_ms: (center - before).max(0),
+        to_ms: center + after,
+    };
+    match at {
+        Some(at) => DETAIL_PROBE_WINDOWS
+            .iter()
+            .map(|p| p.map(|(before, after)| window(at, before, after)))
+            .collect(),
+        None => DETAIL_NOW_WINDOWS
+            .iter()
+            .map(|&(before, after)| Some(window(now_ms, before, after)))
+            .chain(std::iter::once(None))
+            .collect(),
+    }
+}
 
 /// 这一档窗口够不够：定位到了 span，而且它们没贴着窗口边。
 ///
