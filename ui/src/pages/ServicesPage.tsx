@@ -542,12 +542,22 @@ export function ServicesPage() {
                       {COLUMNS.map((c) => (
                         <th
                           key={c.key}
-                          title={c.title}
-                          className={cn('cursor-pointer px-4 py-2.5 font-medium select-none hover:text-fg', c.align === 'right' ? 'w-24 text-right' : 'text-left', tableSort.key === c.key && 'text-accent')}
-                          onClick={() => setTableSort((t) => ({ key: c.key, desc: t.key === c.key ? !t.desc : c.key !== 'service' }))}
+                          // 排序状态要挂在 th 上（不是里面那个按钮）：在排的列报方向，其余的报 none
+                          // ——读屏据此知道「这列点了能排」。和日志表 `ariaSort` 同一个口径
+                          aria-sort={tableSort.key !== c.key ? 'none' : tableSort.desc ? 'descending' : 'ascending'}
+                          className={cn('px-4 py-2.5 font-medium select-none', c.align === 'right' ? 'w-24 text-right' : 'text-left', tableSort.key === c.key && 'text-accent')}
                         >
-                          {c.label}
-                          {tableSort.key === c.key && (tableSort.desc ? ' ▾' : ' ▴')}
+                          {/* 点表头排序是这张表唯一的交互，原来挂在 th 的 onClick 上，键盘根本够不着 */}
+                          <Hint text={c.title ?? '点击排序'} asChild>
+                            <button
+                              type="button"
+                              className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+                              onClick={() => setTableSort((t) => ({ key: c.key, desc: t.key === c.key ? !t.desc : c.key !== 'service' }))}
+                            >
+                              {c.label}
+                              {tableSort.key === c.key && <span aria-hidden>{tableSort.desc ? '▾' : '▴'}</span>}
+                            </button>
+                          </Hint>
                         </th>
                       ))}
                     </tr>
