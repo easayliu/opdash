@@ -93,7 +93,15 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
     })
 
   return (
-    <div ref={hostRef} className="relative">
+    /*
+     * `role="log"`：这一块的内容是**按时间往后追加**的，读屏据此知道新行加在末尾，
+     * 而不是整块换了内容。
+     *
+     * 但 `aria-live` 明确关掉。log 这个角色默认是 polite，也就是每来一行就念一行——线上一秒
+     * 能推几百行，那不是播报是刷屏，人连自己在哪都听不出来。跟随本身有「停止跟随」可以按
+     * （WCAG 2.2.2 要的暂停机制），停下来之后再逐行读才有意义。
+     */
+    <div ref={hostRef} role="log" aria-live="off" aria-label="实时日志" className="relative">
       {padTop > 0 && <div style={{ height: padTop }} />}
       {items.map((item) => {
         const r = rows[item.index]
