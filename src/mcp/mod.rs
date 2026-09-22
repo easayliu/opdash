@@ -254,7 +254,10 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
     match method {
         "initialize" => Ok(initialize(mcp, params).await),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::list(metrics_enabled(mcp).await) })),
+        "tools/list" => {
+            let (metrics, bills) = enabled_tables(mcp).await;
+            Ok(json!({ "tools": tools::list(metrics, bills) }))
+        }
         "tools/call" => {
             let name = params["name"]
                 .as_str()
@@ -282,11 +285,14 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
                     INVALID_PARAMS,
                     format!(
                         "没有叫 {name:?} 的工具；可用: {}",
-                        tools::list(metrics_enabled(mcp).await)
-                            .iter()
-                            .filter_map(|t| t["name"].as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        {
+                            let (metrics, bills) = enabled_tables(mcp).await;
+                            tools::list(metrics, bills)
+                        }
+                        .iter()
+                        .filter_map(|t| t["name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                     ),
                 )),
                 Err(tools::ToolError::Internal(msg)) => Err(RpcError::new(INTERNAL_ERROR, msg)),
@@ -338,13 +344,13 @@ fn truncate_for_log(s: &str) -> String {
     s.chars().take(MAX).collect::<String>() + "…"
 }
 
-/// 这个部署有没有指标表。表结构是带缓存的（`initialize` 通常已经读过一遍），这里基本不会真去
-/// 连库；读不到就当有——真没有的话工具调用时会报「指标页未启用」，总比因为库抖了一下就把
+/// 这个部署有没有指标表 / 账单表。表结构是带缓存的（`initialize` 通常已经读过一遍），这里基本
+/// 不会真去连库；读不到就当有——真没有的话工具调用时会报「未启用」，总比因为库抖了一下就把
 /// 半个工具目录藏起来好。
-async fn metrics_enabled(mcp: &Mcp) -> bool {
+async fn enabled_tables(mcp: &Mcp) -> (bool, bool) {
     match mcp.state.schema.get().await {
-        Ok(schema) => schema.metrics.is_some(),
-        Err(_) => true,
+        Ok(schema) => (schema.metrics.is_some(), schema.bills.is_some()),
+        Err(_) => (true, true),
     }
 }
 
@@ -412,6 +418,13 @@ async fn instructions(mcp: &Mcp) -> String {
             s.push_str(
                 "\n指标表未启用，指标类工具（list_metrics / query_metric / metric_events）用不了。",
             );
+        }
+        match &schema.bills {
+            Some(_) => s.push_str(
+                "\n云账单（goscan 同步的火山引擎 / 阿里云账单）用 cost_summary / cost_breakdown / cost_detail：\
+                 时间参数是**账期**（YYYY-MM），不是 from / to 时间戳；金额默认看应付（payable）。",
+            ),
+            None => s.push_str("\n账单表未启用，费用类工具（cost_summary / cost_breakdown / cost_detail）用不了。"),
         }
     }
     s.push_str(&format!("\n\n现在是 {}。", fmt_time(mcp.state.now_ms(), tz)));

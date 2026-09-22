@@ -4,7 +4,10 @@ use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
 
 use super::AppState;
-use crate::schema::{LOG_FIXED_COLUMNS, METRIC_FIXED_COLUMNS, TRACE_FIXED_COLUMNS, Table};
+use crate::schema::{
+    ALICLOUD_BILL_COLUMNS, LOG_FIXED_COLUMNS, METRIC_FIXED_COLUMNS, TRACE_FIXED_COLUMNS, Table,
+    VOLCENGINE_BILL_COLUMNS,
+};
 
 #[derive(Serialize)]
 pub struct Health {
@@ -47,6 +50,27 @@ pub struct Meta {
     /// 指标页没启用的原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics_note: Option<String>,
+    /// goscan 的账单表；没部署 goscan 就是 null，前端据此不显示费用页
+    pub bills: Option<BillsMeta>,
+    /// 费用页没启用、或者某一张账单表没启用的原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bills_note: Option<String>,
+}
+
+/// 账单表的现状。三张各自可选，前端按 `providers` 决定「阿里云 / 火山」这两个筛选项显不显示，
+/// 按 `granularities` 决定明细页能不能切到日粒度。
+#[derive(Serialize)]
+pub struct BillsMeta {
+    pub providers: Vec<&'static str>,
+    /// 能按天看花费的云；阿里云要同步了日度账单才在里面
+    pub daily_providers: Vec<&'static str>,
+    pub volcengine: Option<TableMeta>,
+    pub alicloud_monthly: Option<TableMeta>,
+    pub alicloud_daily: Option<TableMeta>,
+    /// 查询时按哪个键去重（`group` / `final` / `off`，见 --bill-dedupe）
+    pub dedupe: crate::query::bills::Dedupe,
+    /// 配了 `--goscan-url` 才能手动拉账单（`POST /api/bills/sync`），页面据此显示按钮
+    pub sync: bool,
 }
 
 #[derive(Serialize)]
@@ -107,5 +131,36 @@ pub async fn meta(State(state): State<AppState>) -> crate::error::Result<Json<Me
         traces: TableMeta::new(&schema.traces, TRACE_FIXED_COLUMNS),
         metrics: schema.metrics.as_ref().map(|t| TableMeta::new(t, METRIC_FIXED_COLUMNS)),
         metrics_note: schema.metrics_note.clone(),
+        bills: schema.bills.as_ref().map(|b| BillsMeta {
+            providers: [
+                b.volcengine.is_some().then_some("volcengine"),
+                (b.alicloud_monthly.is_some() || b.alicloud_daily.is_some()).then_some("alicloud"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            daily_providers: [
+                b.volcengine.is_some().then_some("volcengine"),
+                b.alicloud_daily.is_some().then_some("alicloud"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            volcengine: b
+                .volcengine
+                .as_ref()
+                .map(|t| TableMeta::new(&t.table, VOLCENGINE_BILL_COLUMNS)),
+            alicloud_monthly: b
+                .alicloud_monthly
+                .as_ref()
+                .map(|t| TableMeta::new(&t.table, ALICLOUD_BILL_COLUMNS)),
+            alicloud_daily: b
+                .alicloud_daily
+                .as_ref()
+                .map(|t| TableMeta::new(&t.table, ALICLOUD_BILL_COLUMNS)),
+            dedupe: cfg.bill_dedupe,
+            sync: state.goscan.is_some(),
+        }),
+        bills_note: schema.bills_note.clone(),
     }))
 }

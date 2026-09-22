@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router'
 import App from './App'
 
 /** 后端不在，所有请求回一个空壳：这里验的是外壳能不能起来，不是数据 */
-function stubApi() {
+function stubApi(meta: Record<string, unknown> = {}) {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const url = String(input)
     const body = url.includes('/meta')
@@ -19,14 +19,16 @@ function stubApi() {
           logs: { table: 'logpipe', dimensions: ['service_name'] },
           traces: { table: 'tracepipe', dimensions: [] },
           metrics: null,
+          bills: null,
+          ...meta,
         }
       : { rows: [], services: [], groups: [], stats: null }
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
   })
 }
 
-function shell(path = '/services') {
-  stubApi()
+function shell(path = '/services', meta: Record<string, unknown> = {}) {
+  stubApi(meta)
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
@@ -58,6 +60,16 @@ describe('App 外壳', () => {
     shell()
     await screen.findByRole('link', { name: /服务/ })
     expect(screen.queryByRole('link', { name: /指标/ })).not.toBeInTheDocument()
+  })
+
+  it('接了 goscan 才显示费用页签', async () => {
+    shell()
+    await screen.findByRole('link', { name: /服务/ })
+    expect(screen.queryByRole('link', { name: /费用/ })).not.toBeInTheDocument()
+    shell('/services', {
+      bills: { providers: ['alicloud'], daily_providers: [], volcengine: null, alicloud_monthly: { table: 'alicloud_bill_monthly', columns: [], dimensions: [] }, alicloud_daily: null, dedupe: 'group' },
+    })
+    expect(await screen.findAllByRole('link', { name: /费用/ })).not.toHaveLength(0)
   })
 
   it('按路由切开的页面能加载出来（懒加载 + Suspense 这条路是通的）', async () => {

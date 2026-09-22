@@ -7,7 +7,8 @@
 //!      └── /  静态 SPA ◀─┘ （rust-embed，ui/dist）
 //! ```
 //!
-//! 只读：没有任何写库路径，每个请求都带 `readonly=2`。
+//! 只读：没有任何写库路径，每个请求都带 `readonly=2`。唯一一处对外「会改状态」的请求是
+//! 手动拉账单——把动作转给 goscan（见 `goscan` 模块），写库的是它，不是 opdash。
 //! 认证可选：Basic 一组密码，或 OIDC 跳 Keycloak 登录（`auth` 模块）。
 
 pub mod api;
@@ -15,6 +16,7 @@ pub mod auth;
 pub mod clickhouse;
 pub mod config;
 pub mod error;
+pub mod goscan;
 pub mod mcp;
 pub mod query;
 pub mod saved;

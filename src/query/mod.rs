@@ -11,6 +11,7 @@ use chrono_tz::Tz;
 use crate::clickhouse::{Query, ToParam};
 use crate::error::{Error, Result};
 
+pub mod bills;
 pub mod logs;
 pub mod metrics;
 pub mod traces;

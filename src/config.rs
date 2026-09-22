@@ -39,6 +39,57 @@ pub struct Config {
     #[arg(long, env = "OPDASH_METRIC_TABLE", default_value = "otel_metric")]
     pub metric_table: String,
 
+    /// goscan 写的火山引擎账单明细表。和指标表一样是可选的：没部署 goscan 时费用页自动隐藏。
+    ///
+    /// 名字跟 goscan 走：它把这张表从 `volcengine_bill_details` 改成了 `volcengine_bill`，
+    /// 同时把集群上的 `_distributed` 后缀取消了——现在和 logpipe / tracepipe / metricpipe 一个
+    /// 口径，Distributed 表就叫基础表名，只有底下存数据的本地表带 `_local`。
+    ///
+    /// **老表仍然认**：配的名字在库里找不到同名表时，会再找一次 `<名字>_distributed`
+    /// （改名之前建的那批就长这样）。**不会**退回 `_local`，那只是一个分片的数据。
+    /// 这一项是默认的 `volcengine_bill` 时还会再兜一层老名字 `volcengine_bill_details`（见
+    /// [`crate::schema::LEGACY_VOLCENGINE_BILL_TABLE`]）——线上是先按新口径重建了表名、
+    /// 再慢慢改回配置的，两个名字会并存一段时间，不该要求每个部署都去配一行环境变量。
+    #[arg(long, env = "OPDASH_VOLCENGINE_BILL_TABLE", default_value = DEFAULT_VOLCENGINE_BILL_TABLE)]
+    pub volcengine_bill_table: String,
+
+    /// goscan 写的阿里云月度账单表，同上可选
+    #[arg(long, env = "OPDASH_ALICLOUD_MONTHLY_TABLE", default_value = "alicloud_bill_monthly")]
+    pub alicloud_monthly_table: String,
+
+    /// goscan 写的阿里云日度账单表，同上可选
+    #[arg(long, env = "OPDASH_ALICLOUD_DAILY_TABLE", default_value = "alicloud_bill_daily")]
+    pub alicloud_daily_table: String,
+
+    /// 账单查询怎么去重。三张账单表都是 `ReplacingMergeTree`，而 goscan 建的 Distributed 表用
+    /// `rand()` 分片：同一个账期重复拉一次，一模一样的两行会落到不同分片上，`FINAL` 只在分片内
+    /// 去重，跨分片的那份它看不见——而 goscan 的日调度每天都会把当月重拉一遍，所以这不是小概率。
+    ///
+    /// * `group`（默认）：按建表时的排序键（也就是 ReplacingMergeTree 的去重键）在查询里
+    ///   `GROUP BY` 一次，语义和引擎自己的去重一致，跨分片也对；
+    /// * `final`：给表加 `FINAL`。只有分片键确定（不是 `rand()`）时才是对的，便宜一点；
+    /// * `off`：什么都不做，最快，但重复拉过的账期金额会翻倍。
+    ///
+    /// 详见 README「账单表：为什么要在查询里再去重一次」。
+    #[arg(long, env = "OPDASH_BILL_DEDUPE", default_value = "group")]
+    pub bill_dedupe: crate::query::bills::Dedupe,
+
+    /// goscan 的地址（如 `http://goscan.logging.svc.cluster.local:8080`）。
+    ///
+    /// 配了之后费用页上多一个「拉取账单」：opdash 把请求转给 goscan 的 `POST /sync`，再按返回的
+    /// task id 轮它的 `GET /tasks/{id}` 看结果。**这是 opdash 唯一一处会往外发「会改状态」的请求**
+    /// ——账单是 goscan 去云厂商那儿拉的，opdash 自己对 ClickHouse 仍然只读（每条查询都带
+    /// `readonly=2`）。不配 = 不显示这个按钮，账单只能等 goscan 自己的 cron。
+    ///
+    /// goscan 的 HTTP 接口没有认证（它是集群内的服务），所以这一层的门是 opdash 的登录。
+    #[arg(long, env = "OPDASH_GOSCAN_URL", value_parser = parse_service_url)]
+    pub goscan_url: Option<String>,
+
+    /// 调 goscan 接口的超时。触发同步是「登记一个后台任务就返回」，很快；
+    /// 真正的拉取在 goscan 那边跑，靠轮询任务状态看结果，和这个超时无关
+    #[arg(long, env = "OPDASH_GOSCAN_TIMEOUT", default_value = "10s", value_parser = parse_duration)]
+    pub goscan_timeout: Duration,
+
     /// 直方图、按天聚合时对齐用的时区；应和两张表 timestamp 列的时区一致
     #[arg(long, env = "OPDASH_TIMEZONE", default_value = "Asia/Shanghai")]
     pub timezone: String,
@@ -156,6 +207,9 @@ pub struct Config {
     pub saved_query_file: std::path::PathBuf,
 }
 
+/// 火山账单表的默认名字。goscan 把它从 `volcengine_bill_details` 改成了这个。
+pub const DEFAULT_VOLCENGINE_BILL_TABLE: &str = "volcengine_bill";
+
 #[derive(Debug, Clone)]
 pub struct BasicAuth {
     pub user: String,
@@ -178,6 +232,16 @@ fn parse_issuer(raw: &str) -> Result<String, String> {
         return Err(
             "应是 http(s):// 开头的 realm 地址，如 https://sso.example.com/realms/ops".to_owned()
         );
+    }
+    Ok(s.to_owned())
+}
+
+/// 集群内服务的地址（goscan）。和 `--public-url` 同一套校验，只是报错里举的例子不同。
+fn parse_service_url(raw: &str) -> Result<String, String> {
+    let s = raw.trim().trim_end_matches('/');
+    if !(s.starts_with("https://") || s.starts_with("http://")) {
+        return Err("应是 http(s):// 开头的地址，如 http://goscan.logging.svc.cluster.local:8080"
+            .to_owned());
     }
     Ok(s.to_owned())
 }
@@ -229,6 +293,9 @@ impl Config {
             ("--log-table", &self.log_table),
             ("--trace-table", &self.trace_table),
             ("--metric-table", &self.metric_table),
+            ("--volcengine-bill-table", &self.volcengine_bill_table),
+            ("--alicloud-monthly-table", &self.alicloud_monthly_table),
+            ("--alicloud-daily-table", &self.alicloud_daily_table),
         ] {
             if !is_plain_identifier(name) {
                 return Err(format!("{flag} 只能包含字母、数字、下划线: {name:?}"));
@@ -253,6 +320,8 @@ mod tests {
         assert_eq!(cfg.bind.port(), 4880);
         assert_eq!(cfg.database, "logs");
         assert_eq!(cfg.metric_table, "otel_metric");
+        assert_eq!(cfg.volcengine_bill_table, "volcengine_bill");
+        assert_eq!(cfg.bill_dedupe, crate::query::bills::Dedupe::Group);
         assert_eq!(cfg.query_timeout, Duration::from_secs(30));
         assert_eq!(cfg.max_range, Duration::from_secs(31 * 86400));
         assert!(cfg.basic_auth.is_none());

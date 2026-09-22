@@ -1,6 +1,7 @@
 //! HTTP 接口。每个页面一个子模块；这里是共享状态、路由拼装和健康检查。
 
 pub mod auth;
+pub mod bills;
 pub mod logs;
 pub mod meta;
 pub mod metrics;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub metric_kinds: Arc<MetricKinds>,
     /// 用户收藏的查询（`--saved-query-file`），见 [`crate::saved`]。
     pub saved: Arc<SavedQueryStore>,
+    /// goscan 的同步接口（`--goscan-url`）。没配就是 `None`，费用页上不显示「拉取账单」。
+    pub goscan: Option<Arc<crate::goscan::Goscan>>,
 }
 
 impl AppState {
@@ -45,6 +48,17 @@ impl AppState {
         saved: Arc<SavedQueryStore>,
     ) -> Self {
         let tails = Arc::new(Semaphore::new(config.max_tail_streams.max(1)));
+        // 建不出客户端（地址离谱）只是没有这个按钮，不该让整个进程起不来
+        let goscan = config.goscan_url.as_deref().and_then(|url| match crate::goscan::Goscan::new(
+            url,
+            config.goscan_timeout,
+        ) {
+            Ok(g) => Some(Arc::new(g)),
+            Err(e) => {
+                tracing::warn!(error = %e, url, "连不上 goscan 的配置有问题，手动拉取账单不可用");
+                None
+            }
+        });
         Self {
             config: Arc::new(config),
             client,
@@ -52,6 +66,7 @@ impl AppState {
             tails,
             metric_kinds: Arc::new(MetricKinds::default()),
             saved,
+            goscan,
         }
     }
 
@@ -107,6 +122,7 @@ pub fn api_router(state: AppState) -> Router {
         .merge(tail::routes())
         .merge(traces::routes())
         .merge(metrics::routes())
+        .merge(bills::routes())
         .merge(services::routes())
         .merge(saved::routes())
         .with_state(state)

@@ -108,13 +108,39 @@ fn log_filter_props() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// 账期和筛选参数，三个费用工具共用。账单没有「最近 1 小时」这种说法，时间参数是账期。
+fn bill_props() -> Vec<(&'static str, Value)> {
+    vec![
+        ("from", string("起始账期 YYYY-MM，不给就从 to 往前数 months 个")),
+        ("to", string("结束账期 YYYY-MM，默认当前账期")),
+        ("months", integer("看最近几个账期，默认 6，上限 36")),
+        (
+            "amount",
+            enumeration(
+                "金额口径，默认 payable（应付）；paid = 现金；original = 原价",
+                &["payable", "paid", "original"],
+            ),
+        ),
+        ("provider", strings("只看 volcengine / alicloud，不给 = 都要")),
+        (
+            "filters",
+            json!({
+                "type": "object",
+                "description": "按维度筛，键是 product / item / region / zone / account / instance / project / subscription / currency，值一个或多个（OR）",
+                "additionalProperties": { "type": ["string", "array"], "items": { "type": "string" } },
+            }),
+        ),
+        ("q", string("模糊搜产品 / 计费项 / 实例名")),
+    ]
+}
+
 /// 工具目录。`inputSchema` 是 JSON Schema，客户端和模型都靠它知道能传什么。
 ///
-/// `metrics_enabled = false`（部署没配指标表）时不列指标类工具：列出来模型也只会换来一个
-/// 「指标页未启用」，白占上下文。`initialize` 里 `listChanged` 仍然是 `false`——改变工具列表要发
+/// `metrics_enabled = false`（部署没配指标表）时不列指标类工具，`bills_enabled = false`
+/// （没部署 goscan）时不列费用类工具：列出来模型也只会换来一个「未启用」，白占上下文。`initialize` 里 `listChanged` 仍然是 `false`——改变工具列表要发
 /// `notifications/tools/list_changed`，无状态端点没有服务端到客户端的流发不出去；指标表是部署时
 /// 定的，跑着跑着变的情况不存在。
-pub fn list(metrics_enabled: bool) -> Vec<Value> {
+pub fn list(metrics_enabled: bool, bills_enabled: bool) -> Vec<Value> {
     // 全是只读查询：标上 annotations，客户端（Claude Code / Cursor 这类）就不必每次调用都问人一遍
     let tool = |name: &str, description: &str, input: Value| {
         json!({
@@ -410,9 +436,75 @@ pub fn list(metrics_enabled: bool) -> Vec<Value> {
                 &["metric"],
             ),
         ),
+        tool(
+            "cost_summary",
+            "云账单按账期的花费，分云给。回答「这几个月花了多少」「这个月比上个月涨了吗」。granularity=day 改成按天。",
+            schema(
+                [
+                    bill_props(),
+                    vec![(
+                        "granularity",
+                        enumeration("默认 month（按账期）；day = 按天", &["month", "day"]),
+                    )],
+                ]
+                .concat(),
+                &[],
+            ),
+        ),
+        tool(
+            "cost_breakdown",
+            "账单按某个维度排行：钱花在哪个产品 / 地域 / 账号 / 实例上。回答「谁最贵」「多出来的钱是哪个产品」。两朵云合在一起排，每行带各云的分摊。",
+            schema(
+                [
+                    vec![(
+                        "by",
+                        enumeration(
+                            "按哪个维度排，默认 product",
+                            &[
+                                "product",
+                                "item",
+                                "region",
+                                "zone",
+                                "account",
+                                "instance",
+                                "project",
+                                "subscription",
+                                "currency",
+                            ],
+                        ),
+                    )],
+                    bill_props(),
+                    vec![("limit", integer("默认 20，上限 200"))],
+                ]
+                .concat(),
+                &[],
+            ),
+        ),
+        tool(
+            "cost_detail",
+            "账单明细，一行一个计费项（产品 / 实例 / 地域 / 用量 / 金额）。排行看出哪个贵之后用它看具体在计什么费。一页只出一朵云的。",
+            schema(
+                [
+                    vec![
+                        ("provider", enumeration("哪朵云，默认挑一张有的表", &["volcengine", "alicloud"])),
+                        ("granularity", enumeration("阿里云专用：monthly（默认）/ daily", &["monthly", "daily"])),
+                    ],
+                    bill_props(),
+                    vec![
+                        ("limit", integer("默认 30，上限 1000")),
+                        ("offset", integer("翻页")),
+                    ],
+                ]
+                .concat(),
+                &[],
+            ),
+        ),
     ];
     if !metrics_enabled {
         tools.retain(|t| !METRIC_TOOLS.contains(&t["name"].as_str().unwrap_or("")));
+    }
+    if !bills_enabled {
+        tools.retain(|t| !BILL_TOOLS.contains(&t["name"].as_str().unwrap_or("")));
     }
     // 描述前面统一标一句数据来源，和 instructions 里的术语表对齐
     for t in &mut tools {
@@ -433,6 +525,7 @@ fn source_of(name: &str) -> &'static str {
         "search_logs" | "log_histogram" | "log_facets" | "log_context" => "日志表",
         "list_metrics" | "query_metric" | "metric_exemplars" | "metric_events" => "指标表",
         "list_attrs" => "span 表 / 指标表",
+        "cost_summary" | "cost_breakdown" | "cost_detail" => "账单表",
         _ => "span 表",
     }
 }
@@ -440,6 +533,9 @@ fn source_of(name: &str) -> &'static str {
 /// 指标表没启用时要从目录里拿掉的工具。
 const METRIC_TOOLS: &[&str] =
     &["list_metrics", "query_metric", "metric_events", "metric_exemplars"];
+
+/// 账单表（goscan）没启用时要拿掉的工具。
+const BILL_TOOLS: &[&str] = &["cost_summary", "cost_breakdown", "cost_detail"];
 
 // ---------------------------------------------------------------------------------------------
 // 参数读取
@@ -717,7 +813,7 @@ const MAX_TOOL_BYTES: usize = 64 << 10;
 /// 整份工具目录（含指标工具），校验参数名用。
 fn all_tools() -> &'static [Value] {
     static ALL: OnceLock<Vec<Value>> = OnceLock::new();
-    ALL.get_or_init(|| list(true))
+    ALL.get_or_init(|| list(true, true))
 }
 
 /// 模型偶尔会把参数名记错（`service` 写成 `service_name`）。`inputSchema` 里写了
@@ -854,6 +950,9 @@ pub async fn call(
         "query_metric" => query_metric(mcp, &a).await,
         "metric_exemplars" => metric_exemplars(mcp, &a).await,
         "metric_events" => metric_events(mcp, &a).await,
+        "cost_summary" => cost_summary(mcp, &a).await,
+        "cost_breakdown" => cost_breakdown(mcp, &a).await,
+        "cost_detail" => cost_detail(mcp, &a).await,
         _ => return Err(ToolError::Unknown),
     };
     let value = fit_budget(out.map_err(ToolError::Failed)?, MAX_TOOL_BYTES);
@@ -2072,6 +2171,187 @@ async fn metric_events(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     }))
 }
 
+// ---------------------------------------------------------------------------------------------
+// 云账单（goscan）
+// ---------------------------------------------------------------------------------------------
+
+/// 当前账期（按 `--timezone`）。账单工具的时间参数是账期，不走 [`Args::window`] 那一套。
+fn current_period(a: &Args<'_>) -> String {
+    chrono::DateTime::from_timestamp_millis(a.now_ms)
+        .unwrap_or_else(chrono::Utc::now)
+        .with_timezone(&a.tz)
+        .format("%Y-%m")
+        .to_string()
+}
+
+/// `(from, to)` 两个账期。没给 from 就从 to 往前数 `months` 个（含 to 自己）。
+fn bill_range(a: &Args<'_>) -> R<(String, String)> {
+    let to = match a.string("to")? {
+        Some(v) => crate::query::bills::check_period(&v).map_err(|e| e.user_message())?,
+        None => current_period(a),
+    };
+    let from = match a.string("from")? {
+        Some(v) => crate::query::bills::check_period(&v).map_err(|e| e.user_message())?,
+        None => {
+            let months =
+                a.limit("months", crate::api::bills::DEFAULT_RANGE_MONTHS as u32, 36)? as i32;
+            crate::query::bills::shift_period(&to, -(months - 1)).map_err(|e| e.user_message())?
+        }
+    };
+    Ok((from, to))
+}
+
+/// 账期 + 金额口径 + 云 + 维度筛选，三个费用工具共用的查询串。
+fn bill_qs(a: &Args<'_>) -> R<Qs> {
+    let (from, to) = bill_range(a)?;
+    let mut qs = Qs::new();
+    qs.push("from", &from)
+        .push("to", &to)
+        .push_opt("amount", a.string("amount")?)
+        .push_all("provider", &a.list("provider")?)
+        .push_dims(&a.filters()?)
+        .push_opt("q", a.string("q")?);
+    Ok(qs)
+}
+
+/// 各云的分摊平铺进同一个对象里：`{"volcengine": 1.2, "alicloud": 3.4}` 比嵌一层
+/// `by_provider` 省 token，模型读起来也直接。
+fn flatten_providers(target: &mut Map<String, Value>, by_provider: &Value) {
+    let Some(obj) = by_provider.as_object() else { return };
+    for (provider, amount) in obj {
+        if amount.as_f64().unwrap_or(0.0) != 0.0 {
+            target.insert(provider.clone(), json!(round(amount.as_f64().unwrap_or(0.0), 4)));
+        }
+    }
+}
+
+/// 花了多少钱：按账期（默认）或者按天。
+async fn cost_summary(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let by_day = matches!(a.string("granularity")?.as_deref(), Some("day"));
+    let qs = bill_qs(a)?;
+    let path = if by_day { "/api/bills/daily" } else { "/api/bills/summary" };
+    let body = mcp.get(path, &qs.finish()).await?;
+    let points: Vec<Value> = arr(&body["points"])
+        .iter()
+        .filter(|p| !by_day || f64_of(p, "total") != 0.0)
+        .map(|p| {
+            let mut row = Map::new();
+            row.insert("t".into(), p["t"].clone());
+            row.insert("total".into(), json!(round(f64_of(p, "total"), 2)));
+            flatten_providers(&mut row, &p["by_provider"]);
+            Value::Object(row)
+        })
+        .collect();
+    let mut by_provider = Map::new();
+    flatten_providers(&mut by_provider, &body["by_provider"]);
+    let mut out = json!({
+        "from": body["from"],
+        "to": body["to"],
+        "amount": body["amount"],
+        "granularity": if by_day { "day" } else { "month" },
+        "total": round(f64_of(&body, "total"), 2),
+        "points": points,
+    });
+    if !by_provider.is_empty() {
+        out["by_provider"] = Value::Object(by_provider);
+    }
+    if let Some(providers) = body["providers"].as_array()
+        && providers.len() == 1
+    {
+        note(
+            out.as_object_mut().expect("json 对象"),
+            format!(
+                "这段数字只有 {} 一朵云：另一朵云在这个部署里没有账单表（或者没同步日度账单）",
+                providers[0].as_str().unwrap_or("")
+            ),
+        );
+    }
+    Ok(out)
+}
+
+/// 钱花在哪：按产品 / 地域 / 账号 / 实例排行。
+async fn cost_breakdown(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let limit = a.limit("limit", 20, 200)?;
+    let mut qs = bill_qs(a)?;
+    qs.push_opt("by", a.string("by")?).push("limit", limit.to_string());
+    let body = mcp.get("/api/bills/breakdown", &qs.finish()).await?;
+    let rows: Vec<Value> = arr(&body["rows"])
+        .iter()
+        .map(|r| {
+            let mut row = Map::new();
+            row.insert("key".into(), r["key"].clone());
+            row.insert("amount".into(), json!(round(f64_of(r, "amount"), 2)));
+            row.insert("share_pct".into(), json!(pct(f64_of(r, "share"))));
+            flatten_providers(&mut row, &r["by_provider"]);
+            Value::Object(row)
+        })
+        .collect();
+    Ok(json!({
+        "by": body["by"],
+        "from": body["from"],
+        "to": body["to"],
+        "amount": body["amount"],
+        "total": round(f64_of(&body, "total"), 2),
+        "other": round(f64_of(&body, "other"), 2),
+        "rows": rows,
+        "other_note": "other = 总额减去上面这些，也就是没进排行的那些加起来",
+    }))
+}
+
+/// 明细：一行一个计费项。空字段直接省掉，别拿一堆空串占模型的上下文。
+async fn cost_detail(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let limit = a.limit("limit", 30, crate::query::bills::MAX_DETAIL_ROWS)?;
+    let mut qs = bill_qs(a)?;
+    qs.push_opt("provider", a.string("provider")?)
+        .push_opt("granularity", a.string("granularity")?)
+        .push("limit", limit.to_string())
+        .push_opt("offset", a.u32("offset")?.map(|v| v.to_string()));
+    let body = mcp.get("/api/bills/detail", &qs.finish()).await?;
+    let rows: Vec<Value> = arr(&body["rows"])
+        .iter()
+        .map(|r| {
+            let mut row = Map::new();
+            for key in [
+                "period",
+                "day",
+                "product",
+                "item",
+                "instance",
+                "instance_id",
+                "region",
+                "account",
+                "project",
+                "subscription",
+                "usage",
+                "usage_unit",
+                "currency",
+            ] {
+                let v = str_of(r, key);
+                if !v.is_empty() {
+                    row.insert(key.into(), json!(v));
+                }
+            }
+            row.insert("amount".into(), json!(round(f64_of(r, "amount"), 4)));
+            // 打过折的才把原价带上：原价和应付一样时多一列没意义
+            let original = round(f64_of(r, "original"), 4);
+            if original != round(f64_of(r, "amount"), 4) && original != 0.0 {
+                row.insert("original".into(), json!(original));
+            }
+            Value::Object(row)
+        })
+        .collect();
+    Ok(json!({
+        "provider": body["provider"],
+        "granularity": body["granularity"],
+        "from": body["from"],
+        "to": body["to"],
+        "amount": body["amount"],
+        "total_rows": body["total"],
+        "count": rows.len(),
+        "rows": rows,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2088,7 +2368,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_an_object_schema() {
-        let tools = list(true);
+        let tools = list(true, true);
         assert!(tools.len() >= 18);
         let mut names = BTreeSet::new();
         for t in &tools {
@@ -2110,29 +2390,42 @@ mod tests {
     /// 工具目录在客户端那边是**每一轮**都要重发的（它在系统提示里），所以它的大小是按轮计费的。
     /// 这个上限是拿来挡「描述随手越写越长」的：真要加，先想想能不能把哪段挪进 instructions
     /// （那个只在握手时发一次）。
+    ///
+    /// 上限从 16k 提到 19k 是因为接了第四种数据源（goscan 的云账单，三个 cost_* 工具，约 3.4k
+    /// 字符）——**这是给新数据源的额度，不是给形容词的**：没有账单表的部署一个 cost_* 都不会列。
     #[test]
     fn the_tool_catalog_stays_within_its_token_budget() {
-        let json = serde_json::to_string(&list(true)).unwrap();
+        let json = serde_json::to_string(&list(true, true)).unwrap();
         let chars = json.chars().count();
-        assert!(chars < 16_000, "工具目录 {chars} 字符，超预算了（约 {} token）", chars / 2);
+        assert!(chars < 19_000, "工具目录 {chars} 字符，超预算了（约 {} token）", chars / 2);
         // 单个工具别写成小作文
-        for t in list(true) {
+        for t in list(true, true) {
             let n = t["description"].as_str().unwrap().chars().count();
             assert!(n < 500, "{} 的描述 {n} 字符，太长了", t["name"]);
         }
     }
 
     #[test]
-    fn metric_tools_disappear_without_a_metric_table() {
-        let names = |on| {
-            list(on).iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>()
+    fn metric_and_bill_tools_disappear_without_their_tables() {
+        let names = |metrics, bills| {
+            list(metrics, bills)
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect::<BTreeSet<_>>()
         };
-        let (with, without) = (names(true), names(false));
+        let (with, without) = (names(true, true), names(false, true));
         assert!(with.contains("query_metric") && with.contains("metric_exemplars"));
         assert!(!without.contains("query_metric"), "{without:?}");
         assert_eq!(
             with.difference(&without).cloned().collect::<BTreeSet<_>>(),
             METRIC_TOOLS.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
+        );
+        // 没部署 goscan 的环境同理：费用工具整组消失，别的一个不少
+        let no_bills = names(true, false);
+        assert!(with.contains("cost_summary") && with.contains("cost_detail"));
+        assert_eq!(
+            with.difference(&no_bills).cloned().collect::<BTreeSet<_>>(),
+            BILL_TOOLS.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
         );
         // 目录里的每个工具都得有对应的分支，否则调用时会莫名其妙地「没有这个工具」
         assert!(with.contains("list_attrs"));

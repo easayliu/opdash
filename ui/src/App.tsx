@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useRef, useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router'
-import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon } from 'lucide-react'
+import { ActivityIcon, AlertTriangleIcon, ChartLineIcon, GitBranchIcon, ScrollTextIcon, SearchIcon, WalletIcon } from 'lucide-react'
 import { AnimatePresence, LazyMotion, MotionConfig } from 'motion/react'
 import * as m from 'motion/react-m'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
@@ -33,6 +33,7 @@ const ServicesPage = lazy(() => import('@/pages/ServicesPage').then((m) => ({ de
 const ErrorsPage = lazy(() => import('@/pages/ErrorsPage').then((m) => ({ default: m.ErrorsPage })))
 const ServiceDetailPage = lazy(() => import('@/pages/ServiceDetailPage').then((m) => ({ default: m.ServiceDetailPage })))
 const MetricsPage = lazy(() => import('@/pages/MetricsPage').then((m) => ({ default: m.MetricsPage })))
+const CostPage = lazy(() => import('@/pages/CostPage').then((m) => ({ default: m.CostPage })))
 
 /** 首屏画完之后趁空闲把其余几页取回来（和 `prefetchBaseUi` 一个路数）。 */
 function prefetchPages(): void {
@@ -44,6 +45,7 @@ function prefetchPages(): void {
     void import('@/pages/TraceDetailPage')
     void import('@/pages/ServiceDetailPage')
     void import('@/pages/MetricsPage')
+    void import('@/pages/CostPage')
   }
   if ('requestIdleCallback' in window) window.requestIdleCallback(load, { timeout: 5_000 })
   else setTimeout(load, 2_000)
@@ -57,6 +59,8 @@ const NAV = [
   { to: '/logs', label: '日志', icon: ScrollTextIcon },
   { to: '/traces', label: '链路', icon: GitBranchIcon },
   { to: '/metrics', label: '指标', icon: ChartLineIcon, needs: 'metrics' as const },
+  // 费用排最后：它看的是云账单（goscan 同步的），和前面四页的排障路线不是一条线
+  { to: '/cost', label: '费用', icon: WalletIcon, needs: 'bills' as const },
 ]
 
 /** motion 的功能包异步加载（官方推荐的那条路，见 `@/lib/motion-features` 为什么要单独一个模块） */
@@ -167,6 +171,7 @@ function AppRoutes() {
               <Route path="/traces" element={<TracesPage />} />
               <Route path="/traces/:traceId" element={<TraceDetailPage />} />
               <Route path="/metrics" element={<MetricsPage />} />
+              <Route path="/cost" element={<CostPage />} />
               <Route path="/errors" element={<ErrorsPage />} />
               <Route path="/services" element={<ServicesPage />} />
               <Route path="/services/:name" element={<ServiceDetailPage />} />
@@ -179,12 +184,20 @@ function AppRoutes() {
   )
 }
 
+/** 顶栏那个时间范围管的是日志 / 链路 / 指标；费用页按账期查，不看它，所以在那一页藏起来。 */
+function useShowTimeRange(): boolean {
+  const { pathname } = useLocation()
+  return !pathname.startsWith('/cost')
+}
+
 export default function App() {
   // 首屏画完之后趁空闲把其余几页的 chunk 取回来，换页签时不用等网络
   useEffect(prefetchPages, [])
-  // 没部署 metricpipe（指标表不存在）就不显示指标页签，点进去也只会看到一句「未启用」
+  // 没部署 metricpipe / goscan（指标表、账单表不存在）就不显示对应页签，点进去也只会看到
+  // 一句「未启用」
   const meta = useMeta()
-  const nav = NAV.filter((n) => n.needs !== 'metrics' || meta.data?.metrics)
+  const nav = NAV.filter((n) => !n.needs || !!meta.data?.[n.needs])
+  const showTimeRange = useShowTimeRange()
   return (
     // 动效：功能包异步加载（`motion-features` 单独一个 chunk），口径全站一份见 `@/lib/motion`；
     // strict 会拦住写成 `motion.div` 的地方——那样等于把整包同步拉进首屏
@@ -234,7 +247,7 @@ export default function App() {
           <div className="ml-auto flex min-w-0 items-center gap-1 py-2 md:gap-2 md:py-2.5">
             <QuickJump />
             <SavedQueries />
-            <TimeRangePicker />
+            {showTimeRange && <TimeRangePicker />}
             <ThemeSwitcher />
             <UserMenu />
           </div>

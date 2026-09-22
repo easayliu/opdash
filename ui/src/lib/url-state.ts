@@ -53,6 +53,7 @@ function labelOf(pathname: string): string {
   if (pathname.startsWith('/errors')) return '错误'
   if (pathname.startsWith('/logs')) return '日志'
   if (pathname.startsWith('/metrics')) return '指标'
+  if (pathname.startsWith('/cost')) return '费用'
   if (pathname.startsWith('/services')) return '服务'
   if (pathname.startsWith('/traces')) return '链路'
   return '返回'
@@ -171,6 +172,8 @@ export function useRangeMemory(): string | null {
   }, [explicit, params])
 
   if (explicit) return null
+  // 费用页按账期查（from_period / to_period），顶栏的时间范围在那儿没有意义，别往地址上补
+  if (pathname.startsWith('/cost')) return null
   const remembered = readRangeMemory()
   if (!remembered) return null
   const next = new URLSearchParams(search)

@@ -91,6 +91,142 @@ export interface Meta {
   metrics: TableMeta | null
   /** 指标页没启用的原因 */
   metrics_note?: string
+  /** goscan 的账单表；没部署就是 null，费用页不显示 */
+  bills: BillsMeta | null
+  /** 费用页（或其中某一张表）没启用的原因 */
+  bills_note?: string
+}
+
+export type BillProvider = 'volcengine' | 'alicloud'
+/** 金额口径：应付（优惠后）/ 现金支付 / 原价 */
+export type BillAmount = 'payable' | 'paid' | 'original'
+
+export interface BillsMeta {
+  /** 有账单表的云 */
+  providers: BillProvider[]
+  /** 能按天看的云：阿里云要同步了日度账单才在里面 */
+  daily_providers: BillProvider[]
+  volcengine: TableMeta | null
+  alicloud_monthly: TableMeta | null
+  alicloud_daily: TableMeta | null
+  /** 查询时怎么去重，见后端 --bill-dedupe */
+  dedupe: 'group' | 'final' | 'off'
+  /** 配了 --goscan-url 才能在页面上手动拉账单 */
+  sync: boolean
+}
+
+/** POST /api/bills/sync：同步任务已经登记，账单要等 goscan 后台拉完才进库 */
+export interface BillSyncStarted {
+  task_id: string
+  provider: BillProvider
+  from: string
+  to: string
+  message: string
+}
+
+/** GET /api/bills/sync/{task_id} */
+export interface BillSyncTask {
+  id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  provider: string
+  /** 跑完了没有（不管成没成） */
+  done: boolean
+  /** 跑完且成功 */
+  ok: boolean
+  /** 写进库的条数 */
+  records: number
+  /** 从云厂商取回来的条数 */
+  fetched: number
+  message: string
+  error?: string
+  started_at?: string
+  ended_at?: string
+}
+
+/** 一个账期（`2026-09`）或一天（`2026-09-01`）的花费 */
+export interface BillPoint {
+  t: string
+  total: number
+  by_provider: Partial<Record<BillProvider, number>>
+}
+
+export interface BillPeriodsResponse {
+  periods: string[]
+  latest: string | null
+  providers: BillProvider[]
+  stats: Stats
+}
+
+export interface BillSummaryResponse {
+  from: string
+  to: string
+  amount: BillAmount
+  /** 请求的账期一个不少，没数据的是 0 */
+  points: BillPoint[]
+  total: number
+  by_provider: Partial<Record<BillProvider, number>>
+  providers: BillProvider[]
+  stats: Stats
+}
+
+export interface BillDailyResponse extends Omit<BillSummaryResponse, 'by_provider'> {
+  providers: BillProvider[]
+}
+
+export interface BillBreakdownRow {
+  key: string
+  amount: number
+  /** 占总额的比例，0~1 */
+  share: number
+  by_provider: Partial<Record<BillProvider, number>>
+}
+
+export interface BillBreakdownResponse {
+  by: string
+  label: string
+  from: string
+  to: string
+  amount: BillAmount
+  rows: BillBreakdownRow[]
+  /** 没进排行的那些加起来 */
+  other: number
+  total: number
+  stats: Stats
+}
+
+export interface BillDetailRow {
+  provider: BillProvider
+  period: string
+  /** 月度账单没有日期，是空串 */
+  day: string
+  product: string
+  item: string
+  instance_id: string
+  instance: string
+  region: string
+  account: string
+  project: string
+  subscription: string
+  usage: string
+  usage_unit: string
+  currency: string
+  amount: number
+  original: number
+  paid: number
+}
+
+export interface BillDetailResponse {
+  provider: BillProvider
+  granularity: 'monthly' | 'daily'
+  from: string
+  to: string
+  amount: BillAmount
+  rows: BillDetailRow[]
+  /** 去重之后一共多少行；计数查询失败时是 null */
+  total: number | null
+  limit: number
+  offset: number
+  stats: Stats
 }
 
 export interface LogRow {

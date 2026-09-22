@@ -4,7 +4,11 @@
 //! 以及采集端配置里 `fields` 加的 `cluster` / `env` / `app`……）随部署不同而不同，只能从库里读。
 //! 指标表（metricpipe 的 `otel_metric`）是**可选**的：没部署 metricpipe 的地方这张表不存在，
 //! 那就把它当没有（[`Schema::metrics`] 为 `None`、前端不显示指标页），日志和链路照常——
-//! 少一张表不该让整个 schema 读失败。
+//! 少一张表不该让整个 schema 读失败。goscan 的三张账单表（[`Schema::bills`]）同理，而且
+//! 三张之间也各自可选：只接了一朵云是常态。
+//!
+//! 账单表还多读一样东西：**建表时的排序键**（`system.tables.sorting_key`）。它就是
+//! `ReplacingMergeTree` 的去重键，查询要按它再去重一次，原因见 [`crate::query::bills`]。
 //!
 //! 读到的列名同时也是**白名单**：前端传上来的筛选列名不在这里面的一律拒绝，SQL 里只拼白名单
 //! 里的名字，这样动态列也不用走字符串拼接的险路。
@@ -103,6 +107,33 @@ impl Table {
     }
 }
 
+/// 一张账单表，外加它的去重键。
+#[derive(Debug, Clone, Serialize)]
+pub struct BillTable {
+    #[serde(flatten)]
+    pub table: Table,
+    /// 去重键 = 建表时的排序键（`ReplacingMergeTree` 按它去重）。从 `system.tables` 读，
+    /// 读不到（权限不够、集群上 Distributed 表自己没有排序键）才退回 goscan 当前 DDL 的那套。
+    pub dedupe: Vec<String>,
+}
+
+/// goscan 写的三张账单表。三张各自可选：只接了一朵云、或者只同步了月度粒度都正常。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BillTables {
+    pub volcengine: Option<BillTable>,
+    pub alicloud_monthly: Option<BillTable>,
+    pub alicloud_daily: Option<BillTable>,
+}
+
+impl BillTables {
+    /// 至少有一张能查。
+    pub fn any(&self) -> bool {
+        self.volcengine.is_some()
+            || self.alicloud_monthly.is_some()
+            || self.alicloud_daily.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Schema {
     pub logs: Table,
@@ -111,6 +142,10 @@ pub struct Schema {
     pub metrics: Option<Table>,
     /// 指标表没启用的原因（表不存在 / 缺列 / 属性列不是 JSON），给 `/api/meta` 显示
     pub metrics_note: Option<String>,
+    /// 账单表，没部署 goscan 时为 `None`
+    pub bills: Option<BillTables>,
+    /// 费用页没启用的原因
+    pub bills_note: Option<String>,
     pub server_version: String,
     pub server_timezone: String,
     #[serde(skip)]
@@ -124,6 +159,9 @@ pub struct SchemaCache {
     log_table: String,
     trace_table: String,
     metric_table: String,
+    /// goscan 的三张账单表，配置里的名字（集群上真正的表名可能带 `_distributed` 后缀，见
+    /// [`resolve_bill_table`]）
+    bill_tables: [String; 3],
     current: RwLock<Option<Arc<Schema>>>,
     /// 上次读失败的时刻：连不上库时每个请求都去读一次没意义，隔几秒再试。
     last_failure: Mutex<Option<(Instant, String)>>,
@@ -146,6 +184,12 @@ struct ServerRow {
     timezone: String,
 }
 
+#[derive(Deserialize)]
+struct SortingKeyRow {
+    table: String,
+    sorting_key: String,
+}
+
 impl SchemaCache {
     pub fn new(
         client: Client,
@@ -153,6 +197,7 @@ impl SchemaCache {
         log_table: &str,
         trace_table: &str,
         metric_table: &str,
+        bill_tables: [&str; 3],
     ) -> Self {
         Self {
             client,
@@ -160,6 +205,7 @@ impl SchemaCache {
             log_table: log_table.to_owned(),
             trace_table: trace_table.to_owned(),
             metric_table: metric_table.to_owned(),
+            bill_tables: bill_tables.map(str::to_owned),
             current: RwLock::new(None),
             last_failure: Mutex::new(None),
         }
@@ -205,19 +251,29 @@ impl SchemaCache {
     }
 
     async fn load(&self) -> Result<Schema> {
+        // 账单表在集群上叫 `X_distributed`（goscan 的建表口径），单机上就叫 `X`：两个名字
+        // 一起问，哪个真在库里哪个算数，见 [`Self::load_bills`]
+        let bill_candidates: Vec<String> = self
+            .bill_tables
+            .iter()
+            .enumerate()
+            .flat_map(|(slot, n)| bill_table_candidates(slot, n))
+            .collect();
         let columns = self
             .client
             .rows::<ColumnRow>(
                 Query::new(
                     "SELECT table, name, type FROM system.columns \
                      WHERE database = {db:String} \
-                       AND table IN ({logs:String}, {traces:String}, {metrics:String}) \
+                       AND (table IN ({logs:String}, {traces:String}, {metrics:String}) \
+                            OR table IN {bills:Array(String)}) \
                      ORDER BY table, position",
                 )
                 .param("db", &self.database)
                 .param("logs", &self.log_table)
                 .param("traces", &self.trace_table)
-                .param("metrics", &self.metric_table),
+                .param("metrics", &self.metric_table)
+                .param("bills", bill_candidates.clone()),
             )
             .await?
             .rows;
@@ -302,15 +358,156 @@ impl SchemaCache {
             }
         }
 
+        // 账单表（goscan）：三张各自可选，一张都没有就是没部署 goscan
+        let (bills, bills_note) = self.load_bills(&columns).await;
+
         Ok(Schema {
             logs,
             traces,
             metrics,
             metrics_note,
+            bills,
+            bills_note,
             server_version: server.version,
             server_timezone: server.timezone,
             loaded_at: Instant::now(),
         })
+    }
+
+    /// 读三张账单表。任何一张出问题都只是「这张不能查」，不影响别的表——所以这里不返回
+    /// `Result`，问题都写进 note 里给 `/api/meta`。
+    async fn load_bills(&self, columns: &[ColumnRow]) -> (Option<BillTables>, Option<String>) {
+        let read = |name: &str| -> Option<Table> {
+            let cols: Vec<Column> = columns
+                .iter()
+                .filter(|c| c.table == name)
+                .map(|c| Column {
+                    name: c.name.clone(),
+                    ty: c.ty.clone(),
+                    kind: ColumnKind::classify(&c.ty),
+                })
+                .collect();
+            (!cols.is_empty()).then(|| Table { name: name.to_owned(), columns: cols })
+        };
+
+        let specs: [(&str, &str, &[&str]); 3] = [
+            ("火山引擎账单表", self.bill_tables[0].as_str(), VOLCENGINE_BILL_COLUMNS),
+            ("阿里云月度账单表", self.bill_tables[1].as_str(), ALICLOUD_BILL_COLUMNS),
+            ("阿里云日度账单表", self.bill_tables[2].as_str(), ALICLOUD_BILL_COLUMNS),
+        ];
+        let mut found: Vec<Option<Table>> = Vec::with_capacity(3);
+        let mut notes: Vec<String> = Vec::new();
+        for (slot, (label, configured, required)) in specs.into_iter().enumerate() {
+            // 按候选顺序挑第一个真在库里的：同名的优先（goscan 现在的口径），然后是
+            // `_distributed`（改名之前建的那批），最后是火山那张表的老名字。
+            // **不看 `_local`**：那只是一个分片的数据，查出来的金额只有三分之一
+            let table = bill_table_candidates(slot, configured).into_iter().find_map(|n| read(&n));
+            match table {
+                None => {
+                    notes.push(format!("{label} {}.{configured} 不存在", self.database));
+                    found.push(None);
+                }
+                Some(t) => {
+                    let missing = t.missing(required);
+                    if missing.is_empty() {
+                        found.push(Some(t));
+                    } else {
+                        notes.push(format!(
+                            "{label} {}.{} 缺列: {}",
+                            self.database,
+                            t.name,
+                            missing.join(", ")
+                        ));
+                        found.push(None);
+                    }
+                }
+            }
+        }
+        if found.iter().all(Option::is_none) {
+            return (
+                None,
+                Some(format!("{}（未部署 goscan 时本就没有这几张表）", notes.join("；"))),
+            );
+        }
+
+        let keys = self.sorting_keys(found.iter().flatten().map(|t| t.name.as_str())).await;
+        let mut bills = BillTables::default();
+        for (slot, table) in found.into_iter().enumerate() {
+            let Some(table) = table else { continue };
+            let dedupe = keys
+                .iter()
+                .find(|(name, _)| *name == table.name)
+                .map(|(_, key)| key.clone())
+                .unwrap_or_else(|| FALLBACK_DEDUPE[slot].iter().map(|s| (*s).to_owned()).collect());
+            // 去重键里的列必须真的在表上，不然拼出来的 SQL 会报 UNKNOWN_IDENTIFIER
+            let dedupe: Vec<String> = if dedupe.iter().all(|c| table.has(c)) {
+                dedupe
+            } else {
+                tracing::warn!(
+                    table = %table.name,
+                    sorting_key = %dedupe.join(", "),
+                    "账单表的排序键里有表上没有的列，按 goscan 当前 DDL 的去重键查"
+                );
+                FALLBACK_DEDUPE[slot].iter().map(|s| (*s).to_owned()).collect()
+            };
+            let bill = BillTable { table, dedupe };
+            match slot {
+                0 => bills.volcengine = Some(bill),
+                1 => bills.alicloud_monthly = Some(bill),
+                _ => bills.alicloud_daily = Some(bill),
+            }
+        }
+        (Some(bills), (!notes.is_empty()).then(|| notes.join("；")))
+    }
+
+    /// 每张账单表的排序键（= `ReplacingMergeTree` 的去重键）。
+    ///
+    /// Distributed 表自己没有排序键，要问它底下的 `_local`；读不到就回空，调用方退回静态定义。
+    /// 这一趟只在真有账单表时才发，没部署 goscan 的环境一条多余的查询都不会多。
+    async fn sorting_keys<'a>(
+        &self,
+        tables: impl Iterator<Item = &'a str>,
+    ) -> Vec<(String, Vec<String>)> {
+        let names: Vec<String> = tables
+            .flat_map(|n| match n.strip_suffix(DISTRIBUTED_SUFFIX) {
+                Some(base) => vec![n.to_owned(), format!("{base}{LOCAL_SUFFIX}")],
+                None => vec![n.to_owned()],
+            })
+            .collect();
+        if names.is_empty() {
+            return Vec::new();
+        }
+        let rows = self
+            .client
+            .rows::<SortingKeyRow>(
+                Query::new(
+                    "SELECT table, sorting_key FROM system.tables \
+                     WHERE database = {db:String} AND table IN {tables:Array(String)}",
+                )
+                .param("db", &self.database)
+                .param("tables", names),
+            )
+            .await;
+        let rows = match rows {
+            Ok(r) => r.rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "读不到账单表的排序键，按 goscan 当前 DDL 的去重键查");
+                return Vec::new();
+            }
+        };
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        for row in &rows {
+            let Some(key) = parse_sorting_key(&row.sorting_key) else { continue };
+            // `X_local` 的排序键就是 `X_distributed` 的去重键
+            let target = match row.table.strip_suffix(LOCAL_SUFFIX) {
+                Some(base) => format!("{base}{DISTRIBUTED_SUFFIX}"),
+                None => row.table.clone(),
+            };
+            if !out.iter().any(|(n, _)| *n == target) {
+                out.push((target, key));
+            }
+        }
+        out
     }
 
     /// 后台定期刷新。失败只记日志，缓存里的旧结构继续用。
@@ -336,6 +533,135 @@ impl SchemaCache {
         });
     }
 }
+
+/// 火山账单表的老名字。goscan 把它改成了 `volcengine_bill`，但线上是「先按新口径重建表、
+/// 后改配置」，两个名字会并存一段时间；`--volcengine-bill-table` 保持默认时两个都认。
+pub const LEGACY_VOLCENGINE_BILL_TABLE: &str = "volcengine_bill_details";
+
+/// goscan 早期版本在集群上把 Distributed 表建成 `X_distributed`（本地表是 `X_local`）。
+/// 后来改成了和 logpipe / tracepipe / metricpipe 一样的口径——Distributed 表就叫 `X`——
+/// 但改名之前建的表还在库里，所以按基础名找不到时再试一次这个后缀。
+const DISTRIBUTED_SUFFIX: &str = "_distributed";
+const LOCAL_SUFFIX: &str = "_local";
+
+/// `system.tables.sorting_key` 解析成列名。
+///
+/// 只认「逗号分隔的纯列名」——账单表的排序键就长这样。带函数调用的（`toDate(x)` 之类）
+/// 直接放弃：那种键没法当 `GROUP BY` 的去重键用，退回静态定义更安全。
+fn parse_sorting_key(raw: &str) -> Option<Vec<String>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let cols: Vec<String> = raw.split(',').map(|c| c.trim().to_owned()).collect();
+    let plain = |c: &String| {
+        !c.is_empty()
+            && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            && !c.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    };
+    cols.iter().all(plain).then_some(cols)
+}
+
+/// 一张账单表在库里可能叫什么，按优先级排。
+///
+/// goscan 这几张表的名字动过两次：集群上的 `_distributed` 后缀取消了（现在和 logpipe 一样，
+/// Distributed 表就叫基础名），火山那张从 `volcengine_bill_details` 改成了 `volcengine_bill`。
+/// 线上是「先重建表、后改配置」，所以同一时刻可能有好几个名字并存——**挑一个能查的，别让
+/// 每个部署都为此配一行环境变量**。`_local` 永远不在候选里：那只是一个分片的数据。
+fn bill_table_candidates(slot: usize, configured: &str) -> Vec<String> {
+    let mut names = vec![configured.to_owned(), format!("{configured}{DISTRIBUTED_SUFFIX}")];
+    // 名字是默认的 `volcengine_bill` 时才兜老名字；配成别的名字就按配的那个来
+    if slot == 0 && configured == crate::config::DEFAULT_VOLCENGINE_BILL_TABLE {
+        names.push(LEGACY_VOLCENGINE_BILL_TABLE.to_owned());
+        names.push(format!("{LEGACY_VOLCENGINE_BILL_TABLE}{DISTRIBUTED_SUFFIX}"));
+    }
+    names
+}
+
+/// 读不到排序键时用的去重键，和 goscan `pkg/ddl` 里三张表的 ORDER BY 一致。
+/// 顺序是「火山 / 阿里云月度 / 阿里云日度」，和 [`SchemaCache::bill_tables`] 对应。
+const FALLBACK_DEDUPE: [&[&str]; 3] = [
+    &[
+        "BillPeriod",
+        "ExpenseDate",
+        "InstanceNo",
+        "ExpenseBeginTime",
+        "Product",
+        "ElementCode",
+        "PayableAmount",
+    ],
+    &[
+        "billing_cycle",
+        "product_code",
+        "instance_id",
+        "bill_account_id",
+        "subscription_type",
+        "payment_amount",
+    ],
+    &[
+        "billing_date",
+        "product_code",
+        "instance_id",
+        "bill_account_id",
+        "subscription_type",
+        "payment_amount",
+    ],
+];
+
+/// 火山引擎账单表里 opdash 会用到的列。列名是火山 API 原样的 PascalCase，
+/// 金额那几列是 `String`（goscan 刻意保留原值），查询时转 Float64。
+pub const VOLCENGINE_BILL_COLUMNS: &[&str] = &[
+    "BillPeriod",
+    "ExpenseDate",
+    "ExpenseBeginTime",
+    "InstanceNo",
+    "InstanceName",
+    "Product",
+    "ProductZh",
+    "Element",
+    "ElementCode",
+    "Region",
+    "RegionCode",
+    "Zone",
+    "ZoneCode",
+    "OwnerID",
+    "OwnerUserName",
+    "OwnerCustomerName",
+    "Project",
+    "ProjectDisplayName",
+    "BillingMode",
+    "Currency",
+    "Count",
+    "Unit",
+    "PayableAmount",
+    "PaidAmount",
+    "OriginalBillAmount",
+];
+
+/// 阿里云账单表（月度 / 日度共用一套列）里 opdash 会用到的列。
+pub const ALICLOUD_BILL_COLUMNS: &[&str] = &[
+    "billing_cycle",
+    "billing_date",
+    "product_code",
+    "product_name",
+    "product_type",
+    "product_detail",
+    "instance_id",
+    "instance_name",
+    "bill_account_id",
+    "bill_account_name",
+    "subscription_type",
+    "region",
+    "zone",
+    "resource_group",
+    "cost_unit",
+    "currency",
+    "usage",
+    "usage_unit",
+    "pretax_amount",
+    "payment_amount",
+    "pretax_gross_amount",
+];
 
 /// 四个属性列及其是否为数组（events / links 是 `Array(JSON)`）。
 pub const ATTRIBUTE_COLUMNS: &[(&str, bool)] = &[

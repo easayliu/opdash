@@ -67,6 +67,11 @@ async fn app(url: &str) -> (axum::Router, Client) {
         &config.log_table,
         &config.trace_table,
         &config.metric_table,
+        [
+            &config.volcengine_bill_table,
+            &config.alicloud_monthly_table,
+            &config.alicloud_daily_table,
+        ],
     ));
     schema.refresh().await.expect("读表结构");
     let saved = Arc::new(

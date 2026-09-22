@@ -5,6 +5,12 @@ import { apiGet, type Params } from './client'
 import type {
   ApiKeyInfo,
   AuthMe,
+  BillBreakdownResponse,
+  BillDailyResponse,
+  BillDetailResponse,
+  BillPeriodsResponse,
+  BillSummaryResponse,
+  BillSyncTask,
   ContextResponse,
   ErrorsResponse,
   FacetsResponse,
@@ -419,5 +425,78 @@ export function useMetricEvents(params: Params, enabled = true) {
     staleTime: 60_000,
     retry: false,
     enabled,
+  })
+}
+
+/**
+ * 有哪些账期有账单。费用页一进来先问它：账单是「昨天出昨天的、月初出上个月的」，
+ * 默认看哪几个月得跟着数据走，而不是跟着今天走（这个月一号打开页面，全是空的）。
+ */
+export function useBillPeriods(enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'periods'],
+    queryFn: ({ signal }) => apiGet<BillPeriodsResponse>('/bills/periods', {}, signal),
+    staleTime: 10 * 60_000,
+    enabled,
+  })
+}
+
+export function useBillSummary(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'summary', params],
+    queryFn: ({ signal }) => apiGet<BillSummaryResponse>('/bills/summary', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    enabled,
+  })
+}
+
+/** 按天的花费。旁路数据：只有日度表在的时候才查，失败不打扰 */
+export function useBillDaily(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'daily', params],
+    queryFn: ({ signal }) => apiGet<BillDailyResponse>('/bills/daily', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    retry: false,
+    enabled,
+  })
+}
+
+export function useBillBreakdown(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'breakdown', params],
+    queryFn: ({ signal }) => apiGet<BillBreakdownResponse>('/bills/breakdown', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    enabled,
+  })
+}
+
+export function useBillDetail(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'detail', params],
+    queryFn: ({ signal }) => apiGet<BillDetailResponse>('/bills/detail', params, signal),
+    placeholderData: keepPreviousData,
+    enabled,
+  })
+}
+
+/**
+ * 手动拉取的任务状态，跑完之前每 [`SYNC_POLL_MS`] 问一次。
+ *
+ * 触发那一下只是让 goscan 登记了一个后台任务，账单是之后才进库的——所以这里要轮，
+ * 而不是等 POST 的返回。
+ */
+const SYNC_POLL_MS = 2_000
+
+export function useBillSyncTask(taskId: string | null) {
+  return useQuery({
+    queryKey: ['bills', 'sync', taskId],
+    queryFn: ({ signal }) => apiGet<BillSyncTask>(`/bills/sync/${encodeURIComponent(taskId ?? '')}`, {}, signal),
+    enabled: !!taskId,
+    // 跑完就停下来，别一直问
+    refetchInterval: (query) => (query.state.data?.done ? false : SYNC_POLL_MS),
+    retry: false,
   })
 }

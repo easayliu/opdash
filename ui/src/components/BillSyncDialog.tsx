@@ -1,0 +1,212 @@
+import { Suspense, useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { CloudDownloadIcon, XIcon } from 'lucide-react'
+import { apiPost } from '@/api/client'
+import { useBillSyncTask } from '@/api/queries'
+import type { BillProvider, BillSyncStarted } from '@/api/types'
+import { Button, Hint, ModalPanel, Select, Spinner } from '@/components/ui'
+import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
+
+/**
+ * 手动拉一次账单。
+ *
+ * 账单并非推送而来，而是 goscan 按 cron 向云厂商拉取——刚接入、补历史账期，或当日调度尚未
+ * 到点时，页面上便是空的。本对话框把「拉取一次」转交 goscan：
+ * `POST /api/bills/sync` 登记一个后台任务并取得 task id，此后每两秒查询一次状态，完成后刷新
+ * 账单查询的缓存，页面数字随之更新。
+ *
+ * **一次拉取需要时间**（按账期逐页调用云厂商 API），耗时数十秒至数分钟均属正常，因此此处
+ * 不等待结果返回，而采用轮询；关闭对话框后任务继续执行，重新打开虽看不到进度，也不影响其运行。
+ */
+const GRANULARITIES = [
+  { value: 'both', label: '月度 + 日度' },
+  { value: 'monthly', label: '只要月度' },
+  { value: 'daily', label: '只要日度' },
+]
+
+export function BillSyncDialog({
+  providers,
+  from,
+  to,
+  onClose,
+}: {
+  providers: BillProvider[]
+  /** 默认拉页面上正在看的那段账期 */
+  from: string
+  to: string
+  onClose: () => void
+}) {
+  const qc = useQueryClient()
+  const [provider, setProvider] = useState<BillProvider>(providers[0] ?? 'alicloud')
+  const [fromPeriod, setFromPeriod] = useState(from)
+  const [toPeriod, setToPeriod] = useState(to)
+  const [granularity, setGranularity] = useState('both')
+  const [force, setForce] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [started, setStarted] = useState<BillSyncStarted | null>(null)
+  const task = useBillSyncTask(started?.task_id ?? null)
+
+  // 完成后将账单相关查询全部作废：页面的图与表会自行重查，无需手动刷新
+  const done = task.data?.done
+  useEffect(() => {
+    if (done) void qc.invalidateQueries({ queryKey: ['bills'], refetchType: 'all' })
+  }, [done, qc])
+
+  const months = periodsBetween(fromPeriod, toPeriod).length
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
+      setStarted(
+        await apiPost<BillSyncStarted>('/bills/sync', {
+          provider,
+          from: fromPeriod,
+          to: toPeriod,
+          granularity: provider === 'alicloud' ? granularity : undefined,
+          force,
+        }),
+      )
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Suspense fallback={null}>
+      <ModalPanel
+        open
+        onOpenChange={(next) => !next && onClose()}
+        labelledBy="bill-sync-title"
+        className="fixed inset-x-3 top-24 z-50 mx-auto flex max-h-[calc(100dvh-8rem)] max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[32rem] md:-translate-x-1/2"
+      >
+        <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3">
+          <CloudDownloadIcon className="mt-0.5 size-4 shrink-0 text-muted-fg" />
+          <div className="min-w-0 flex-1">
+            <h2 id="bill-sync-title" className="text-sm font-semibold">
+              拉取账单
+            </h2>
+            <p className="mt-0.5 text-2xs text-muted-fg">
+              立即让 goscan 向云厂商拉取一次。任务完成后账单才会入库，其间页面数字不会变化
+            </p>
+          </div>
+          <Button variant="ghost" className="px-2" onClick={onClose} title="关闭 (Esc)">
+            <XIcon className="size-4" />
+          </Button>
+        </header>
+
+        <form onSubmit={submit} className="flex flex-col gap-3 px-4 py-3 text-xs">
+          <label className="flex items-center gap-2">
+            <span className="w-16 shrink-0 text-muted-fg">云</span>
+            <Select value={provider} onChange={(e) => setProvider(e.target.value as BillProvider)} className="h-8 flex-1 text-xs" disabled={!!started}>
+              {providers.map((p) => (
+                <option key={p} value={p}>
+                  {PROVIDER_LABELS[p]}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="w-16 shrink-0 text-muted-fg">账期</span>
+            <input
+              value={fromPeriod}
+              onChange={(e) => setFromPeriod(e.target.value)}
+              placeholder="2026-04"
+              aria-label="起始账期"
+              disabled={!!started}
+              className="h-8 w-28 rounded-md border border-input bg-card px-2 text-fg tabular-nums focus:border-brand focus:ring-2 focus:ring-brand/25 focus:outline-none"
+            />
+            <span className="text-muted-fg">至</span>
+            <input
+              value={toPeriod}
+              onChange={(e) => setToPeriod(e.target.value)}
+              placeholder="2026-09"
+              aria-label="结束账期"
+              disabled={!!started}
+              className="h-8 w-28 rounded-md border border-input bg-card px-2 text-fg tabular-nums focus:border-brand focus:ring-2 focus:ring-brand/25 focus:outline-none"
+            />
+            <span className="text-2xs text-muted-fg">{months > 0 ? `共 ${months} 个账期` : '账期格式为 2026-09'}</span>
+          </label>
+          {provider === 'alicloud' && (
+            <label className="flex items-center gap-2">
+              <span className="w-16 shrink-0 text-muted-fg">粒度</span>
+              <Select value={granularity} onChange={(e) => setGranularity(e.target.value)} className="h-8 flex-1 text-xs" disabled={!!started}>
+                {GRANULARITIES.map((g) => (
+                  <option key={g.value} value={g.value}>
+                    {g.label}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          )}
+          <Hint text="不勾选时，goscan 遇到已有数据的账期会跳过；补数据或云厂商调整过账单时请勾选">
+            <label className="flex items-center gap-2">
+              <span className="w-16 shrink-0" aria-hidden="true" />
+              <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} disabled={!!started} className="size-3.5 accent-[var(--brand)]" />
+              已有数据也重新拉取
+            </label>
+          </Hint>
+
+          {error && <p className="rounded-md bg-danger-soft px-3 py-2 text-danger">{error}</p>}
+
+          {started && (
+            <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
+              <div className="flex items-center gap-2">
+                {!task.data?.done && <Spinner className="size-3.5" />}
+                <span className="font-medium">
+                  {task.data?.done
+                    ? task.data.ok
+                      ? '同步完成'
+                      : '同步失败'
+                    : task.data?.status === 'running'
+                      ? '正在拉取…'
+                      : '已提交，等待执行…'}
+                </span>
+                <span className="ml-auto text-2xs text-muted-fg">
+                  {PROVIDER_LABELS[started.provider]} · {started.from} 至 {started.to}
+                </span>
+              </div>
+              {task.data?.done && task.data.ok && (
+                <p className="mt-1 text-2xs text-muted-fg">
+                  取回 {task.data.fetched.toLocaleString('zh-CN')} 条，写入 {task.data.records.toLocaleString('zh-CN')} 条；页面数据已重新查询
+                </p>
+              )}
+              {task.data?.done && !task.data.ok && <p className="mt-1 text-2xs text-danger">{task.data.error || task.data.message || '详情请查看 goscan 日志'}</p>}
+              {!task.data?.done && (
+                <p className="mt-1 text-2xs text-muted-fg">
+                  需按账期逐页调用云厂商接口，通常耗时数十秒至数分钟；关闭本窗口不会中断任务
+                </p>
+              )}
+              {task.isError && <p className="mt-1 text-2xs text-danger">无法获取任务状态：{(task.error as Error).message}</p>}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              {started?.task_id && task.data?.done ? '完成' : '关闭'}
+            </Button>
+            {!started && (
+              <Button type="submit" variant="primary" disabled={busy || months === 0}>
+                {busy ? '提交中…' : '开始拉取'}
+              </Button>
+            )}
+            {started && task.data?.done && (
+              <Button
+                type="button"
+                onClick={() => {
+                  setStarted(null)
+                  setError(null)
+                }}
+              >
+                再拉取一次
+              </Button>
+            )}
+          </div>
+        </form>
+      </ModalPanel>
+    </Suspense>
+  )
+}

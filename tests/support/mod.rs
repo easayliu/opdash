@@ -75,6 +75,8 @@ pub struct Canned {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    /// 只回给 SQL 里含这个关键字的请求（[`FakeClickhouse::respond_to`]）
+    pub needle: Option<String>,
 }
 
 pub struct FakeClickhouse {
@@ -100,12 +102,8 @@ impl FakeClickhouse {
                     tokio::spawn(async move {
                         let mut stream = stream;
                         let Some(captured) = read_request(&mut stream).await else { return };
-                        requests.lock().unwrap().push(captured);
-                        let canned = responses.lock().unwrap().pop_front().unwrap_or(Canned {
-                            status: 200,
-                            headers: Vec::new(),
-                            body: String::new(),
-                        });
+                        requests.lock().unwrap().push(captured.clone());
+                        let canned = take_response(&responses, &captured.body);
                         let mut head = format!(
                             "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
                             canned.status,
@@ -135,13 +133,32 @@ impl FakeClickhouse {
         self.respond_with(200, Vec::new(), body)
     }
 
+    /// 只回给 SQL 里含 `needle` 的那个请求。
+    ///
+    /// 一个页面同时问几张表时（费用页的两朵云）请求是并发发出去的，到达顺序不定，光按队列
+    /// 顺序摆响应会随机串台。按 SQL 关键字配对就稳了。
+    pub fn respond_to(&self, needle: &str, body: impl Into<String>) -> &Self {
+        self.responses.lock().unwrap().push_back(Canned {
+            status: 200,
+            headers: Vec::new(),
+            body: body.into(),
+            needle: Some(needle.to_owned()),
+        });
+        self
+    }
+
     pub fn respond_with(
         &self,
         status: u16,
         headers: Vec<(String, String)>,
         body: impl Into<String>,
     ) -> &Self {
-        self.responses.lock().unwrap().push_back(Canned { status, headers, body: body.into() });
+        self.responses.lock().unwrap().push_back(Canned {
+            status,
+            headers,
+            body: body.into(),
+            needle: None,
+        });
         self
     }
 
@@ -160,6 +177,19 @@ impl FakeClickhouse {
 
     pub fn last_request(&self) -> Captured {
         self.requests.lock().unwrap().last().cloned().expect("no request captured")
+    }
+}
+
+/// 挑一个响应：先找关键字对得上的，没有就拿第一个没指定关键字的；都没有回空。
+fn take_response(responses: &Arc<Mutex<VecDeque<Canned>>>, sql: &str) -> Canned {
+    let mut queue = responses.lock().unwrap();
+    let pick = queue
+        .iter()
+        .position(|c| c.needle.as_ref().is_some_and(|n| sql.contains(n.as_str())))
+        .or_else(|| queue.iter().position(|c| c.needle.is_none()));
+    match pick.and_then(|i| queue.remove(i)) {
+        Some(c) => c,
+        None => Canned { status: 200, headers: Vec::new(), body: String::new(), needle: None },
     }
 }
 
@@ -286,6 +316,72 @@ pub fn columns_fixture() -> String {
     out
 }
 
+/// goscan 三张账单表的 system.columns，追加在 [`columns_fixture`] 后面。
+///
+/// `suffix` 给 `_distributed` 就是改名之前那批表的样子（opdash 要能自己认出来）。
+pub fn bill_columns(suffix: &str) -> String {
+    let volc: Vec<(&str, &str)> = opdash::schema::VOLCENGINE_BILL_COLUMNS
+        .iter()
+        .map(|n| (*n, "String")) // 火山的金额列在库里也是 String，原样保留
+        .collect();
+    let ali: Vec<(&str, &str)> = opdash::schema::ALICLOUD_BILL_COLUMNS
+        .iter()
+        .map(|n| {
+            let ty = match *n {
+                "billing_date" => "Date",
+                "pretax_amount" | "payment_amount" | "pretax_gross_amount" => "Float64",
+                _ => "String",
+            };
+            (*n, ty)
+        })
+        .collect();
+    let mut out = String::new();
+    for (table, cols) in [
+        (format!("volcengine_bill{suffix}"), &volc),
+        (format!("alicloud_bill_monthly{suffix}"), &ali),
+        (format!("alicloud_bill_daily{suffix}"), &ali),
+    ] {
+        for (name, ty) in cols {
+            out.push_str(&format!(r#"{{"table":"{table}","name":"{name}","type":"{ty}"}}"#));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// `system.tables.sorting_key` 的回放：账单表的去重键就是从这里读的。
+/// 集群上 Distributed 表自己没有排序键，所以给的是 `_local` 那张。
+pub fn sorting_keys_fixture(suffix: &str) -> String {
+    let local = |base: &str| {
+        if suffix.is_empty() { base.to_owned() } else { format!("{base}_local") }
+    };
+    format!(
+        concat!(
+            r#"{{"table":"{}","sorting_key":"BillPeriod, ExpenseDate, InstanceNo, ExpenseBeginTime, Product, ElementCode, PayableAmount"}}"#,
+            "\n",
+            r#"{{"table":"{}","sorting_key":"billing_cycle, product_code, instance_id, bill_account_id, subscription_type, payment_amount"}}"#,
+            "\n",
+            r#"{{"table":"{}","sorting_key":"billing_date, product_code, instance_id, bill_account_id, subscription_type, payment_amount"}}"#,
+            "\n",
+        ),
+        local("volcengine_bill"),
+        local("alicloud_bill_monthly"),
+        local("alicloud_bill_daily"),
+    )
+}
+
+/// 起一个账单表也在的 app。表结构那三条（列、版本、排序键）已经回放好。
+pub async fn app_with_bills(
+    fake: &FakeClickhouse,
+    suffix: &str,
+    extra_args: &[&str],
+) -> axum::Router {
+    fake.respond(format!("{}{}", columns_fixture(), bill_columns(suffix)))
+        .respond(version_fixture())
+        .respond(sorting_keys_fixture(suffix));
+    app(fake, extra_args).await
+}
+
 /// 少一张表的 system.columns（`table` 是 `app_log` / `otel_trace` / `otel_metric`）。
 pub fn columns_without(table: &str) -> String {
     columns_fixture()
@@ -351,6 +447,11 @@ pub async fn app_at(endpoint: &str, extra_args: &[&str]) -> axum::Router {
         &config.log_table,
         &config.trace_table,
         &config.metric_table,
+        [
+            &config.volcengine_bill_table,
+            &config.alicloud_monthly_table,
+            &config.alicloud_daily_table,
+        ],
     ));
     let auth = opdash::auth::Auth::from_config(&config).expect("打开 API key 文件");
     let saved = Arc::new(

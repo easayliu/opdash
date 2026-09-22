@@ -57,6 +57,11 @@ async fn run() -> anyhow::Result<()> {
         &config.log_table,
         &config.trace_table,
         &config.metric_table,
+        [
+            &config.volcengine_bill_table,
+            &config.alicloud_monthly_table,
+            &config.alicloud_daily_table,
+        ],
     ));
     // 库没起来也照样启动：健康检查会报，后台会一直重试。这样部署顺序不用讲究先后。
     match schema.refresh().await {
@@ -74,6 +79,35 @@ async fn run() -> anyhow::Result<()> {
             // 指标表是可选的，没有就只是不显示指标页——说一句原因，免得以为是 bug
             if let Some(note) = &s.metrics_note {
                 tracing::info!(reason = %note, "指标页未启用");
+            }
+            // 账单表同理：没部署 goscan 就只是没有费用页
+            match (&s.bills, &s.bills_note) {
+                (Some(_), note) => {
+                    tracing::info!(
+                        volcengine = s
+                            .bills
+                            .as_ref()
+                            .and_then(|b| b.volcengine.as_ref())
+                            .map(|t| t.table.name.as_str())
+                            .unwrap_or("-"),
+                        alicloud_monthly = s
+                            .bills
+                            .as_ref()
+                            .and_then(|b| b.alicloud_monthly.as_ref())
+                            .map(|t| t.table.name.as_str())
+                            .unwrap_or("-"),
+                        alicloud_daily = s
+                            .bills
+                            .as_ref()
+                            .and_then(|b| b.alicloud_daily.as_ref())
+                            .map(|t| t.table.name.as_str())
+                            .unwrap_or("-"),
+                        note = note.as_deref().unwrap_or(""),
+                        "费用页已启用"
+                    );
+                }
+                (None, Some(note)) => tracing::info!(reason = %note, "费用页未启用"),
+                (None, None) => {}
             }
         }
         Err(e) => tracing::warn!(error = %e, "启动时读不到表结构，稍后自动重试"),

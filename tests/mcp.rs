@@ -512,3 +512,63 @@ async fn without_a_metric_table_the_metric_tools_are_not_offered() {
     let (_, body) = rpc(&app, request(2, "initialize", json!({}))).await;
     assert!(body["result"]["instructions"].as_str().unwrap().contains("指标表未启用"));
 }
+
+/// 账单工具：账期参数（不是时间戳）翻译成 `/api/bills/*` 的查询串，结果压扁成模型好读的形状。
+#[tokio::test]
+async fn cost_tools_speak_in_billing_periods() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &[]).await;
+    fake.respond_to("volcengine_bill", "{\"period\":\"2026-09\",\"amount\":100,\"rows\":2}\n")
+        .respond_to(
+            "alicloud_bill_monthly",
+            "{\"period\":\"2026-09\",\"amount\":23.5,\"rows\":1}\n",
+        );
+
+    let (err, out) =
+        call_tool(&app, "cost_summary", json!({ "from": "2026-09", "to": "2026-09" })).await;
+    assert!(!err, "{out}");
+    assert_eq!(out["granularity"], "month");
+    assert_eq!(out["total"], 123.5);
+    // 各云的分摊平铺进同一个对象，省掉一层 by_provider
+    assert_eq!(out["points"][0]["volcengine"], 100.0);
+    assert_eq!(out["points"][0]["alicloud"], 23.5);
+    assert_eq!(out["by_provider"]["alicloud"], 23.5);
+
+    // 排行：share 转成百分数，other 说明白是什么
+    fake.respond_to("GROUP BY _key", "{\"key\":\"云服务器\",\"amount\":80}\n")
+        .respond_to("sum(_amount) AS amount, count()", "{\"amount\":100,\"rows\":9}\n")
+        .respond_to("GROUP BY _key", "")
+        .respond_to("sum(_amount) AS amount, count()", "{\"amount\":0,\"rows\":0}\n");
+    let (err, out) =
+        call_tool(&app, "cost_breakdown", json!({ "by": "product", "months": 1 })).await;
+    assert!(!err, "{out}");
+    assert_eq!(out["rows"][0]["key"], "云服务器");
+    assert_eq!(out["rows"][0]["share_pct"], 80.0);
+    assert_eq!(out["other"], 20.0);
+
+    // 账期写错了要作为工具错误回去（模型能自己改），不是 RPC 错误
+    let (err, out) = call_tool(&app, "cost_summary", json!({ "from": "2026/09" })).await;
+    assert!(err, "{out}");
+    assert!(out.as_str().unwrap_or_default().contains("YYYY-MM"), "{out}");
+}
+
+/// 没部署 goscan：费用工具整组不列，说明里也讲一句。
+#[tokio::test]
+async fn without_bill_tables_the_cost_tools_are_not_offered() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+
+    let (_, body) = rpc(&app, request(1, "tools/list", json!({}))).await;
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"search_logs"), "{names:?}");
+    for gone in ["cost_summary", "cost_breakdown", "cost_detail"] {
+        assert!(!names.contains(&gone), "没有账单表，不该列 {gone}: {names:?}");
+    }
+    let (_, body) = rpc(&app, request(2, "initialize", json!({}))).await;
+    assert!(body["result"]["instructions"].as_str().unwrap().contains("账单表未启用"));
+}

@@ -15,6 +15,13 @@ services:
       - OPDASH_DATABASE=${OPDASH_DATABASE:-logs}
       # 指标表，没部署 metricpipe 的话这张表不存在，指标页签自动不显示
       - OPDASH_METRIC_TABLE=${OPDASH_METRIC_TABLE:-otel_metric}
+      # goscan 同步的云账单，三张表各自可以没有；一张都没有就不显示费用页。
+      # 改名之前建的表带 _distributed 后缀，opdash 会自己认
+      - OPDASH_VOLCENGINE_BILL_TABLE=${OPDASH_VOLCENGINE_BILL_TABLE:-volcengine_bill}
+      - OPDASH_ALICLOUD_MONTHLY_TABLE=${OPDASH_ALICLOUD_MONTHLY_TABLE:-alicloud_bill_monthly}
+      - OPDASH_ALICLOUD_DAILY_TABLE=${OPDASH_ALICLOUD_DAILY_TABLE:-alicloud_bill_daily}
+      # goscan 的地址，配了费用页上才有「拉取账单」按钮
+      - OPDASH_GOSCAN_URL=${OPDASH_GOSCAN_URL:-}
       - OPDASH_TIMEZONE=${OPDASH_TIMEZONE:-Asia/Shanghai}
       # 内网可不配；配了就是一组共享账号密码
       - OPDASH_BASIC_AUTH=${OPDASH_BASIC_AUTH:-}
@@ -27,10 +34,10 @@ services:
       - OPDASH_SESSION_SECRET=${OPDASH_SESSION_SECRET:-}
       # 用户自己生成的 API key（MCP / 脚本用）最长有效期
       - OPDASH_API_KEY_TTL=${OPDASH_API_KEY_TTL:-90d}
+      - RUST_LOG=${RUST_LOG:-info}
     # API key 文件（只存哈希）和收藏的查询都在 /var/lib/opdash 下，挂个卷重启才不丢
     volumes:
       - opdash-data:/var/lib/opdash
-      - RUST_LOG=${RUST_LOG:-info}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

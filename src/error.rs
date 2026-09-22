@@ -31,6 +31,10 @@ pub enum Error {
     /// 同时跟随的连接太多（每条都在按 `--tail-interval` 轮库）。
     #[error("同时跟随的人太多（上限 {0}），请稍后再试或先停掉别的跟随")]
     TooManyTails(usize),
+    /// goscan（账单同步服务）拒绝了这次拉取，或者根本连不上。
+    /// `status` 是它回的 HTTP 状态码，0 表示请求没发出去 / 没等到回应。
+    #[error("{message}")]
+    Goscan { status: u16, message: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -77,6 +81,14 @@ impl Error {
             Error::Unavailable(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Busy | Error::TooManyTails(_) => StatusCode::SERVICE_UNAVAILABLE,
+            // goscan 的状态码原样透出去：409 是「已经有一个同步在跑」，429 是「任务排满了」，
+            // 这两句对着按钮的人是有用的信息，折成 500 就全丢了
+            Error::Goscan { status, .. } => match *status {
+                409 => StatusCode::CONFLICT,
+                429 => StatusCode::TOO_MANY_REQUESTS,
+                400..=499 => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            },
             Error::ClickHouse { code, .. } => match *code {
                 TIMEOUT_EXCEEDED | TOO_SLOW | SOCKET_TIMEOUT => StatusCode::GATEWAY_TIMEOUT,
                 TOO_MANY_ROWS | TOO_MANY_BYTES | TOO_MANY_ROWS_OR_BYTES | MEMORY_LIMIT_EXCEEDED => {
@@ -104,6 +116,8 @@ impl Error {
             (_, StatusCode::GATEWAY_TIMEOUT) => "timeout",
             (_, StatusCode::PAYLOAD_TOO_LARGE) => "too_heavy",
             (_, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE) => "unavailable",
+            // goscan 那边已经有一个同步在跑 / 任务排满了：等一会儿再点，不是谁的 bug
+            (_, StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS) => "busy",
             _ => "internal",
         }
     }

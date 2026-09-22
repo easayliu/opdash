@@ -1,13 +1,17 @@
 # opdash
 
-trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `logs.app_log`、[tracepipe](../trace) 写的
-`logs.otel_trace` 和 [metricpipe](../metric) 写的 `logs.otel_metric` 三张 ClickHouse 表，给内部业务开发
-排障用：拿一个 trace id 看整条链路和这条请求的全部日志；按服务 / 接口找慢请求、错请求；按关键字翻日志、
-看堆栈、看上下文；看某个服务的错误率和 P95；按标签画指标曲线，从指标上的 exemplar 直接跳到那次请求。
+trace、日志、指标和云账单的查询页面。数据来自 [logpipe](../log) 写的 `logs.app_log`、[tracepipe](../trace)
+写的 `logs.otel_trace`、[metricpipe](../metric) 写的 `logs.otel_metric`，以及 [goscan](../goscan) 按账期同步
+进来的火山引擎 / 阿里云账单，都在同一个 ClickHouse 库里。给内部业务开发排障用：拿一个 trace id 看整条链路
+和这条请求的全部日志；按服务 / 接口找慢请求、错请求；按关键字翻日志、看堆栈、看上下文；看某个服务的错误率
+和 P95；按标签画指标曲线，从指标上的 exemplar 直接跳到那次请求；再顺带看这个月的云上花了多少钱、花在哪。
 单二进制，只读，不需要别的服务。
 
-指标表是**可选**的：没部署 metricpipe 的地方 `logs.otel_metric` 不存在，指标页签自动不显示，另外两张表
-照常用。
+前三个是「应用自己吐出来的」，goscan 是「去云厂商那儿拉回来的」——所以费用页的时间参数是**账期**
+（`2026-09`），不是顶栏那个时间范围。
+
+指标表和账单表都是**可选**的：没部署 metricpipe / goscan 的地方对应的表不存在，那个页签自动不显示，
+其余的照常用。
 
 ```text
   浏览器 ──▶ /api/*  axum ── 参数化 SQL、readonly=2 ──▶ ClickHouse HTTP（单机或 Distributed）
@@ -27,6 +31,7 @@ trace、日志和指标的查询页面。数据来自 [logpipe](../log) 写的 `
 | `/errors` | **错误分组**：把出错的 span 按「同一种报错」归堆——异常类 + 消息 + 哪个接口，一行一种，带次数 / 影响多少条链路 / 最后一次什么时候；展开就是堆栈、样本链路和三个去处 |
 | `/services`（首页） | 服务总览：每个服务一张卡——请求量 / 错误率 / P95 各带「和上一个同样长的时间窗比」、一条迷你趋势；错误率 ≥1% / P95 涨 1.5 倍以上的标黄、≥5% / 3 倍标红并排到最前面；可切成表格 |
 | `/services/:name` | 单个服务：**和对比时段比，是哪些接口变了**（变化榜 + 每一列都带变化的接口表），请求量与错误、延迟分位趋势（都叠着对比时段） |
+| `/cost` | **云账单**（goscan 同步的火山引擎 + 阿里云）：按账期的花费和环比、按天的曲线、按产品 / 计费项 / 地域 / 账号 / 实例 / 项目排行（点一行就加成筛选条件）、明细表和 CSV 导出。两朵云合在一张图上，金额口径可切「应付 / 现金 / 原价」。配了 `--goscan-url` 时右上角还有「拉取账单」，可现场补一段账期。**本页按账期查询，顶栏的时间范围在此隐藏** |
 
 ### 首页 · 服务总览（照着 Cloudflare 的 Zone Overview 做的）
 
@@ -225,6 +230,10 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--clickhouse-user` / `--clickhouse-password` | `OPDASH_CLICKHOUSE_USER` / `OPDASH_CLICKHOUSE_PASSWORD` | `default` / 空 | 建议给 opdash 建一个只读账号，profile 里钉住 `readonly=2`、`max_execution_time` |
 | `--database` / `--log-table` / `--trace-table` | `OPDASH_DATABASE` / `OPDASH_LOG_TABLE` / `OPDASH_TRACE_TABLE` | `logs` / `app_log` / `otel_trace` | 和采集端 sink 配置一致；集群上填 Distributed 表名 |
 | `--metric-table` | `OPDASH_METRIC_TABLE` | `otel_metric` | metricpipe 的表。**可以不存在**——那样指标页不显示，启动日志里说一句原因 |
+| `--volcengine-bill-table` / `--alicloud-monthly-table` / `--alicloud-daily-table` | `OPDASH_VOLCENGINE_BILL_TABLE` / `OPDASH_ALICLOUD_MONTHLY_TABLE` / `OPDASH_ALICLOUD_DAILY_TABLE` | `volcengine_bill` / `alicloud_bill_monthly` / `alicloud_bill_daily` | goscan 的三张账单表，**各自可以不存在**（只接了一朵云是常态），一张都没有就不显示费用页。**一般不用配**：表名按「基础名 → `<名字>_distributed` →（火山那张还找）`volcengine_bill_details` → `volcengine_bill_details_distributed`」依次找，goscan 两轮改名建出来的表都认得 |
+| `--goscan-url` | `OPDASH_GOSCAN_URL` | 不配 | goscan 的地址（`http://goscan.logging.svc.cluster.local:8080`）。配了费用页上才有「拉取账单」按钮，见下面「手动拉取账单」。**这是 opdash 唯一一处会向外发出「改变状态」请求的功能**，对 ClickHouse 依旧只读 |
+| `--goscan-timeout` | `OPDASH_GOSCAN_TIMEOUT` | `10s` | 调 goscan 接口的超时。触发同步只是登记一个后台任务，很快返回；真正的拉取在 goscan 侧进行，与此超时无关 |
+| `--bill-dedupe` | `OPDASH_BILL_DEDUPE` | `group` | 账单查询怎么去重：`group` 按建表排序键分组（默认，跨分片也对）、`final` 给表加 `FINAL`、`off` 不去重。见下面「账单表：为什么要在查询里再去重一次」 |
 | `--timezone` | `OPDASH_TIMEZONE` | `Asia/Shanghai` | 直方图分桶对齐的时区，和两张表 `timestamp` 列的时区一致 |
 | `--query-timeout` | `OPDASH_QUERY_TIMEOUT` | `30s` | 传给 ClickHouse 的 `max_execution_time` |
 | `--max-range` | `OPDASH_MAX_RANGE` | `31d` | 允许查询的最大时间跨度 |
@@ -397,9 +406,14 @@ http_headers = { Authorization = "Bearer opdash_…" }
 | `list_metrics` / `query_metric` | 指标目录；按 agg / field / by / 过滤查一个指标的时间序列。不给 agg / field 时按指标类型自动挑 | `/metrics` 全部指标 |
 | `metric_exemplars` | 指标点上挂的 trace id：P99 尖峰直接换成一条链路，拿去 `get_trace` | 图上点一个点 |
 | `metric_events` | 进程重启 / pod 新启动的时刻 | 看板上的虚线 |
+| `cost_summary` | 云账单按账期（或按天）的花费，分云给——「这几个月花了多少」「这个月比上个月涨了吗」 | `/cost` 顶上的图 |
+| `cost_breakdown` | 按产品 / 地域 / 账号 / 实例排行，两朵云合在一起排——「多出来的钱是哪个产品」 | `/cost` 排行 |
+| `cost_detail` | 账单明细，一行一个计费项 | `/cost` 明细表 |
 
 工具都标了 `readOnlyHint`（全是只读查询），客户端据此可以免掉每次调用的确认。没配指标表的部署
-不列指标那几个工具。单次工具结果超过 64 KB 会先砍列表、再截长文本，并在 `notes` 里说清楚砍了
+不列指标那几个工具，没接 goscan 的不列 `cost_*`——列出来模型也只会换回一句「未启用」，白占上下文。
+费用工具的时间参数是**账期**（`from` / `to` 写 `2026-09`，或者用 `months` 说「最近几个月」），
+和别的工具那套 `from` / `to` / `range` 不一样。单次工具结果超过 64 KB 会先砍列表、再截长文本，并在 `notes` 里说清楚砍了
 什么——模型的上下文不该被一次 `search_logs` 灌满。参数名写错（`service` 写成 `service_name`）会
 直接报「不认识的参数」并列出认识的，不会被静默忽略后拿一份全站的数当答案。
 
@@ -442,6 +456,113 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
 指标表和这两张不一样，**它缺了不算错**：表不存在、缺 metricpipe 的固定列、或者属性列不是 JSON，
 都只是让 `/api/meta` 的 `metrics` 变成 `null`（`metrics_note` 里是原因，启动日志里也有一句），
 指标页签不显示，日志和链路一切照旧。硬要求三张表齐全的话，一个还没上指标的环境连日志都打不开了。
+
+### 账单表：为什么要在查询里再去重一次
+
+goscan 的三张账单表（`volcengine_bill` / `alicloud_bill_monthly` / `alicloud_bill_daily`）和另外三张不同：
+它们是 `ReplacingMergeTree`，靠「同一个账期重复拉不会翻倍」来保证幂等。**但在集群上这个保证是不成立的**。
+
+2026-09-22 查线上（`logs` 库、`log` 集群 3 分片）确认的事实：
+
+```sql
+SELECT name, engine_full FROM system.tables WHERE database='logs' AND name LIKE '%bill%';
+-- alicloud_bill_daily_distributed   Distributed('log', 'logs', 'alicloud_bill_daily_local', rand())
+-- volcengine_bill_details_local     ReplacingMergeTree
+--     ORDER BY (BillPeriod, ExpenseDate, InstanceNo, ExpenseBeginTime, Product, ElementCode, PayableAmount)
+```
+
+分片键是 **`rand()`**：同一行重复写一次，两份会落到**不同分片**上。而 `ReplacingMergeTree` 的去重只发生在
+分片内的 merge 里，`FINAL` 同理，goscan 同步完跑的那句 `OPTIMIZE TABLE ... ON CLUSTER FINAL` 也一样——
+跨分片的那一份无论哪种方式都无法收敛。goscan 的日调度每天会把当月重拉一遍（`sync_mode` 无论取 `standard` 还是 `sync-optimal`，都不是
+「先删后插」），一个月下来同一行最多可能存在三份，账单金额随之翻倍。
+
+所以 opdash 默认（`--bill-dedupe=group`）在查询里按**建表时的排序键**再去重一次：
+
+```sql
+SELECT _period AS period, sum(_amount) AS amount FROM (
+  SELECT any(BillPeriod) AS _period, any(toFloat64OrZero(PayableAmount)) AS _amount
+  FROM logs.volcengine_bill
+  WHERE BillPeriod >= {p0:String} AND BillPeriod <= {p1:String}
+  GROUP BY BillPeriod, ExpenseDate, InstanceNo, ExpenseBeginTime, Product, ElementCode, PayableAmount
+) GROUP BY _period
+```
+
+排序键就是 `ReplacingMergeTree` 的去重键，按它分组得到的结果与引擎自身去重后完全一致，且跨分片同样成立。
+重复行在每一列上都相同，取任意一行皆可，因此其余列一律用 `any()`。代价是要把这几个月的数据读出来
+聚合一次——账单一个月不过几万到几十万行，比日志表小四个数量级，可以忽略。
+
+两个实现上的细节：
+
+* **去重键从 `system.tables.sorting_key` 读**，不是写死的（读不到才退回 goscan 当前 DDL 的那套，并打一条
+  warn）。goscan 改了 ORDER BY 而 opdash 没跟的话，按旧键去重会**悄无声息地少算金额**——这类错误不会有人察觉。
+  Distributed 表自己没有排序键，所以问的是它底下的 `_local`。
+* **子查询里的别名一律加下划线前缀**（`AS _instance_id`）。别名和真实列名撞上时，ClickHouse 的分析器会把
+  WHERE 里的那个列名解析成聚合结果，模糊搜直接报 `184: Aggregate function any(instance_id) is found in WHERE`。
+
+#### 手动拉取账单
+
+账单不是推上来的：goscan 按自己的 cron 去云厂商的接口拉。刚接入、补历史账期、或者当天的调度还没到点时，
+页面上就是空的——所以费用页右上角有一个「拉取账单」，把这个动作转给 goscan：
+
+```text
+浏览器 ──▶ POST /api/bills/sync ──▶ opdash ──▶ POST {goscan}/sync         登记后台任务，拿 task id
+                                        ◀── {"task_id":"…","status":"started"}
+浏览器 ──▶ GET /api/bills/sync/{id} ─▶ opdash ──▶ GET {goscan}/tasks/{id}  每 2 秒一次，done 之后刷新页面数据
+```
+
+三点说明：
+
+* **opdash 仍然不写库**。账单是 goscan 拉回来再写进 ClickHouse 的，opdash 只转发「拉一次」这个指令，
+  自己的每条查询照旧带 `readonly=2`。这也是 opdash 唯一一处会向外发出改变状态的请求。
+* **要经 opdash 转一手**，是因为 goscan 的 HTTP 接口没有认证（集群内服务，`pkg/server/server.go` 里只有
+  RequestID / 日志 / recovery / CORS 几个中间件），而 opdash 有登录。让页面直连 goscan 等于把它暴露给浏览器。
+* **触发是异步的**。goscan 收到请求只登记一个后台任务就返回，按账期逐页调用云厂商接口通常要数十秒至
+  数分钟，因此页面靠轮询任务状态，完成后作废账单相关的查询缓存，数字自行更新。goscan 拒绝时的语义原样
+  透出：409 是「已有同步任务正在执行」，429 是「已达并发上限」。
+
+没有配 `--goscan-url` 的部署不显示这个按钮，接口也会回 400 说明原因；账单仍可等 goscan 自己的 cron，
+或用 `goscan --once config.yaml --provider alicloud --start 2026-01 --end 2026-06` 在集群里补。
+
+**MCP 工具里没有这一条**：`cost_*` 三个工具和其余工具一样都标了 `readOnlyHint`，让模型去触发一次几分钟的
+云厂商拉取不在只读的承诺之内；要补数据由人在页面上点。
+
+#### 表名认哪几个
+
+goscan 的表名动过两轮：集群上的 `_distributed` 后缀取消了（现在和 logpipe 一样，Distributed 表就叫基础名），
+火山那张从 `volcengine_bill_details` 改成了 `volcengine_bill`。而两轮改名是「先按新口径重建表、后改配置」，
+中途库里会有多个名字并存——2026-09-22 16:43 那次 DDL 之后，`logs` 库中同时存在 `volcengine_bill_details`
+（刚建的 Distributed）、`volcengine_bill_details_distributed`（上一轮留下的）和 `volcengine_bill_details_local`
+（真正存数据的）；到 16:57 重建为新名并清掉旧表，才收敛成现在的三张 `volcengine_bill` /
+`alicloud_bill_monthly` / `alicloud_bill_daily`。
+
+opdash 因此按一串候选依次查找，**零配置即可对上**：基础名 → `<基础名>_distributed` → 火山那张再加
+`volcengine_bill_details` → `volcengine_bill_details_distributed`。`_local` 始终不在候选之列：它只是一个分片的
+数据，查出来的金额只有三分之一。显式配置了 `--volcengine-bill-table` 且名字不同的部署不再回退到旧名。
+
+#### 账单表的分片键该改
+
+上述去重是**规避**，而非**根治**。以下四条建议按重要性排列；此刻正是调整的时机——线上这三张表刚刚建好，
+尚无一行数据（2026-09-22 全集群 `count()` 均为 0），改动表结构无需迁移任何内容：
+
+1. **Distributed 的分片键不应使用 `rand()`**，应改为按去重键哈希，例如
+   `Distributed('log', 'logs', 'volcengine_bill_local', cityHash64(BillPeriod, InstanceNo))`。同一行的多次写入
+   从此落在同一分片，`ReplacingMergeTree` 与 `FINAL` 方才真正生效。账单数据量小，**单分片足矣**
+   （`Distributed(..., 1)` 或干脆不建 Distributed 表）——分三片的唯一收益是并行扫描，而这几张表一个月的
+   数据量尚不及日志表一分钟。调整之后，opdash 侧把 `--bill-dedupe` 改成 `final` 即可。
+2. **排序键里不要放金额列**。现在 `PayableAmount` / `payment_amount` 是去重键的一部分：云厂商月中调整账单
+   （退款、优惠重算、发票折扣）之后，同一计费项的金额发生变化，新旧两行的排序键随之不同，**两行都会保留**，
+   而这恰恰是「重复拉取」最应当收敛的情形。排序键应该只放业务身份——火山那张表有现成的 `BillDetailId`，
+   阿里云那两张可以用 `(billing_cycle/billing_date, bill_account_id, product_code, instance_id, subscription_type,
+   split_item_id)`——再配合 `ReplacingMergeTree(updated_at)`，令后拉取的那一份胜出（`updated_at` 列已经存在）。
+3. **火山那张表的金额不宜存成 `String`**。`PayableAmount` 这些列现在是 `String`，每次求和都要
+   `toFloat64OrZero`，排序与跳数索引都用不上，压缩率也差。金额宜用 `Decimal(20, 8)`，不丢精度；若需保留 API 返回的
+   原始文本以便核对，可另设一列存放。
+4. **`PARTITION BY toYYYYMM(toDate(ExpenseDate))` 存在隐患**。`ExpenseDate` 是 `String`，`toDate('')` 会抛异常——
+   云厂商只要返回一条 `ExpenseDate` 为空的账单，**整批 INSERT 都会失败**，且只有写入时才会暴露。应改为
+   `toYYYYMM(toDate(parseDateTimeBestEffortOrNull(ExpenseDate)))`，或增设一列 `MATERIALIZED` 的日期列并按其分区。
+
+若第 1、2 条不改，opdash 的 `group` 去重能挡住「重复拉取」，却挡不住第 2 条所述「金额被修正」的重复——
+那种重复在任何去重键下都是两行不同的数据，唯有引擎带版本列方能判定孰新孰旧。
 
 ### 一条日志能有多大
 
@@ -883,6 +1004,15 @@ GET /api/metrics/query        ?from&to&metric&service&agg&field&by&attr=k=v&ratt
 GET /api/metrics/labels       ?metric&column=attributes|resource_attributes
 GET /api/metrics/label_values ?metric&key&column
 GET /api/metrics/exemplars    ?metric&service&attr&limit
+GET /api/bills/periods        库里有哪些账期（费用页拿它定默认区间）
+GET /api/bills/summary        ?from=2026-04&to=2026-09&amount=payable|paid|original&provider&<维度>&q
+                              账期是 YYYY-MM，一次最多 36 个；不给就是最近 6 个
+GET /api/bills/daily          同上，按天（只问有日粒度的表）
+GET /api/bills/breakdown      ?by=product|item|region|zone|account|instance|project|subscription|currency&limit
+GET /api/bills/detail         ?provider=volcengine|alicloud&granularity=monthly|daily&limit&offset
+GET /api/bills/export         同 detail，&format=csv|jsonl
+POST /api/bills/sync          {provider, from, to, granularity, force, mode}  手动拉一次，转给 goscan
+GET /api/bills/sync/{task_id} 这次拉取跑到哪了（页面每 2 秒问一次）
 GET /api/errors               ?from&to&kind=entry|client|all&service&span_name   错误分组，默认 entry
 GET /api/services             ?from&to&compare=day|week|prev&<维度列>
 GET /api/services/operations          ?service=a&service=b&...   一次最多 24 个服务
