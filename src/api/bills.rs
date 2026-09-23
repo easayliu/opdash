@@ -28,7 +28,7 @@ use super::{AppState, params::Params};
 use crate::alloc::Alloc;
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
-use crate::goscan::{Goscan, SyncRequest};
+use crate::goscan::{Goscan, SyncRequest, TaskRow};
 use crate::query::bills::{
     AllocPrepaidRow, AllocRow, Amount, BillFilter, BillQueries, BucketRow, DEFAULT_PERIODS,
     DetailRow, Dimension, KeyRow, Kind, MAX_DETAIL_ROWS, MAX_PERIODS, PeriodRange, PeriodRow,
@@ -47,7 +47,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/bills/detail", get(detail))
         .route("/api/bills/export", get(export))
         .route("/api/bills/sync", post(sync))
-        .route("/api/bills/sync/{task_id}", get(sync_task))
+        .route("/api/bills/sync/running", get(sync_running))
+        .route("/api/bills/sync/{task_id}", get(sync_task).delete(cancel_sync))
+        .route("/api/bills/sync/{task_id}/events", get(sync_events))
 }
 
 /// 排行一次最多返回多少项。
@@ -1231,6 +1233,11 @@ pub struct SyncProgressView {
     pub granularity: String,
     pub periods_done: i64,
     pub periods_total: i64,
+    /// 这一趟已经写入的行数。一趟可能要跑好几分钟，靠它看出还在动；老版本 goscan 不报，为 0
+    pub records: i64,
+    /// 这一趟接口报的总行数；按天拉整月时事先不知道，此时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub records_total: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -1257,16 +1264,32 @@ pub struct SyncTaskResponse {
     /// 跑到第几个账期了；老版本 goscan 不报，就是 null
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<SyncProgressView>,
+    /// 有人请它停下了：它会把手上这一趟写完再停，这期间 `status` 仍是 `running`
+    pub cancel_requested: bool,
+    /// 被停下的同步没跑的那几趟（如 `2026-04 daily`），这些账期的数据原样没动
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_run: Vec<String>,
+    /// 任务发起时的账期区间。接上一个已经在跑的任务（比如 cron 起的）时，页面据此说明它在拉什么
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub to: String,
 }
 
-/// 查询某个同步任务的当前状态。页面据此轮询，`done` 之后即刷新账单查询的缓存。
+/// 查询某个同步任务的当前状态。页面订阅不了事件流（老版本 goscan）时据此轮询，
+/// `done` 之后即刷新账单查询的缓存。
 async fn sync_task(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<SyncTaskResponse>> {
     let client = goscan(&state)?;
-    let task = client.task(&task_id).await?;
-    let done = matches!(task.status.as_str(), "completed" | "failed" | "cancelled");
+    Ok(Json(task_view(client.task(&task_id).await?)))
+}
+
+/// goscan 的任务 → 页面要的形状。轮询、事件流、「正在进行的同步」三条路都走这里，
+/// 页面只认一种 JSON。
+fn task_view(task: TaskRow) -> SyncTaskResponse {
+    let done = task.finished();
     let result = task.result;
     // 账期总数为 0 说明这一版 goscan 还不报进度，别把「0 / 0」当成进度画出来
     let progress = task.progress.filter(|p| p.total > 0).map(|p| SyncProgressView {
@@ -1274,8 +1297,16 @@ async fn sync_task(
         granularity: p.granularity,
         periods_done: p.done.clamp(0, p.total),
         periods_total: p.total,
+        records: p.records.max(0),
+        records_total: (p.records_total > 0).then_some(p.records_total),
     });
-    Ok(Json(SyncTaskResponse {
+    let config = task.config.unwrap_or_default();
+    let (from, to) = if !config.start_period.is_empty() {
+        (config.start_period, config.end_period)
+    } else {
+        (config.bill_period.clone(), config.bill_period)
+    };
+    SyncTaskResponse {
         ok: task.status == "completed" && result.as_ref().is_none_or(|r| r.success),
         done,
         records: result.as_ref().map_or(0, |r| r.records_processed),
@@ -1286,13 +1317,180 @@ async fn sync_task(
         } else {
             task.error
         },
+        not_run: result.map(|r| r.not_run).unwrap_or_default(),
+        cancel_requested: task.cancel_requested,
         id: task.id,
         status: task.status,
         provider: task.provider,
         started_at: real_time(task.start_time),
         ended_at: real_time(task.end_time),
         progress,
-    }))
+        from,
+        to,
+    }
+}
+
+#[derive(Serialize)]
+pub struct SyncCancelResponse {
+    pub task_id: String,
+    /// goscan 回的是 `cancelling`：已请它停下，要等手上这一趟写完
+    pub status: String,
+    pub message: String,
+}
+
+/// 停止一个同步。goscan 立刻答应（202），但会把手上这一趟（一个账期 × 一种粒度）写完才停：
+/// 每一趟拉之前都先清空那个账期，半路掐断会留下只写了一半的账期。已经结束的任务回 409。
+async fn cancel_sync(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<(axum::http::StatusCode, Json<SyncCancelResponse>)> {
+    let client = goscan(&state)?;
+    tracing::info!(task_id = %task_id, goscan = client.base(), "请求停止账单同步");
+    let r = client.cancel(&task_id).await?;
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(SyncCancelResponse {
+            task_id: if r.task_id.is_empty() { task_id } else { r.task_id },
+            status: if r.status.is_empty() { "cancelling".to_owned() } else { r.status },
+            message: r.message,
+        }),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct SyncRunningResponse {
+    /// 这朵云正在进行的同步；没有就是 null
+    pub task: Option<SyncTaskResponse>,
+}
+
+/// 这朵云眼下有没有同步在跑（手动的、cron 起的都算）。
+///
+/// goscan 同一朵云同时只允许一个同步：再点「开始拉取」会被 409 挡回来。与其只报一句「正在同步中」，
+/// 不如把那个任务找出来接着看它的进度——关掉对话框再打开时也用得上。
+async fn sync_running(
+    State(state): State<AppState>,
+    p: Params,
+) -> Result<Json<SyncRunningResponse>> {
+    let client = goscan(&state)?;
+    let provider = match p.get("provider") {
+        Some(raw) => Some(Provider::parse(raw)?),
+        None => None,
+    };
+    let task = client
+        .tasks()
+        .await?
+        .into_iter()
+        // 老版本 goscan 的任务不带 type，一律当同步看；企微日报那种不是
+        .filter(|t| t.kind.is_empty() || t.kind == "sync")
+        .filter(|t| !t.finished())
+        .filter(|t| provider.is_none_or(|p| t.provider == p.as_str()))
+        // 同一朵云按理只有一个；万一有多个，看最近开始的那个
+        .max_by(|a, b| a.start_time.cmp(&b.start_time))
+        .map(task_view);
+    Ok(Json(SyncRunningResponse { task }))
+}
+
+/// 同步进度的事件流：把 goscan 的 `GET /tasks/{id}/events` 转给浏览器。
+///
+/// 事件名与 goscan 一致——`task` 是一份任务状态（形状同 [`sync_task`]，已换成页面要的样子），
+/// `done` 表示任务已结束、流随即关闭，页面收到后必须 `close()`，否则 `EventSource` 会自己重连。
+/// goscan 太旧没有这个接口时回 404，`EventSource` 遇到非 200 不会重连，页面据此退回轮询。
+///
+/// 转发是逐条的：每解析出一帧就推一帧，不攒。SSE 的压缩已在 [`crate::ui::compression`] 里排除，
+/// nginx 的缓冲由 `X-Accel-Buffering: no` 关掉。
+async fn sync_events(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Response> {
+    let client = goscan(&state)?;
+    let upstream = client.events(&task_id).await?;
+    let frames = futures_util::stream::unfold(
+        SseReader { body: Box::pin(upstream.bytes_stream()), buf: Vec::new(), over: false },
+        |mut r| async move {
+            let event = r.next_event().await?;
+            Some((Ok::<_, std::convert::Infallible>(event), r))
+        },
+    );
+    Ok(super::tail::sse_response(frames))
+}
+
+/// 从 goscan 的事件流里一帧一帧地读，转成发给浏览器的事件。
+struct SseReader {
+    body: std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+    /// 按字节攒：一个汉字可能被拆在两块之间，攒满一整帧再解码才不会出乱码
+    buf: Vec<u8>,
+    /// 已经推过 `done`（或者上游出错），下一次就结束这条流
+    over: bool,
+}
+
+impl SseReader {
+    async fn next_event(&mut self) -> Option<axum::response::sse::Event> {
+        use axum::response::sse::Event;
+        use futures_util::StreamExt;
+        loop {
+            if self.over {
+                return None;
+            }
+            // 缓冲里攒够了一帧（以空行结尾）就先把它处理掉
+            if let Some(end) = self.buf.windows(2).position(|w| w == b"\n\n") {
+                let raw: Vec<u8> = self.buf.drain(..end + 2).collect();
+                let frame = String::from_utf8_lossy(&raw);
+                let mut name = "message";
+                let mut data = String::new();
+                for line in frame.lines().map(|l| l.trim_end_matches('\r')) {
+                    if let Some(v) = line.strip_prefix("event:") {
+                        name = if v.trim() == "task" {
+                            "task"
+                        } else if v.trim() == "done" {
+                            "done"
+                        } else {
+                            "other"
+                        };
+                    } else if let Some(v) = line.strip_prefix("data:") {
+                        if !data.is_empty() {
+                            data.push('\n');
+                        }
+                        data.push_str(v.strip_prefix(' ').unwrap_or(v));
+                    }
+                    // `: ping` 注释和 `retry:` 都不必转：保活由本端的 KeepAlive 负责
+                }
+                match name {
+                    "task" => match serde_json::from_str::<TaskRow>(&data) {
+                        Ok(task) => {
+                            if let Ok(event) =
+                                Event::default().event("task").json_data(task_view(task))
+                            {
+                                return Some(event);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "goscan 推来的任务解析失败，跳过这一帧")
+                        }
+                    },
+                    "done" => {
+                        self.over = true;
+                        return Some(Event::default().event("done").data("{}"));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            match self.body.next().await {
+                Some(Ok(chunk)) => {
+                    // goscan 的行尾是 \n；万一经过的代理改成了 \r\n，先去掉 \r 再找空行
+                    self.buf.extend(chunk.iter().copied().filter(|b| *b != b'\r'));
+                }
+                Some(Err(e)) => {
+                    // 上游断了。不推 done：让浏览器的 EventSource 自己重连，重连后第一条就是最新状态；
+                    // 任务若已随 goscan 重启而丢失，重连会拿到 404，页面随之退回轮询并说明原因
+                    tracing::warn!(error = %e, "goscan 的事件流中断");
+                    self.over = true;
+                    return None;
+                }
+                None => return None,
+            }
+        }
+    }
 }
 
 /// goscan 的时间是 Go 的 `time.Time`，没发生的事件报的是零值 `0001-01-01T00:00:00Z` 而不是

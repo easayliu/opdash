@@ -590,20 +590,30 @@ split = { "业务线甲" = 130, "业务线乙" = 400 }  # 或按权重摊给若�
 页面上就是空的——所以费用页右上角有一个「拉取账单」，把这个动作转给 goscan：
 
 ```text
-浏览器 ──▶ POST /api/bills/sync ──▶ opdash ──▶ POST {goscan}/sync         登记后台任务，拿 task id
-                                        ◀── {"task_id":"…","status":"started"}
-浏览器 ──▶ GET /api/bills/sync/{id} ─▶ opdash ──▶ GET {goscan}/tasks/{id}  每 2 秒一次，done 之后刷新页面数据
+浏览器 ──▶ POST   /api/bills/sync                ──▶ POST   {goscan}/sync              登记后台任务，拿 task id
+浏览器 ──▶ GET    /api/bills/sync/{id}/events    ──▶ GET    {goscan}/tasks/{id}/events 进度推送（SSE），done 之后刷新页面数据
+浏览器 ──▶ GET    /api/bills/sync/{id}           ──▶ GET    {goscan}/tasks/{id}        推送不可用时退回每 2 秒轮询一次
+浏览器 ──▶ DELETE /api/bills/sync/{id}           ──▶ DELETE {goscan}/tasks/{id}        停止：写完当前这一趟再停
+浏览器 ──▶ GET    /api/bills/sync/running        ──▶ GET    {goscan}/tasks             这朵云眼下有没有同步在跑
 ```
 
-三点说明：
+对接口径以 goscan README 的「手动同步（给 opdash 对接）」一节为准（swagger 注解会与实际行为有出入）。
+几点说明：
 
-* **opdash 仍然不写库**。账单是 goscan 拉回来再写进 ClickHouse 的，opdash 只转发「拉一次」这个指令，
-  自己的每条查询照旧带 `readonly=2`。这也是 opdash 唯一一处会向外发出改变状态的请求。
-* **要经 opdash 转一手**，是因为 goscan 的 HTTP 接口没有认证（集群内服务，`pkg/server/server.go` 里只有
-  RequestID / 日志 / recovery / CORS 几个中间件），而 opdash 有登录。让页面直连 goscan 等于把它暴露给浏览器。
-* **触发是异步的**。goscan 收到请求只登记一个后台任务就返回，按账期逐页调用云厂商接口通常要数十秒至
-  数分钟，因此页面靠轮询任务状态，完成后作废账单相关的查询缓存，数字自行更新。goscan 拒绝时的语义原样
-  透出：409 是「已有同步任务正在执行」，429 是「已达并发上限」。
+* **opdash 仍然不写库**。账单是 goscan 拉回来再写进 ClickHouse 的，opdash 只转发「拉一次」「停下」这两个指令，
+  自己的每条查询照旧带 `readonly=2`。这也是 opdash 仅有的会向外发出改变状态的请求。
+* **要经 opdash 转一手**，是因为 goscan 的 HTTP 接口没有认证（集群内服务），而 opdash 有登录。
+  让页面直连 goscan 等于把它暴露给浏览器。
+* **进度靠推送，不靠轮询**（goscan v0.5 起）。任务每变一次——受理、开跑、写完一批、换账期、结束——goscan 就推
+  一帧，opdash 逐帧转给浏览器，并换成与轮询接口相同的 JSON；收到 `done` 后页面主动关闭连接，否则 `EventSource`
+  会不停重连。老版本 goscan 没有这个接口，opdash 回 404，浏览器不再重连，页面随即改为每 2 秒轮询一次。
+  进度的单位是「趟」（一个账期 × 一种粒度），一趟可能要跑好几分钟，其间以「本趟已写入 N / M 行」显示仍在推进。
+* **同一朵云同时只能有一个同步**。打开「拉取账单」时，若这朵云已有同步在跑（包括 cron 发起的），页面直接接上
+  它的进度；点「开始拉取」撞上 409 时也一样，而不是只报一句「正在同步中」。关闭窗口不会中断任务，重新打开仍能看到。
+* **可以中途停下，但停在两趟之间**。goscan 每一趟拉之前都会先清空那个账期，半路掐断会留下只写了一半的账期，
+  所以它把手上这一趟写完才停，按下去到真正停下要等几秒到几分钟，其间按钮显示「正在停止…」。停下之后，没跑的
+  那几趟（如 `2026-09 日度`）会列出来，这些账期的数据原样没动。已经结束的任务再点停止，goscan 回 409。
+* goscan 拒绝触发时的语义原样透出：409 是「已有同步任务正在执行」，429 是「已达并发上限」。
 
 没有配 `--goscan-url` 的部署不显示这个按钮，接口也会回 400 说明原因；账单仍可等 goscan 自己的 cron，
 或用 `goscan --once config.yaml --provider alicloud --start 2026-01 --end 2026-06` 在集群里补。
@@ -680,15 +690,17 @@ opdash 这边两处跟着变：**金额的转换函数按库里的真实列类�
 2026-08  大模型服务平台百炼  <账号>;<应用>;<模型>;input_token;0       -0.0045  03:04:47.197
 ```
 
-这一组碰巧大额那行晚了 0.34 秒，合并后会被保留；顺序反过来，这笔费用就没了。opdash 的查询期去重已经能把
-并列行都算上（见上一节），但**存储层合并掉的行，查询时无从找回**。goscan 那边的根治有两种，择一即可：
+这一组碰巧大额那行晚了 0.34 秒，合并后会被保留；顺序反过来，这笔费用就没了。opdash 的查询期去重能把
+并列行都算上（见上一节），但**存储层合并掉的行，查询时无从找回**。
 
-1. **写入前把同键的几行合并成一行**（金额相加）。键保持现状，`ReplacingMergeTree(updated_at)` 的「后拉到的
-   那份胜出」照常成立。
-2. **往排序键里加一列能区分并列行的字段**。阿里云账单项里没有现成的行号，可由 goscan 在写入时按
-   「同一次拉取中同键出现的次序」生成一个序号列；不宜直接用金额，理由见上面第 2 条。
+**goscan v0.5 已经根治**：阿里云两张表的排序键加入了 `item`（订单 / 后付账单 / 退款 / 调账）与 `line_seq`
+（同一次拉取中其余各列都相同的行，按拉到的顺序编号 0、1、2…），每一行账单从此都有唯一的键；重拉某个账期前
+先按分区清空它，云厂商撤掉的行不会残留。opdash 的静态兜底去重键已跟着更新（通常用不上，去重键从
+`system.tables.sorting_key` 读）。
 
-在此之前，同步完成后的 `OPTIMIZE ... FINAL` 会加速这类丢失，宜先停掉。
+**但表要重建才生效**：排序键是建表时定死的，只跑 goscan 的补列语句会把这两列加上，它们却不在键里，撞键的行
+照样被合并掉。线上阿里云两张表需要按 goscan README「2026-09 的结构调整不能原地升级」一节先删后建，再重新同步。
+重建之前，`--bill-dedupe` 继续用默认的 `group`。
 
 ### 一条日志能有多大
 
@@ -1139,7 +1151,10 @@ GET /api/bills/allocation     ?days=7   按归属规则摊到业务线，给出�
 GET /api/bills/detail         ?provider=volcengine|alicloud&granularity=monthly|daily&limit&offset
 GET /api/bills/export         同 detail，&format=csv|jsonl
 POST /api/bills/sync          {provider, from, to, granularity, force, mode}  手动拉一次，转给 goscan
-GET /api/bills/sync/{task_id} 这次拉取跑到哪了（页面每 2 秒问一次）
+GET /api/bills/sync/{task_id} 这次拉取跑到哪了（事件流不可用时页面每 2 秒问一次）
+GET /api/bills/sync/{task_id}/events   同上，SSE 推送：event: task 为任务状态，event: done 表示已结束
+DELETE /api/bills/sync/{task_id}       停止同步：goscan 把当前这一趟写完再停，已结束的回 409
+GET /api/bills/sync/running   ?provider   这朵云正在进行的同步（手动或 cron 发起），没有则 task 为 null
 GET /api/errors               ?from&to&kind=entry|client|all&service&span_name   错误分组，默认 entry
 GET /api/services             ?from&to&compare=day|week|prev&<维度列>
 GET /api/services/operations          ?service=a&service=b&...   一次最多 24 个服务

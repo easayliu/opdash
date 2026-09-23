@@ -684,3 +684,16 @@ pub async fn open_sse(
         .collect();
     (status, head, SseStream { body: response.into_body(), buf: String::new() })
 }
+
+/// 发一个 DELETE，拿回 (状态码, 响应体 JSON)。
+pub async fn delete_json(app: &axum::Router, uri: &str) -> (u16, serde_json::Value) {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let req = axum::http::Request::builder().method("DELETE").uri(uri).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status().as_u16();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+}

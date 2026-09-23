@@ -340,7 +340,7 @@ async fn tail(State(state): State<AppState>, headers: HeaderMap, p: Params) -> R
     Ok(sse_response(events))
 }
 
-fn sse_response<S>(events: S) -> Response
+pub(super) fn sse_response<S>(events: S) -> Response
 where
     S: Stream<Item = std::result::Result<Event, std::convert::Infallible>> + Send + 'static,
 {

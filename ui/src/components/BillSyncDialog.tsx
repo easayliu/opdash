@@ -1,10 +1,10 @@
 import { Suspense, useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { CloudDownloadIcon, XIcon } from 'lucide-react'
-import { apiPost } from '@/api/client'
-import { useBillSyncTask } from '@/api/queries'
-import type { BillProvider, BillSyncProgress, BillSyncStarted, BillSyncTask } from '@/api/types'
-import { Button, Hint, ModalPanel, Select, Spinner } from '@/components/ui'
+import { ApiError, apiDelete, apiGet, apiPost } from '@/api/client'
+import { useBillSyncProgress } from '@/api/sync'
+import type { BillProvider, BillSyncProgress, BillSyncRunning, BillSyncStarted, BillSyncTask } from '@/api/types'
+import { Button, Hint, ModalPanel, Select, Spinner, buttonClass } from '@/components/ui'
 import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
 
 /**
@@ -12,11 +12,15 @@ import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
  *
  * 账单并非推送而来，而是 goscan 按 cron 向云厂商拉取——刚接入、补历史账期，或当日调度尚未
  * 到点时，页面上便是空的。本对话框把「拉取一次」转交 goscan：
- * `POST /api/bills/sync` 登记一个后台任务并取得 task id，此后每两秒查询一次状态，完成后刷新
- * 账单查询的缓存，页面数字随之更新。
+ * `POST /api/bills/sync` 登记一个后台任务并取得 task id，此后订阅它的事件流看进度（老版本 goscan
+ * 没有事件流时退回每两秒轮询一次），完成后刷新账单查询的缓存，页面数字随之更新。
  *
  * **一次拉取需要时间**（按账期逐页调用云厂商 API），耗时数十秒至数分钟均属正常，因此此处
- * 不等待结果返回，而采用轮询；关闭对话框后任务继续执行，重新打开虽看不到进度，也不影响其运行。
+ * 不等待结果返回。关闭对话框后任务继续执行；重新打开时，若这朵云仍有同步在进行（包括 cron 起的），
+ * 直接接上它的进度——goscan 同一朵云同时只允许一个同步，再点「开始拉取」也只会被 409 挡回来。
+ *
+ * 同步可以中途停下，但停在两趟之间：goscan 每一趟拉之前都先清空那个账期，半路掐断会留下只写了
+ * 一半的账期，所以它会把手上这一趟写完再停。没跑的那几趟由 goscan 报回来，数据原样没动。
  *
  * 进度条的单位是**趟**：一个账期一种粒度算一趟，goscan 也只按趟上报（见它的 `TaskProgress`）。
  * 账期内翻了几页拿不到——那是各家 SDK 包装里的事，只进了日志。所以拉一个月的月度账单看到的是
@@ -86,6 +90,13 @@ const GRANULARITIES = [
 /** 进度里那一趟写的是哪张表。火山不分粒度，goscan 不报时这里就是空的 */
 const GRANULARITY_LABELS: Record<string, string> = { monthly: '月度', daily: '日度' }
 
+/** goscan 报的「没跑的那一趟」形如 `2026-04 daily`，换成 `2026-04 日度` */
+function passLabel(pass: string): string {
+  const [period, granularity] = pass.split(' ')
+  const label = GRANULARITY_LABELS[granularity ?? '']
+  return label ? `${period} ${label}` : pass
+}
+
 /**
  * 这一趟在拉什么：`2026-05 日度`。
  *
@@ -118,7 +129,49 @@ export function BillSyncDialog({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [started, setStarted] = useState<BillSyncStarted | null>(null)
-  const task = useBillSyncTask(started?.task_id ?? null)
+  /** 接上的是一个早已在跑的同步（不是本窗口发起的），给一句说明 */
+  const [adopted, setAdopted] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [stopError, setStopError] = useState<string | null>(null)
+  const task = useBillSyncProgress(started?.task_id ?? null)
+
+  /** 这朵云眼下有没有同步在跑；有就接上它的进度。找到了返回 true */
+  const adopt = async (p: BillProvider): Promise<boolean> => {
+    const running = await apiGet<BillSyncRunning>('/bills/sync/running', { provider: p })
+    const t = running?.task
+    if (!t?.id) return false
+    setStarted({ task_id: t.id, provider: p, from: t.from ?? '', to: t.to ?? '', message: '' })
+    setAdopted(true)
+    return true
+  }
+
+  // 打开窗口、切换云时先看一眼：关掉窗口再打开，或者 cron 正在跑，都能直接看到进度
+  useEffect(() => {
+    if (started) return
+    void adopt(provider).catch(() => {
+      // 只是顺带看一眼：查不到不妨碍发起新的同步
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider])
+
+  // 换了任务，停止按钮的状态从头算
+  useEffect(() => {
+    setStopping(false)
+    setStopError(null)
+  }, [started?.task_id])
+
+  const stop = async () => {
+    if (!started) return
+    setStopping(true)
+    setStopError(null)
+    try {
+      await apiDelete(`/bills/sync/${encodeURIComponent(started.task_id)}`)
+    } catch (err) {
+      setStopping(false)
+      setStopError((err as Error).message)
+    }
+  }
+  const cancelling = !task.data?.done && (stopping || !!task.data?.cancel_requested)
 
   // 完成后将账单相关查询全部作废：页面的图与表会自行重查，无需手动刷新
   const done = task.data?.done
@@ -145,6 +198,8 @@ export function BillSyncDialog({
         }),
       )
     } catch (err) {
+      // 这朵云已经有同步在跑：与其只报一句「正在同步中」，不如直接接上它的进度
+      if (err instanceof ApiError && err.status === 409 && (await adopt(provider).catch(() => false))) return
       setError((err as Error).message)
     } finally {
       setBusy(false)
@@ -230,21 +285,32 @@ export function BillSyncDialog({
 
           {error && <p className="rounded-md bg-danger-soft px-3 py-2 text-danger">{error}</p>}
 
+          {started && adopted && (
+            <p className="rounded-md bg-accent-soft px-3 py-2 text-accent">
+              {PROVIDER_LABELS[started.provider]}已有一个同步正在进行（可能由定时任务发起），同一朵云同时只能有一个同步，以下是它的进度
+            </p>
+          )}
+
           {started && (
             <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
               <div className="flex items-center gap-2">
                 {!task.data?.done && <Spinner className="size-3.5" />}
                 <span className="font-medium">
                   {task.data?.done
-                    ? task.data.ok
-                      ? '同步完成'
-                      : '同步失败'
-                    : task.data?.status === 'running'
-                      ? '正在拉取…'
-                      : '已提交，等待执行…'}
+                    ? task.data.status === 'cancelled'
+                      ? '已停止'
+                      : task.data.ok
+                        ? '同步完成'
+                        : '同步失败'
+                    : cancelling
+                      ? '正在停止…'
+                      : task.data?.status === 'running'
+                        ? '正在拉取…'
+                        : '已提交，等待执行…'}
                 </span>
                 <span className="ml-auto text-2xs text-muted-fg">
-                  {PROVIDER_LABELS[started.provider]} · {started.from} 至 {started.to}
+                  {PROVIDER_LABELS[started.provider]}
+                  {started.from && ` · ${started.from}${started.to && started.to !== started.from ? ` 至 ${started.to}` : ''}`}
                 </span>
               </div>
               <ProgressBar task={task.data} />
@@ -255,6 +321,12 @@ export function BillSyncDialog({
                     {pulling(task.data.progress) && ` · 正在拉 ${pulling(task.data.progress)}`}
                   </span>
                 )}
+                {!task.data?.done && !!task.data?.progress?.records && (
+                  <span className="tabular-nums">
+                    本趟已写入 {task.data.progress.records.toLocaleString('zh-CN')}
+                    {task.data.progress.records_total ? ` / ${task.data.progress.records_total.toLocaleString('zh-CN')}` : ''} 行
+                  </span>
+                )}
                 {task.data?.started_at && <Elapsed startedAt={task.data.started_at} endedAt={task.data.ended_at} />}
               </p>
               {task.data?.done && task.data.ok && (
@@ -262,13 +334,26 @@ export function BillSyncDialog({
                   取回 {task.data.fetched.toLocaleString('zh-CN')} 条，写入 {task.data.records.toLocaleString('zh-CN')} 条；页面数据已重新查询
                 </p>
               )}
-              {task.data?.done && !task.data.ok && <p className="mt-1 text-2xs text-danger">{task.data.error || task.data.message || '详情请查看 goscan 日志'}</p>}
-              {!task.data?.done && (
+              {task.data?.done && task.data.status === 'cancelled' && (
                 <p className="mt-1 text-2xs text-muted-fg">
-                  需按账期逐页调用云厂商接口，通常耗时数十秒至数分钟；关闭本窗口不会中断任务
+                  停止前已写入 {task.data.records.toLocaleString('zh-CN')} 条；页面数据已重新查询
+                  {task.data.not_run?.length
+                    ? `。未执行：${task.data.not_run.map(passLabel).join('、')}，这些账期的数据保持原样`
+                    : ''}
                 </p>
               )}
-              {task.isError && <p className="mt-1 text-2xs text-danger">无法获取任务状态：{(task.error as Error).message}</p>}
+              {task.data?.done && !task.data.ok && task.data.status !== 'cancelled' && (
+                <p className="mt-1 text-2xs text-danger">{task.data.error || task.data.message || '详情请查看 goscan 日志'}</p>
+              )}
+              {!task.data?.done && (
+                <p className="mt-1 text-2xs text-muted-fg">
+                  {cancelling
+                    ? '已请求停止：goscan 会把当前这一趟写完再停，以免留下只写了一半的账期，通常需要数秒至数分钟'
+                    : '需按账期逐页调用云厂商接口，通常耗时数十秒至数分钟；关闭本窗口不会中断任务，重新打开仍可查看进度'}
+                </p>
+              )}
+              {stopError && <p className="mt-1 text-2xs text-danger">无法停止：{stopError}</p>}
+              {task.error && <p className="mt-1 text-2xs text-danger">无法获取任务状态：{task.error.message}</p>}
             </div>
           )}
 
@@ -281,11 +366,19 @@ export function BillSyncDialog({
                 {busy ? '提交中…' : '开始拉取'}
               </Button>
             )}
+            {started && !task.data?.done && (
+              <Hint text="goscan 会把当前这一趟（一个账期 × 一种粒度）写完再停，未执行的账期保持原样" asChild>
+                <button type="button" onClick={stop} disabled={cancelling} className={buttonClass({ variant: 'danger' })}>
+                  {cancelling ? '正在停止…' : '停止同步'}
+                </button>
+              </Hint>
+            )}
             {started && task.data?.done && (
               <Button
                 type="button"
                 onClick={() => {
                   setStarted(null)
+                  setAdopted(false)
                   setError(null)
                 }}
               >

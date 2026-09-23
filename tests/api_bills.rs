@@ -813,3 +813,128 @@ async fn a_short_window_scales_the_amortized_part_to_the_same_days() {
     assert_eq!(body["total"], 770.0);
     assert_eq!(body["amortized_by_period"]["2026-09"], 3000.0, "预估用的月度摊销不折算");
 }
+
+// ---------------------------------------------------------------------------------------------
+// goscan v0.5 的新接口：停止同步、正在进行的同步、事件流
+// ---------------------------------------------------------------------------------------------
+
+/// 停止同步：goscan 立刻回 202，任务会把手上这一趟写完才停。已经结束的任务回 409，
+/// 这里的 409 意思是「无须停止」，不能说成「已有同步在跑」。
+#[tokio::test]
+async fn cancel_is_forwarded_and_409_means_already_finished() {
+    let fake = FakeClickhouse::start().await;
+    let goscan = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--goscan-url", goscan.endpoint()]).await;
+
+    goscan.respond_with(
+        202,
+        Vec::new(),
+        r#"{"task_id":"t-1","status":"cancelling","message":"Stop requested: the task stops after the pass in flight is written"}"#,
+    );
+    let (status, body) = delete_json(&app, "/api/bills/sync/t-1").await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["status"], "cancelling");
+    assert_eq!(goscan.last_request().target, "/tasks/t-1");
+
+    goscan.respond_with(409, Vec::new(), r#"{"error":true,"message":"task is not running"}"#);
+    let (status, body) = delete_json(&app, "/api/bills/sync/t-1").await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("任务已经结束"), "{body}");
+
+    goscan.respond_with(404, Vec::new(), r#"{"error":true,"message":"Task not found"}"#);
+    let (status, body) = delete_json(&app, "/api/bills/sync/t-9").await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["kind"], "not_found");
+}
+
+/// 同一朵云同时只允许一个同步。页面被 409 挡回来时，把正在跑的那个找出来接着看：
+/// 企微日报、已经结束的、另一朵云的都不算。
+#[tokio::test]
+async fn running_finds_the_sync_in_flight_for_that_cloud() {
+    let fake = FakeClickhouse::start().await;
+    let goscan = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--goscan-url", goscan.endpoint()]).await;
+
+    goscan.respond(
+        r#"{"count":4,"tasks":[
+          {"id":"n-1","type":"notification","provider":"alicloud","status":"running","start_time":"2026-09-23T09:00:00+08:00"},
+          {"id":"s-old","type":"sync","provider":"alicloud","status":"completed","start_time":"2026-09-23T08:00:00+08:00"},
+          {"id":"s-volc","type":"sync","provider":"volcengine","status":"running","start_time":"2026-09-23T09:05:00+08:00"},
+          {"id":"s-ali","type":"sync","provider":"alicloud","status":"running","start_time":"2026-09-23T09:10:00+08:00","end_time":"0001-01-01T00:00:00Z",
+           "config":{"start_period":"2026-04","end_period":"2026-09","granularity":"both"},
+           "cancel_requested":true,
+           "progress":{"period":"2026-06","granularity":"daily","done":4,"total":12,"records":3400,"records_total":9120}}
+        ]}"#,
+    );
+    let (status, body) = get_json(&app, "/api/bills/sync/running?provider=alicloud").await;
+    assert_eq!(status, 200, "{body}");
+    let task = &body["task"];
+    assert_eq!(task["id"], "s-ali", "{body}");
+    assert_eq!(task["from"], "2026-04");
+    assert_eq!(task["to"], "2026-09");
+    assert_eq!(task["cancel_requested"], true);
+    assert_eq!(task["progress"]["periods_done"], 4);
+    assert_eq!(task["progress"]["records"], 3400);
+    assert_eq!(task["progress"]["records_total"], 9120);
+    assert!(task["ended_at"].is_null(), "{task}");
+    assert_eq!(goscan.last_request().target, "/tasks");
+
+    // 没有在跑的：task 为 null
+    goscan.respond(r#"{"count":0,"tasks":[]}"#);
+    let (_, body) = get_json(&app, "/api/bills/sync/running?provider=alicloud").await;
+    assert!(body["task"].is_null(), "{body}");
+}
+
+/// 事件流逐帧转发：每一帧 `task` 换成页面要的形状，`done` 原样转，保活的 `: ping` 不转。
+/// 停下的同步带着没跑的那几趟。中文消息不能被拆坏。
+#[tokio::test]
+async fn events_are_relayed_frame_by_frame_in_the_page_shape() {
+    let fake = FakeClickhouse::start().await;
+    let goscan = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--goscan-url", goscan.endpoint()]).await;
+
+    goscan.respond_with(
+        200,
+        vec![("Content-Type".into(), "text/event-stream".into())],
+        concat!(
+            "retry: 3000\n\n",
+            "event: task\n",
+            r#"data: {"id":"t-1","type":"sync","provider":"alicloud","status":"running","end_time":"0001-01-01T00:00:00Z","progress":{"period":"2026-08","granularity":"monthly","done":0,"total":12,"records":3400}}"#,
+            "\n\n",
+            ": ping\n\n",
+            "event: task\n",
+            r#"data: {"id":"t-1","type":"sync","provider":"alicloud","status":"cancelled","cancel_requested":true,"result":{"records_processed":109440,"success":false,"message":"已按请求停止","not_run":["2026-09 monthly","2026-09 daily"]}}"#,
+            "\n\n",
+            "event: done\ndata: {}\n\n",
+        ),
+    );
+    let (status, body) = get_raw(&app, "/api/bills/sync/t-1/events", &[]).await;
+    assert_eq!(status, 200);
+    let text = String::from_utf8(body).unwrap();
+    assert_eq!(goscan.last_request().target, "/tasks/t-1/events");
+    // 两帧 task、一帧 done，保活注释不转
+    assert_eq!(text.matches("event: task").count(), 2, "{text}");
+    assert!(text.contains("event: done"), "{text}");
+    assert!(!text.contains("ping"), "{text}");
+    // 已换成页面的形状：趟数叫 periods_done，零值的结束时间不出现
+    assert!(text.contains(r#""periods_done":0"#), "{text}");
+    assert!(text.contains(r#""records":3400"#), "{text}");
+    assert!(!text.contains("0001-01-01"), "{text}");
+    assert!(text.contains(r#""not_run":["2026-09 monthly","2026-09 daily"]"#), "{text}");
+    assert!(text.contains("已按请求停止"), "{text}");
+    assert!(text.contains(r#""done":true"#), "{text}");
+}
+
+/// 老版本 goscan 没有事件流：gin 回纯文本 404。原样报 404，页面的 EventSource 遇到非 200
+/// 不会重连，随即退回轮询。
+#[tokio::test]
+async fn events_404_on_an_old_goscan() {
+    let fake = FakeClickhouse::start().await;
+    let goscan = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--goscan-url", goscan.endpoint()]).await;
+
+    goscan.respond_with(404, Vec::new(), "404 page not found");
+    let (status, body) = get_json(&app, "/api/bills/sync/t-1/events").await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["kind"], "not_found");
+}

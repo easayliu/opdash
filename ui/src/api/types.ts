@@ -145,9 +145,13 @@ export interface BillSyncProgress {
   granularity?: 'monthly' | 'daily'
   periods_done: number
   periods_total: number
+  /** 这一趟已经写入的行数；一趟可能要跑好几分钟，靠它看出还在动。老版本 goscan 不报，为 0 */
+  records: number
+  /** 这一趟接口报的总行数；按天拉整月时事先不知道，此时没有这个字段 */
+  records_total?: number
 }
 
-/** GET /api/bills/sync/{task_id} */
+/** GET /api/bills/sync/{task_id}，事件流里每一帧 `task` 也是这个形状 */
 export interface BillSyncTask {
   id: string
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -166,6 +170,18 @@ export interface BillSyncTask {
   ended_at?: string
   /** 老版本 goscan 不报进度，这里就是 null，页面退回不确定进度条 */
   progress?: BillSyncProgress
+  /** 有人请它停下了：它会把手上这一趟写完再停，这期间 status 仍是 running */
+  cancel_requested: boolean
+  /** 被停下的同步没跑的那几趟，如 `2026-04 daily`；这些账期的数据原样没动 */
+  not_run?: string[]
+  /** 任务发起时的账期区间；接上一个已经在跑的任务时据此说明它在拉什么 */
+  from?: string
+  to?: string
+}
+
+/** GET /api/bills/sync/running：这朵云正在进行的同步，没有就是 null */
+export interface BillSyncRunning {
+  task: BillSyncTask | null
 }
 
 /** 一个账期（`2026-09`）或一天（`2026-09-01`）的花费 */

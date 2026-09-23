@@ -84,6 +84,8 @@ impl Error {
             // goscan 的状态码原样透出去：409 是「已经有一个同步在跑」，429 是「任务排满了」，
             // 这两句对着按钮的人是有用的信息，折成 500 就全丢了
             Error::Goscan { status, .. } => match *status {
+                // 任务查不到（goscan 重启过，或只保留最近 100 个已结束的任务）
+                404 => StatusCode::NOT_FOUND,
                 409 => StatusCode::CONFLICT,
                 429 => StatusCode::TOO_MANY_REQUESTS,
                 400..=499 => StatusCode::BAD_REQUEST,
@@ -118,6 +120,7 @@ impl Error {
             (_, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE) => "unavailable",
             // goscan 那边已经有一个同步在跑 / 任务排满了：等一会儿再点，不是谁的 bug
             (_, StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS) => "busy",
+            (_, StatusCode::NOT_FOUND) => "not_found",
             _ => "internal",
         }
     }

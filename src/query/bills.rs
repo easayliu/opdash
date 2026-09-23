@@ -148,7 +148,9 @@ impl Kind {
     }
 
     /// goscan 当前 DDL 里的排序键 = `ReplacingMergeTree` 的去重键。只在
-    /// `system.tables.sorting_key` 读不到时用，见模块文档。
+    /// `system.tables.sorting_key` 读不到时用，见模块文档。阿里云这套对应 goscan v0.5 的 DDL：
+    /// 加了 `item`（订单 / 后付账单 / 退款 / 调账）和 `line_seq`（同一次拉取里撞键的行按序编号），
+    /// 每一行账单从此有唯一的键。
     pub fn fallback_dedupe(self) -> &'static [&'static str] {
         match self {
             Kind::Volcengine => &[
@@ -167,9 +169,13 @@ impl Kind {
                 "bill_account_id",
                 "subscription_type",
                 "billing_type",
+                "item",
+                "biz_type",
                 "product_detail_code",
+                "region",
+                "zone",
                 "split_item_id",
-                "adjust_type",
+                "line_seq",
             ],
             Kind::AlicloudDaily => &[
                 "billing_date",
@@ -178,9 +184,13 @@ impl Kind {
                 "bill_account_id",
                 "subscription_type",
                 "billing_type",
+                "item",
+                "biz_type",
                 "product_detail_code",
+                "region",
+                "zone",
                 "split_item_id",
-                "adjust_type",
+                "line_seq",
             ],
         }
     }
@@ -1252,7 +1262,7 @@ mod tests {
             .unwrap();
         let sql = q.sql();
         assert!(
-            sql.contains("`adjust_type`, `pretax_amount`, `payment_amount`, `pretax_gross_amount`"),
+            sql.contains("`line_seq`, `pretax_amount`, `payment_amount`, `pretax_gross_amount`"),
             "金额列要进分组: {sql}"
         );
         assert!(sql.contains("max(max(`updated_at`)) OVER (PARTITION BY `billing_date`"), "{sql}");
