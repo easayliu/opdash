@@ -23,10 +23,64 @@ const META = {
     alicloud_daily: null,
     dedupe: 'group',
     sync: true,
+    allocation: { lines: ['甲线', '乙线', '公共'], rules: 2 },
   },
 }
 
 const STATS = { read_rows: 1, read_bytes: 2, result_rows: 1, elapsed_ms: 3 }
+
+/** 一份分摊结果：甲线由两条规则构成，还有一笔没命中规则 */
+const ALLOCATION = {
+  from: '2026-07',
+  to: '2026-09',
+  amount: 'payable',
+  configured: true,
+  window_days: 7,
+  days: 2,
+  days_by_provider: { volcengine: 2, alicloud: 2 },
+  granularity: 'daily',
+  prepaid: true,
+  total: 1000,
+  postpaid: 800,
+  amortized: 200,
+  amortized_by_period: { '2026-09': 200, '2026-10': 200, '2026-11': 200 },
+  daily: 400,
+  lines: [
+    {
+      name: '甲线',
+      amount: 600,
+      postpaid: 400,
+      amortized: 200,
+      daily: 200,
+      share: 0.6,
+      amortized_by_period: { '2026-09': 200, '2026-10': 200 },
+      items: [
+        { product: '云服务器 ECS', rule: '甲线专用机器', amount: 300, daily: 150, share: 0.3, prepaid: false },
+        { product: '云服务器 ECS', rule: 'ECS 其余部分', amount: 100, daily: 50, share: 0.1, prepaid: false },
+        { product: '云服务器 ECS', rule: '包年包月机器', amount: 200, daily: null, share: 0.2, prepaid: true },
+      ],
+    },
+    { name: '乙线', amount: 300, postpaid: 300, amortized: 0, daily: 150, share: 0.3, amortized_by_period: {}, items: [] },
+    { name: '公共', amount: 100, postpaid: 100, amortized: 0, daily: 50, share: 0.1, amortized_by_period: {}, items: [] },
+  ],
+  unmatched: {
+    name: '未归属',
+    amount: 100,
+    postpaid: 100,
+    amortized: 0,
+    daily: 50,
+    share: 0.1,
+    amortized_by_period: {},
+    items: [{ product: '对象存储', rule: null, amount: 100, daily: 50, share: 0.1, prepaid: false }],
+  },
+  products: [{ product: '云服务器 ECS', rule: null, amount: 700, daily: 350, share: 0.7, prepaid: false }],
+  points: [
+    { t: '2026-09-20', total: 550, by_line: { 甲线: 250, 乙线: 300 } },
+    { t: '2026-09-21', total: 250, by_line: { 甲线: 150, 公共: 100 } },
+  ],
+  coverage: null,
+  stats: STATS,
+}
 
 /** 一份「两朵云、三个账期」的假账单。没有后端，这里验的是页面画不画得出来 */
 function stubApi(overrides: Record<string, unknown> = {}) {
@@ -167,6 +221,58 @@ describe('费用页', () => {
     stubApi({ '/api/bills/periods': { periods: [], latest: null, providers: ['volcengine'], stats: STATS } })
     page()
     expect(await screen.findByText('账单表暂无数据')).toBeInTheDocument()
+  })
+
+  it('分析视图把账单摊到业务线，并按日均给出月度预估', async () => {
+    stubApi({ '/api/bills/allocation': ALLOCATION })
+    page('/cost?view=analysis&days=7&est=2026-10')
+    // 日均按「有账单的两天」求得，而不是按自然月的天数
+    expect(await screen.findByText('日均')).toBeInTheDocument()
+    // 日均那张卡片与甲线那一行都是 400.00，此处只确认它确实出现
+    expect((await screen.findAllByText('400.00')).length).toBeGreaterThan(0)
+    // 10 月 31 天：后付费 400 × 31，再加该月摊过来的预付费 200
+    expect(await screen.findByText('2026-10 预估')).toBeInTheDocument()
+    expect(await screen.findByText('12,600.00')).toBeInTheDocument()
+    // 合计分两段列出，预付费摊销单独标明
+    expect(await screen.findByText(/后付费 800.00 · 预付费摊销 200.00/)).toBeInTheDocument()
+    // 三条业务线各占一行（图例上还有一份同名的），未归属单列
+    expect((await screen.findAllByText('甲线')).length).toBeGreaterThan(0)
+    expect(await screen.findByText('未归属')).toBeInTheDocument()
+
+    // 展开甲线，看得到它由哪两条规则构成
+    await userEvent.click((await screen.findAllByRole('button', { name: /甲线/ }))[0])
+    expect(await screen.findByText('甲线专用机器')).toBeInTheDocument()
+    expect(await screen.findByText('ECS 其余部分')).toBeInTheDocument()
+    // 预付费摊来的那一行标着「摊销」，且不给日均
+    expect(await screen.findByText('摊销')).toBeInTheDocument()
+  })
+
+  it('日度账单不完整时如实提示，并给出补拉的办法', async () => {
+    stubApi({
+      '/api/bills/allocation': {
+        ...ALLOCATION,
+        days_by_provider: { alicloud: 1 },
+        coverage: { provider: 'alicloud', daily: 7618.53, monthly: 152958.18 },
+      },
+    })
+    page('/cost?view=analysis')
+    expect(await screen.findByRole('alert')).toHaveTextContent('阿里云的日度账单不完整')
+    // 覆盖比例：7618.53 / 152958.18
+    expect(screen.getByRole('alert')).toHaveTextContent('5.0%')
+    // 配了 goscan 就指向「拉取账单」
+    expect(screen.getByRole('alert')).toHaveTextContent('拉取账单')
+  })
+
+  it('没配归属规则时只给按产品的日均，并说明怎么配', async () => {
+    stubApi({
+      '/api/meta': { ...META, bills: { ...META.bills, allocation: null } },
+      '/api/bills/allocation': { ...ALLOCATION, configured: false, lines: [] },
+    })
+    page('/cost?view=analysis')
+    expect(await screen.findByText('尚未配置成本归属规则')).toBeInTheDocument()
+    expect((await screen.findAllByText(/bill-alloc/)).length).toBeGreaterThan(0)
+    // 按产品那张表照常在
+    expect(await screen.findByText('云服务器 ECS')).toBeInTheDocument()
   })
 
   it('没部署 goscan 就只给一句原因', async () => {

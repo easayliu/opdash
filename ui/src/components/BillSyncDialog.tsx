@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { CloudDownloadIcon, XIcon } from 'lucide-react'
 import { apiPost } from '@/api/client'
 import { useBillSyncTask } from '@/api/queries'
-import type { BillProvider, BillSyncStarted } from '@/api/types'
+import type { BillProvider, BillSyncProgress, BillSyncStarted, BillSyncTask } from '@/api/types'
 import { Button, Hint, ModalPanel, Select, Spinner } from '@/components/ui'
 import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
 
@@ -17,12 +17,65 @@ import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
  *
  * **一次拉取需要时间**（按账期逐页调用云厂商 API），耗时数十秒至数分钟均属正常，因此此处
  * 不等待结果返回，而采用轮询；关闭对话框后任务继续执行，重新打开虽看不到进度，也不影响其运行。
+ *
+ * 进度条的单位是**趟**：一个账期一种粒度算一趟，goscan 也只按趟上报（见它的 `TaskProgress`）。
+ * 账期内翻了几页拿不到——那是各家 SDK 包装里的事，只进了日志。所以拉一个月的月度账单看到的是
+ * 「0 / 1 → 1 / 1」，拉半年的月度加日度才有细腻的刻度；goscan 版本旧到不报进度时退回不确定进度条。
  */
+/** 已用时：`1 分 12 秒`。任务在服务端跑，这里按它的开始时间算，轮询一次刷新一次 */
+function elapsed(startedAt: string | undefined, endedAt: string | undefined): string {
+  if (!startedAt) return ''
+  const from = new Date(startedAt).getTime()
+  const to = endedAt ? new Date(endedAt).getTime() : Date.now()
+  const seconds = Math.max(0, Math.round((to - from) / 1000))
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+}
+
+/**
+ * 进度条。goscan 报了账期进度就画确定的那种，没报就画一条来回扫的不确定条——
+ * **不确定时不能显示百分比**：编一个数字出来比转圈更容易让人误判还要等多久。
+ */
+function ProgressBar({ task }: { task?: BillSyncTask }) {
+  const progress = task?.progress
+  const ratio = progress ? Math.min(1, progress.periods_done / Math.max(1, progress.periods_total)) : null
+  return (
+    <div
+      role="progressbar"
+      aria-label="账单拉取进度"
+      aria-valuemin={0}
+      aria-valuemax={progress?.periods_total ?? undefined}
+      aria-valuenow={progress?.periods_done ?? undefined}
+      aria-valuetext={progress ? `${progress.periods_done} / ${progress.periods_total} 趟` : '正在拉取'}
+      className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+    >
+      {ratio === null ? (
+        <span className="block h-full w-1/3 animate-[cf-indeterminate_1.4s_ease-in-out_infinite] rounded-full bg-brand" />
+      ) : (
+        <span className="block h-full rounded-full bg-brand transition-[width] duration-500" style={{ width: `${ratio * 100}%` }} />
+      )}
+    </div>
+  )
+}
+
 const GRANULARITIES = [
   { value: 'both', label: '月度 + 日度' },
   { value: 'monthly', label: '只要月度' },
   { value: 'daily', label: '只要日度' },
 ]
+
+/** 进度里那一趟写的是哪张表。火山不分粒度，goscan 不报时这里就是空的 */
+const GRANULARITY_LABELS: Record<string, string> = { monthly: '月度', daily: '日度' }
+
+/**
+ * 这一趟在拉什么：`2026-05 日度`。
+ *
+ * 选了「月度 + 日度」时同一个账期会出现两趟，只报账期会让人以为进度卡住了。
+ */
+function pulling(progress: BillSyncProgress): string {
+  if (!progress.period) return ''
+  const label = GRANULARITY_LABELS[progress.granularity ?? '']
+  return label ? `${progress.period} ${label}` : progress.period
+}
 
 export function BillSyncDialog({
   providers,
@@ -54,6 +107,9 @@ export function BillSyncDialog({
   }, [done, qc])
 
   const months = periodsBetween(fromPeriod, toPeriod).length
+  // 一个账期一种粒度算一趟：阿里云选「月度 + 日度」时要拉两倍的趟数，
+  // 这直接决定了要等多久，填完账期就该看得见
+  const pulls = months * (provider === 'alicloud' && granularity === 'both' ? 2 : 1)
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setBusy(true)
@@ -128,7 +184,9 @@ export function BillSyncDialog({
               disabled={!!started}
               className="h-8 w-28 rounded-md border border-input bg-card px-2 text-fg tabular-nums focus:border-brand focus:ring-2 focus:ring-brand/25 focus:outline-none"
             />
-            <span className="text-2xs text-muted-fg">{months > 0 ? `共 ${months} 个账期` : '账期格式为 2026-09'}</span>
+            <span className="text-2xs text-muted-fg">
+              {months > 0 ? `共 ${months} 个账期${pulls > months ? `、${pulls} 趟` : ''}` : '账期格式为 2026-09'}
+            </span>
           </label>
           {provider === 'alicloud' && (
             <label className="flex items-center gap-2">
@@ -169,6 +227,16 @@ export function BillSyncDialog({
                   {PROVIDER_LABELS[started.provider]} · {started.from} 至 {started.to}
                 </span>
               </div>
+              <ProgressBar task={task.data} />
+              <p className="mt-1 flex flex-wrap items-center gap-x-2 text-2xs text-muted-fg">
+                {task.data?.progress && (
+                  <span className="tabular-nums">
+                    {task.data.progress.periods_done} / {task.data.progress.periods_total} 趟
+                    {pulling(task.data.progress) && ` · 正在拉 ${pulling(task.data.progress)}`}
+                  </span>
+                )}
+                {task.data?.started_at && <span className="tabular-nums">已用 {elapsed(task.data.started_at, task.data.ended_at)}</span>}
+              </p>
               {task.data?.done && task.data.ok && (
                 <p className="mt-1 text-2xs text-muted-fg">
                   取回 {task.data.fetched.toLocaleString('zh-CN')} 条，写入 {task.data.records.toLocaleString('zh-CN')} 条；页面数据已重新查询

@@ -324,8 +324,14 @@ pub fn bill_columns(suffix: &str) -> String {
         .iter()
         .map(|n| (*n, "String")) // 火山的金额列在库里也是 String，原样保留
         .collect();
+    // 归属规则会按内网地址、实例规格这类列匹配，预付费的摊销要读服务期那两列（见 --bill-alloc）。
+    // 它们不是 opdash 要求的列，但线上的表里有，假表也得有，否则带这些列的规则一条都命不中
     let ali: Vec<(&str, &str)> = opdash::schema::ALICLOUD_BILL_COLUMNS
         .iter()
+        .chain(
+            ["intranet_ip", "nick_name", "instance_spec", "service_period", "service_period_unit"]
+                .iter(),
+        )
         .map(|n| {
             let ty = match *n {
                 "billing_date" => "Date",

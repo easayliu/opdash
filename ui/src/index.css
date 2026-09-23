@@ -228,3 +228,24 @@ select {
   opacity: 0.55;
   transition: opacity 0.15s;
 }
+
+/* 不确定进度条：来回扫的那一小段。用在「知道它在跑、但报不出百分比」的地方——
+   goscan 旧版本不报账期进度时，拉取对话框就退回这一种 */
+@keyframes cf-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+/* 关掉动效的人看到的是一条静止的条：动效是「还在跑」的提示，不是信息本身，
+   状态文字和已用时已经把话说全了 */
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[cf-indeterminate_1\.4s_ease-in-out_infinite\] {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
+}

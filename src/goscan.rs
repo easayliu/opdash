@@ -56,6 +56,23 @@ pub struct SyncStarted {
     pub provider: String,
 }
 
+/// 跑到哪了。goscan 按**趟**上报：一个账期一种粒度算一趟，没跑起来之前没有这一段。
+#[derive(Debug, Deserialize)]
+pub struct ProgressRow {
+    /// 正在拉的那个账期
+    #[serde(default)]
+    pub period: String,
+    /// 这一趟写哪张表：`monthly` / `daily`。火山不分粒度，老版本 goscan 也不报，都是空串
+    #[serde(default)]
+    pub granularity: String,
+    /// 已经拉完几趟
+    #[serde(default)]
+    pub done: i64,
+    /// 一共几趟
+    #[serde(default)]
+    pub total: i64,
+}
+
 /// `GET /tasks/{id}` 中用得上的几个字段。goscan 返回的字段多于此处，其余不向前端透出。
 #[derive(Debug, Deserialize)]
 pub struct TaskRow {
@@ -72,6 +89,9 @@ pub struct TaskRow {
     pub error: String,
     #[serde(default)]
     pub result: Option<TaskResultRow>,
+    /// 老版本 goscan 不报进度，这里就是 `None`，页面退回不确定进度条
+    #[serde(default)]
+    pub progress: Option<ProgressRow>,
 }
 
 #[derive(Debug, Deserialize)]

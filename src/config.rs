@@ -65,14 +65,25 @@ pub struct Config {
     /// `rand()` 分片：同一个账期重复拉一次，一模一样的两行会落到不同分片上，`FINAL` 只在分片内
     /// 去重，跨分片的那份它看不见——而 goscan 的日调度每天都会把当月重拉一遍，所以这不是小概率。
     ///
-    /// * `group`（默认）：按建表时的排序键（也就是 ReplacingMergeTree 的去重键）在查询里
-    ///   `GROUP BY` 一次，语义和引擎自己的去重一致，跨分片也对；
-    /// * `final`：给表加 `FINAL`。只有分片键确定（不是 `rand()`）时才是对的，便宜一点；
+    /// * `group`（默认）：按建表时的排序键加上金额列在查询里 `GROUP BY` 一次，再按 `updated_at`
+    ///   只留每个键最近一次同步写入的行。去重键并不唯一（阿里云的尾差调整与正常账单同键），
+    ///   金额进分组才不会把并列的两行当成一行；
+    /// * `final`：给表加 `FINAL`，即引擎自己的去重——同键只留一行，**会丢掉并列行**，
+    ///   在 goscan 让每行账单的键都唯一之前不要用；
     /// * `off`：什么都不做，最快，但重复拉过的账期金额会翻倍。
     ///
     /// 详见 README「账单表：为什么要在查询里再去重一次」。
     #[arg(long, env = "OPDASH_BILL_DEDUPE", default_value = "group")]
     pub bill_dedupe: crate::query::bills::Dedupe,
+
+    /// 成本归属规则文件（TOML），费用页的「分析」视图据此把账单分摊到业务线。
+    ///
+    /// 不配也能用：分析视图照常给出日均与月度预估，只是少了业务线这一层——「哪台机器属于谁」
+    /// 不在账单之中，只能由部署方给出。格式与写法见 `examples/bill-alloc.toml` 与
+    /// [`crate::alloc`]。**文件有误时进程直接退出**：归属规则关乎金额，静默降级只会让使用者
+    /// 对着一份错账排查。
+    #[arg(long, env = "OPDASH_BILL_ALLOC")]
+    pub bill_alloc: Option<std::path::PathBuf>,
 
     /// goscan 的地址（如 `http://goscan.logging.svc.cluster.local:8080`）。
     ///

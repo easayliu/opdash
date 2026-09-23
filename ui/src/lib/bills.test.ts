@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changeRatio, dayTick, formatChange, formatMoneyShort, periodSpan, periodTick, periodsBetween, shiftPeriod } from './bills'
+import { changeRatio, dayTick, daysInMonth, formatChange, formatMoneyShort, periodSpan, periodTick, periodsBetween, shiftPeriod } from './bills'
 
 describe('账期算术', () => {
   it('跨年加减', () => {
@@ -40,5 +40,16 @@ describe('金额和环比', () => {
     expect(formatChange(0.25)).toBe('+25.0%')
     expect(formatChange(-0.04)).toBe('-4.0%')
     expect(formatChange(null)).toBe('—')
+  })
+})
+
+describe('账期的天数', () => {
+  it('按自然月给出天数，闰年二月也对', () => {
+    expect(daysInMonth('2026-10')).toBe(31)
+    expect(daysInMonth('2026-09')).toBe(30)
+    expect(daysInMonth('2026-02')).toBe(28)
+    expect(daysInMonth('2024-02')).toBe(29)
+    // 格式不对时给一个不会让预估爆掉的默认值
+    expect(daysInMonth('2026')).toBe(30)
   })
 })

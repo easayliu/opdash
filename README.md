@@ -31,7 +31,7 @@ trace、日志、指标和云账单的查询页面。数据来自 [logpipe](../l
 | `/errors` | **错误分组**：把出错的 span 按「同一种报错」归堆——异常类 + 消息 + 哪个接口，一行一种，带次数 / 影响多少条链路 / 最后一次什么时候；展开就是堆栈、样本链路和三个去处 |
 | `/services`（首页） | 服务总览：每个服务一张卡——请求量 / 错误率 / P95 各带「和上一个同样长的时间窗比」、一条迷你趋势；错误率 ≥1% / P95 涨 1.5 倍以上的标黄、≥5% / 3 倍标红并排到最前面；可切成表格 |
 | `/services/:name` | 单个服务：**和对比时段比，是哪些接口变了**（变化榜 + 每一列都带变化的接口表），请求量与错误、延迟分位趋势（都叠着对比时段） |
-| `/cost` | **云账单**（goscan 同步的火山引擎 + 阿里云）：按账期的花费和环比、按天的曲线、按产品 / 计费项 / 地域 / 账号 / 实例 / 项目排行（点一行就加成筛选条件）、明细表和 CSV 导出。两朵云合在一张图上，金额口径可切「应付 / 现金 / 原价」。配了 `--goscan-url` 时右上角还有「拉取账单」，可现场补一段账期。**本页按账期查询，顶栏的时间范围在此隐藏** |
+| `/cost` | **云账单**（goscan 同步的火山引擎 + 阿里云），两个视图：**账单**看按账期的花费和环比、按天的曲线、按产品 / 计费项 / 地域 / 账号 / 实例 / 项目排行（点一行就加成筛选条件）、明细表和 CSV 导出；**分析**按归属规则把费用摊到业务线，给出日均、预付费摊销与月度预估（见下面「成本归属」）。两朵云合在一张图上，金额口径可切「应付 / 现金 / 原价」。配了 `--goscan-url` 时右上角还有「拉取账单」，可现场补一段账期。**本页按账期查询，顶栏的时间范围在此隐藏** |
 
 ### 首页 · 服务总览（照着 Cloudflare 的 Zone Overview 做的）
 
@@ -234,6 +234,7 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--goscan-url` | `OPDASH_GOSCAN_URL` | 不配 | goscan 的地址（`http://goscan.logging.svc.cluster.local:8080`）。配了费用页上才有「拉取账单」按钮，见下面「手动拉取账单」。**这是 opdash 唯一一处会向外发出「改变状态」请求的功能**，对 ClickHouse 依旧只读 |
 | `--goscan-timeout` | `OPDASH_GOSCAN_TIMEOUT` | `10s` | 调 goscan 接口的超时。触发同步只是登记一个后台任务，很快返回；真正的拉取在 goscan 侧进行，与此超时无关 |
 | `--bill-dedupe` | `OPDASH_BILL_DEDUPE` | `group` | 账单查询怎么去重：`group` 按建表排序键分组（默认，跨分片也对）、`final` 给表加 `FINAL`、`off` 不去重。见下面「账单表：为什么要在查询里再去重一次」 |
+| `--bill-alloc` | `OPDASH_BILL_ALLOC` | 不配 | 成本归属规则文件（TOML），费用页的「分析」视图据此把费用摊到业务线、把预付费按服务期摊到各月。不配也能用，只是少了业务线这一层。示例与写法见 `examples/bill-alloc.toml` 和下面「成本归属」。**文件有误时进程直接退出**，不会静默降级 |
 | `--timezone` | `OPDASH_TIMEZONE` | `Asia/Shanghai` | 直方图分桶对齐的时区，和两张表 `timestamp` 列的时区一致 |
 | `--query-timeout` | `OPDASH_QUERY_TIMEOUT` | `30s` | 传给 ClickHouse 的 `max_execution_time` |
 | `--max-range` | `OPDASH_MAX_RANGE` | `31d` | 允许查询的最大时间跨度 |
@@ -460,7 +461,8 @@ v0.1 的 `Map` 表不兼容，`/api/health` 会点名哪一列是 Map，按 trac
 ### 账单表：为什么要在查询里再去重一次
 
 goscan 的三张账单表（`volcengine_bill` / `alicloud_bill_monthly` / `alicloud_bill_daily`）和另外三张不同：
-它们是 `ReplacingMergeTree`，靠「同一个账期重复拉不会翻倍」来保证幂等。**但在集群上这个保证是不成立的**。
+它们是 `ReplacingMergeTree`，靠「同一个账期重复拉不会翻倍」来保证幂等。**在 2026-09 的表结构调整之前，
+这个保证在集群上并不成立**——下面先说清楚为什么，再说改了什么。
 
 2026-09-22 查线上（`logs` 库、`log` 集群 3 分片）确认的事实：
 
@@ -476,20 +478,42 @@ SELECT name, engine_full FROM system.tables WHERE database='logs' AND name LIKE 
 跨分片的那一份无论哪种方式都无法收敛。goscan 的日调度每天会把当月重拉一遍（`sync_mode` 无论取 `standard` 还是 `sync-optimal`，都不是
 「先删后插」），一个月下来同一行最多可能存在三份，账单金额随之翻倍。
 
-所以 opdash 默认（`--bill-dedupe=group`）在查询里按**建表时的排序键**再去重一次：
+所以 opdash 默认（`--bill-dedupe=group`）在查询里再去重一次。**但去重键本身并不唯一**（2026-09-23 对账时发现）：
+阿里云会把一笔尾差调整单独出成一行，维度与正常账单一模一样，只有金额不同；同一台机器同月先包月、再转包年，
+也会出成两行同键的账单：
 
-```sql
-SELECT _period AS period, sum(_amount) AS amount FROM (
-  SELECT any(BillPeriod) AS _period, any(toFloat64OrZero(PayableAmount)) AS _amount
-  FROM logs.volcengine_bill
-  WHERE BillPeriod >= {p0:String} AND BillPeriod <= {p1:String}
-  GROUP BY BillPeriod, ExpenseDate, InstanceNo, ExpenseBeginTime, Product, ElementCode, PayableAmount
-) GROUP BY _period
+```text
+billing_date  product    instance_id               pretax_amount  pretax_gross_amount
+2026-06-01    短信服务    <账号>:<短信签名>         409.41               409.41
+2026-06-01    短信服务    <账号>:<短信签名>         -0.005                    0
 ```
 
-排序键就是 `ReplacingMergeTree` 的去重键，按它分组得到的结果与引擎自身去重后完全一致，且跨分片同样成立。
-重复行在每一列上都相同，取任意一行皆可，因此其余列一律用 `any()`。代价是要把这几个月的数据读出来
-聚合一次——账单一个月不过几万到几十万行，比日志表小四个数量级，可以忽略。
+早先按排序键分组、其余列一律 `any()`，就会在这两行之间随手挑一个——2026-08 的百炼因此少算了 34,837.57，
+阿里云 8 月按量合计少算 3,677.03。现在的去重分两步：
+
+```sql
+SELECT _period, _amount FROM (
+  SELECT any(billing_cycle) AS _period, any(toFloat64(pretax_amount)) AS _amount,
+         max(updated_at) AS __version,
+         max(max(updated_at)) OVER (PARTITION BY <排序键>) AS __latest
+  FROM logs.alicloud_bill_monthly
+  WHERE ...
+  GROUP BY <排序键>, pretax_amount, payment_amount, pretax_gross_amount   -- ① 金额也进分组
+)
+WHERE __version >= __latest - INTERVAL 60 SECOND                           -- ② 只留最近一次同步
+```
+
+1. **金额也进分组**：完全相同的副本（重拉留下的、写入重试留下的）合为一行；金额不同的并列行各自保留，之后相加。
+2. **按排序键只留最近一次同步写入的那几行**：金额进了分组，重拉之前的旧版本（云厂商月中调过金额）就不会再与
+   新版本合一，因此按 `updated_at`（也是 `ReplacingMergeTree` 的版本列）把它们筛掉。同一次同步里并列的几行
+   相隔不过数秒（线上 2026-06 至 08 月最多 2.2 秒），同一账期的两次同步则至少相隔数分钟，60 秒的窗口把两者分得很开。
+
+这正是 `ReplacingMergeTree(updated_at)` 合并之后该剩下的样子，只是引擎会把并列行也吞掉，这里不会。
+按这套去重，opdash 对 2026-07、08 两个月的阿里云后付费与手工台账逐条业务线核对，差额均在一分钱以内。
+代价是要把这几个月的数据读出来聚合一次——账单一个月不过几万到几十万行，比日志表小四个数量级，可以忽略。
+
+**`--bill-dedupe=final` 同样会丢并列行**：`FINAL` 就是引擎的去重语义，同键只留版本最新的一行。在 goscan
+让每一行账单都有唯一的键之前（见下文「账单表的分片键」一节末尾），不要切到 `final`。
 
 两个实现上的细节：
 
@@ -498,6 +522,67 @@ SELECT _period AS period, sum(_amount) AS amount FROM (
   Distributed 表自己没有排序键，所以问的是它底下的 `_local`。
 * **子查询里的别名一律加下划线前缀**（`AS _instance_id`）。别名和真实列名撞上时，ClickHouse 的分析器会把
   WHERE 里的那个列名解析成聚合结果，模糊搜直接报 `184: Aggregate function any(instance_id) is found in WHERE`。
+
+#### 成本归属：把费用摊到业务线
+
+账单只回答「哪个产品花了多少」。对账时真正要回答的却是「哪条业务线花了多少」，两者之间差着一层归属：
+一台机器属于谁、一项共用服务按何比例分摊给几条业务线。**这层知识不在账单之中**，云厂商也无从得知，
+只能由部署方给出，因此它是一份外部配置（`--bill-alloc rules.toml`），而非代码中的常量——业务线名称、
+实例的内网地址都属于内部信息，不应随仓库分发。示例见 `examples/bill-alloc.toml`。
+
+规则文件的模型只有四件事：
+
+```toml
+lines = ["业务线甲", "业务线乙", "公共资源"]   # 业务线，顺序即页面上的顺序
+unmatched = "公共资源"                        # 未命中任何规则的费用归入哪条线，可省略
+
+[[include]]                                   # 只统计命中其中任一条的账单行，可省略
+subscription = ["PayAsYouGo", "按量计费"]
+
+[prepaid]                                     # 预付费按服务期摊到各月，可省略
+subscription = ["Subscription", "包年包月"]
+lookback_months = 36                          # 往前回溯购买记录的月数，不截断服务期
+
+[[rules]]                                     # 自上而下匹配，命中第一条即停
+name = "业务线乙的专用机器"
+product = ["云服务器 ECS"]                    # 跨云统一的维度，与排行下拉里的那几项同名同义
+columns = [{ name = "intranet_ip", any_of = ["10.0.1.11"] }]   # 维度表达不了的，直接匹配原始列
+to = "业务线乙"                               # 整笔归一条线
+
+[[rules]]
+name = "ECS 其余部分按机器数拆分"
+product = ["云服务器 ECS"]
+split = { "业务线甲" = 130, "业务线乙" = 400 }  # 或按权重摊给若干条，只论相对大小
+```
+
+几处值得说明：
+
+* **命中即停，所以顺序有意义**。窄的规则（某几台机器属于谁）写在前，宽的规则（同一产品的其余部分按比例
+  拆分）写在后。这既是为了让窄规则有机会命中，也是为了杜绝同一笔费用满足两条规则而被计两次——线上确实
+  遇到过：弹性伸缩组释放的内网地址被另一批机器复用，若先按地址匹配，那部分费用会在两条业务线上各计一次。
+* **分类在 ClickHouse 内完成**。规则被翻译成一条 `multiIf`，与去重、筛选在同一条 SQL 里；取值一律绑定为
+  参数。账单一个月数万行，取回进程内再分类既慢又无必要。
+* **要匹配的原始列在某张表上不存在时，该规则对这张表整体不生效**，而不会退化为「一律命中」。`intranet_ip`
+  只有阿里云有，若把缺列的条件当作恒真，一条「某几台机器归业务线乙」的规则会把火山引擎的全部费用也计入
+  业务线乙。
+* **预付费（包年包月）单走摊销那条路**。这类账单在购买当月一次性出账，若按出账月计入，那个月会凭空鼓起
+  一大块，日均与月度预估随之失真。配了 `[prepaid]` 之后，每一笔购买按它自己的 `service_period` 摊到各月：
+  一台包年的机器在十二个月里各计十二分之一。命中 `[prepaid]` 的行会**自动从「按出账月计入」那条路里排除**，
+  不会两头各计一次；归属仍走同一套 `[[rules]]`，规则里写上 `subscription = ["Subscription"]` 便可给预付费
+  单独定归属（譬如包年的数据库属应用、按 ECS 比例拆，而后付费的数据库归基础保障）。
+  三点需要留意：升降配只收退差价，其 `service_period` 记的是「剩余天数」而非整期，按同一套摊法处理即可，
+  钱是真实发生的；火山引擎的账单没有服务期列，摊不动，那部分仍按出账月计入，**不会两头都不落**；阿里云
+  接口只保留 18 个月账单，更早购买且仍在服役的机器不在库里，这部分成本看不到。
+* **日均只算后付费，月度预估分两段相加**。预付费按月摊，除以天数没有意义，故不参与日均；月度预估因此是
+  「后付费日均 × 目标月天数 + 该月的预付费摊销」。后一段不是估出来的——已经发生的购买摊到未来几个月的
+  金额是已知的，接口会把区间之后十二个月的摊销一并给出，页面据此算下个月。
+* **日均的分母是「有账单的天数」，不是自然月的天数**。当月账单尚未出齐，按 30 天摊薄只会低估日均，愈近
+  月初偏差愈大。月度预估则反过来：日均 × 目标月的自然天数。页面上可将日均的窗口收窄到最近 7 / 14 / 30 天，
+  以避开月初扩容等早期波动；窗口以**各表最后一日有账单的日期**为基准回溯，而非以今日为基准——账单滞后
+  一两日出具，自今日倒推会平白少算几天，且两朵云的同步进度未必相同。
+* **未命中规则的金额始终单列**。即便配置了 `unmatched` 把它并入某条业务线，页面仍会标出这一笔有多少、
+  占比几何，以便知晓规则还有多少没覆盖到。
+* **不配规则也能用**：分析视图照常给出按产品的日均与月度预估，只是没有业务线这一层。
 
 #### 手动拉取账单
 
@@ -539,10 +624,28 @@ opdash 因此按一串候选依次查找，**零配置即可对上**：基础名
 `volcengine_bill_details` → `volcengine_bill_details_distributed`。`_local` 始终不在候选之列：它只是一个分片的
 数据，查出来的金额只有三分之一。显式配置了 `--volcengine-bill-table` 且名字不同的部署不再回退到旧名。
 
-#### 账单表的分片键该改
+#### 账单表的分片键：goscan 已经改了
 
-上述去重是**规避**，而非**根治**。以下四条建议按重要性排列；此刻正是调整的时机——线上这三张表刚刚建好，
-尚无一行数据（2026-09-22 全集群 `count()` 均为 0），改动表结构无需迁移任何内容：
+上述去重是**规避**，而非**根治**。根治的四条落在 goscan 的 `pkg/ddl` 里，2026-09-22 已全部改完
+（那三张表当时刚建好、尚无一行数据，改表结构无需迁移任何内容）：
+
+| 改了什么 | 从 | 到 |
+| --- | --- | --- |
+| Distributed 分片键 | `rand()` | `cityHash64(<排序键>)` |
+| 排序键 | 末位是金额（`PayableAmount` / `payment_amount`） | 只有业务身份：火山用 `BillDetailId`，阿里云用「账号 + 产品 + 实例 + 计费方式 + 拆分 / 调整记录」 |
+| 引擎 | `ReplacingMergeTree` | `ReplacingMergeTree(updated_at)`，后拉到的那份胜出 |
+| 火山金额列 | `String` | `Decimal(20, 8)` |
+| 分区表达式 | `toDate(ExpenseDate)`、`parseDateTimeBestEffort(...)`，空值抛异常 | `parseDateTimeBestEffortOrZero(...)`，脏值落进 1970-01 分区而不是让整批 INSERT 失败 |
+
+**这次调整不能原地升级**：引擎、排序键、分区键和列类型都是建表时定死的，`CREATE TABLE IF NOT EXISTS`
+对已存在的表不起作用。老表要先 `DROP` 再按新 DDL 建，然后重新同步。
+
+opdash 这边两处跟着变：**金额的转换函数按库里的真实列类型选**（`String` 用 `toFloat64OrZero`，
+`Decimal` 用 `toFloat64`，混用会被 ClickHouse 以 43 拒掉），所以新旧两种表都查得了；去重键仍然从
+`system.tables.sorting_key` 读，表一重建就自动跟上。~~分片键确定之后 `--bill-dedupe` 可以调成 `final`~~——
+**这一条作废**，原因见下一小节：排序键不唯一，`final` 会丢掉并列行。`group` 那条路对任何分片键都正确。
+
+以下是当初的四条建议原文，留作改动的依据：
 
 1. **Distributed 的分片键不应使用 `rand()`**，应改为按去重键哈希，例如
    `Distributed('log', 'logs', 'volcengine_bill_local', cityHash64(BillPeriod, InstanceNo))`。同一行的多次写入
@@ -563,6 +666,29 @@ opdash 因此按一串候选依次查找，**零配置即可对上**：基础名
 
 若第 1、2 条不改，opdash 的 `group` 去重能挡住「重复拉取」，却挡不住第 2 条所述「金额被修正」的重复——
 那种重复在任何去重键下都是两行不同的数据，唯有引擎带版本列方能判定孰新孰旧。
+
+#### 还差一条：排序键要能唯一标识一行账单
+
+2026-09-23 与手工台账对账时发现，阿里云账单里存在**排序键完全相同、只有金额不同**的两行：一笔正常费用加
+一笔尾差调整（原价 0、应付 −0.005），或者同一台机器同月先包月、再转包年（1,612.29 与 13,768.2）。
+这对 `ReplacingMergeTree(updated_at)` 是致命的——两行同键，按新的分片键必然落在同一分片，**合并时只留
+`updated_at` 较大的一行，另一行被永久删除**。`updated_at` 相同（同一批写入，精确到毫秒也可能相同）时留哪一行
+不确定，丢掉的可能是那笔 13,768.2。`logs.alicloud_bill_monthly` 里眼下就有一组尚未合并的：
+
+```text
+2026-08  大模型服务平台百炼  <账号>;<应用>;<模型>;input_token;0    34837.5724  03:04:47.538
+2026-08  大模型服务平台百炼  <账号>;<应用>;<模型>;input_token;0       -0.0045  03:04:47.197
+```
+
+这一组碰巧大额那行晚了 0.34 秒，合并后会被保留；顺序反过来，这笔费用就没了。opdash 的查询期去重已经能把
+并列行都算上（见上一节），但**存储层合并掉的行，查询时无从找回**。goscan 那边的根治有两种，择一即可：
+
+1. **写入前把同键的几行合并成一行**（金额相加）。键保持现状，`ReplacingMergeTree(updated_at)` 的「后拉到的
+   那份胜出」照常成立。
+2. **往排序键里加一列能区分并列行的字段**。阿里云账单项里没有现成的行号，可由 goscan 在写入时按
+   「同一次拉取中同键出现的次序」生成一个序号列；不宜直接用金额，理由见上面第 2 条。
+
+在此之前，同步完成后的 `OPTIMIZE ... FINAL` 会加速这类丢失，宜先停掉。
 
 ### 一条日志能有多大
 
@@ -1009,6 +1135,7 @@ GET /api/bills/summary        ?from=2026-04&to=2026-09&amount=payable|paid|origi
                               账期是 YYYY-MM，一次最多 36 个；不给就是最近 6 个
 GET /api/bills/daily          同上，按天（只问有日粒度的表）
 GET /api/bills/breakdown      ?by=product|item|region|zone|account|instance|project|subscription|currency&limit
+GET /api/bills/allocation     ?days=7   按归属规则摊到业务线，给出日均、预付费摊销与月度预估的两段
 GET /api/bills/detail         ?provider=volcengine|alicloud&granularity=monthly|daily&limit&offset
 GET /api/bills/export         同 detail，&format=csv|jsonl
 POST /api/bills/sync          {provider, from, to, granularity, force, mode}  手动拉一次，转给 goscan

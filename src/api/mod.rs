@@ -38,6 +38,8 @@ pub struct AppState {
     pub saved: Arc<SavedQueryStore>,
     /// goscan 的同步接口（`--goscan-url`）。没配就是 `None`，费用页上不显示「拉取账单」。
     pub goscan: Option<Arc<crate::goscan::Goscan>>,
+    /// 成本归属规则（`--bill-alloc`）。没配就是 `None`，费用页的分析视图只给日均与预估。
+    pub alloc: Option<Arc<crate::alloc::Alloc>>,
 }
 
 impl AppState {
@@ -59,6 +61,16 @@ impl AppState {
                 None
             }
         });
+        // 文件有误时 main 已带着原因退出（见 crate::alloc），此处只是再读一次，
+        // 也让测试仅凭 --bill-alloc 一个参数即可把规则送进来
+        let alloc =
+            config.bill_alloc.as_deref().and_then(|path| match crate::alloc::Alloc::load(path) {
+                Ok(a) => Some(Arc::new(a)),
+                Err(e) => {
+                    tracing::error!(error = %e, "成本归属规则无效，费用页的业务线分摊已停用");
+                    None
+                }
+            });
         Self {
             config: Arc::new(config),
             client,
@@ -67,6 +79,7 @@ impl AppState {
             metric_kinds: Arc::new(MetricKinds::default()),
             saved,
             goscan,
+            alloc,
         }
     }
 

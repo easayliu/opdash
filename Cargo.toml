@@ -38,6 +38,8 @@ ring = "0.17"
 url = "2"
 # MCP 工具在进程内走一遍自己的 API Router（`oneshot`）；axum 本来就依赖它
 tower = { version = "0.5", features = ["util"] }
+# 成本归属规则（`--bill-alloc`）是人手写的，要能写注释，所以用 TOML 而不是 JSON
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

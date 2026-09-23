@@ -11,6 +11,7 @@
 //! 手动拉账单——把动作转给 goscan（见 `goscan` 模块），写库的是它，不是 opdash。
 //! 认证可选：Basic 一组密码，或 OIDC 跳 Keycloak 登录（`auth` 模块）。
 
+pub mod alloc;
 pub mod api;
 pub mod auth;
 pub mod clickhouse;

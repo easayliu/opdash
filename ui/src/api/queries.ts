@@ -5,6 +5,7 @@ import { apiGet, type Params } from './client'
 import type {
   ApiKeyInfo,
   AuthMe,
+  BillAllocationResponse,
   BillBreakdownResponse,
   BillDailyResponse,
   BillDetailResponse,
@@ -467,6 +468,21 @@ export function useBillBreakdown(params: Params, enabled = true) {
   return useQuery({
     queryKey: ['bills', 'breakdown', params],
     queryFn: ({ signal }) => apiGet<BillBreakdownResponse>('/bills/breakdown', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    enabled,
+  })
+}
+
+/**
+ * 成本归属：按规则把账单摊到业务线，并给出日均。
+ *
+ * 比排行那条重一些（每张表两条查询），所以只在分析视图打开时才发。
+ */
+export function useBillAllocation(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'allocation', params],
+    queryFn: ({ signal }) => apiGet<BillAllocationResponse>('/bills/allocation', params, signal),
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000,
     enabled,

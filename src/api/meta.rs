@@ -71,6 +71,15 @@ pub struct BillsMeta {
     pub dedupe: crate::query::bills::Dedupe,
     /// 配了 `--goscan-url` 才能手动拉账单（`POST /api/bills/sync`），页面据此显示按钮
     pub sync: bool,
+    /// 成本归属规则（`--bill-alloc`）；没配就是 null，费用页的分析视图只给按产品的日均
+    pub allocation: Option<AllocationMeta>,
+}
+
+/// 归属规则的概况。规则的具体内容不外发：页面只需要知道有哪几条业务线。
+#[derive(Serialize)]
+pub struct AllocationMeta {
+    pub lines: Vec<String>,
+    pub rules: usize,
 }
 
 #[derive(Serialize)]
@@ -160,6 +169,10 @@ pub async fn meta(State(state): State<AppState>) -> crate::error::Result<Json<Me
                 .map(|t| TableMeta::new(&t.table, ALICLOUD_BILL_COLUMNS)),
             dedupe: cfg.bill_dedupe,
             sync: state.goscan.is_some(),
+            allocation: state
+                .alloc
+                .as_deref()
+                .map(|a| AllocationMeta { lines: a.lines.clone(), rules: a.rules.len() }),
         }),
         bills_note: schema.bills_note.clone(),
     }))

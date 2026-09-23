@@ -135,6 +135,16 @@ async fn run() -> anyhow::Result<()> {
             .map_err(anyhow::Error::msg)?,
     );
     tracing::info!(file = %saved.path().display(), "收藏文件已打开（容器里请把它所在目录挂成卷）");
+    // 归属规则有误便不再启动：一条规则写错，页面上的业务线金额即是错的，且从表面看不出来
+    if let Some(path) = &config.bill_alloc {
+        let alloc = opdash::alloc::Alloc::load(path).map_err(anyhow::Error::msg)?;
+        tracing::info!(
+            file = %path.display(),
+            lines = alloc.lines.len(),
+            rules = alloc.rules.len(),
+            "成本归属规则已加载"
+        );
+    }
     let state = AppState::new(config, client, schema, saved);
     let app = api::app(state, auth.clone());
 

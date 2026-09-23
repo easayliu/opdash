@@ -2,6 +2,7 @@ import { Suspense, lazy, useMemo, useState } from 'react'
 import { CloudDownloadIcon, DownloadIcon, SearchIcon } from 'lucide-react'
 import { apiUrl } from '@/api/client'
 import { useBillBreakdown, useBillDaily, useBillDetail, useBillPeriods, useBillSummary, useMeta } from '@/api/queries'
+import { CostAnalysis } from '@/components/CostAnalysis'
 import type { BillAmount, BillPoint, BillProvider } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
 import { StackedBars } from '@/components/charts/StackedBars'
@@ -39,6 +40,16 @@ import { cn } from '@/lib/utils'
  * 当月账单尚未出具，若以今天起算，首屏将空无一物。
  */
 const DEFAULT_MONTHS = 6
+
+/** 两个视图。账单看「钱花在哪个产品上」，分析看「这笔钱该记在哪条业务线头上、照此推算一个月多少」 */
+const VIEWS = [
+  { value: 'bills', label: '账单', hint: '按账单本身的维度查看：账期趋势、产品与实例排行、明细与导出' },
+  {
+    value: 'analysis',
+    label: '分析',
+    hint: '按归属规则分摊到业务线，并以日均推算月度预估；未配置规则时仍可查看按产品的日均',
+  },
+]
 const DETAIL_PAGE = 50
 
 /** 维度筛选在 URL 上就叫维度名本身（`product=云服务器 ECS`），和接口收的参数一致 */
@@ -60,6 +71,10 @@ export function CostPage() {
   const by = DIMENSIONS.find((d) => d.value === params.get('by'))?.value ?? 'product'
   const q = params.get('q') ?? ''
   const page = Math.max(0, Number(params.get('page') ?? 0) || 0)
+  // 分析视图：业务线分摊、日均与月度预估。两个视图共用账期、金额口径、云与搜索
+  const view = params.get('view') === 'analysis' ? 'analysis' : 'bills'
+  const days = params.get('days') ?? ''
+  const estimate = params.get('est') || (to ? shiftPeriod(to, 1) : '')
   const [syncing, setSyncing] = useState(false)
 
   // 维度筛选：URL 上的维度键原样往接口传
@@ -78,11 +93,12 @@ export function CostPage() {
   )
   const ready = !!bills && !!from && !!to
 
-  const summary = useBillSummary(base, ready)
+  const billsView = ready && view === 'bills'
+  const summary = useBillSummary(base, billsView)
   // 按天只有日度表在的时候才有意义；两朵云都没有日粒度就整块不显示
   const dailyProviders = (bills?.daily_providers ?? []).filter((p) => !provider || p === provider)
-  const daily = useBillDaily(base, ready && dailyProviders.length > 0)
-  const breakdown = useBillBreakdown({ ...base, by, limit: 15 }, ready)
+  const daily = useBillDaily(base, billsView && dailyProviders.length > 0)
+  const breakdown = useBillBreakdown({ ...base, by, limit: 15 }, billsView)
   const detail = useBillDetail(
     {
       ...base,
@@ -91,7 +107,7 @@ export function CostPage() {
       limit: DETAIL_PAGE,
       offset: page * DETAIL_PAGE,
     },
-    ready,
+    billsView,
   )
 
   const points = summary.data?.points ?? []
@@ -116,6 +132,20 @@ export function CostPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
         <h1 className="text-base font-semibold">费用</h1>
+        <span role="group" aria-label="视图" className="flex h-8 items-center rounded-md border border-input p-0.5">
+          {VIEWS.map((v) => (
+            <Hint key={v.value} text={v.hint} asChild>
+              <button
+                type="button"
+                aria-pressed={view === v.value}
+                onClick={() => set({ view: v.value === 'bills' ? null : v.value, page: null })}
+                className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', view === v.value && 'bg-accent-soft text-accent')}
+              >
+                {v.label}
+              </button>
+            </Hint>
+          ))}
+        </span>
         <Hint text="账单以账期（自然月）为单位出具，与顶栏的时间范围无关；本页单独选择账期">
           <span className="hidden text-xs text-muted-fg xl:inline">云账单，按账期查看</span>
         </Hint>
@@ -215,7 +245,11 @@ export function CostPage() {
           />
         )}
 
-        {ready && known.length > 0 && (
+        {ready && bills && known.length > 0 && view === 'analysis' && (
+          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} onChange={set} />
+        )}
+
+        {ready && known.length > 0 && view === 'bills' && (
           <div className="flex flex-col gap-3 md:gap-4">
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <StatCard

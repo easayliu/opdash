@@ -76,6 +76,18 @@ export function periodsBetween(from: string, to: string): string[] {
   return Array.from({ length: n }, (_, i) => periodOf(a + i))
 }
 
+/**
+ * 这个账期有几天。月度预估就是「日均 × 它」。
+ *
+ * 用 `Date` 只做这一次算术：取下个月的第 0 天即本月最后一天，闰年二月也对。
+ * 传入的是账期而非时刻，`Date.UTC` 与本地时区在这里没有差别。
+ */
+export function daysInMonth(period: string): number {
+  const m = /^(\d{4})-(\d{2})$/.exec(period.trim())
+  if (!m) return 30
+  return new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate()
+}
+
 /** 图上的短标签：`2026-09` → `9月`，一月带上年份当分界 */
 export function periodTick(period: string): string {
   const m = /^(\d{4})-(\d{2})$/.exec(period)

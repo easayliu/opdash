@@ -113,6 +113,14 @@ export interface BillsMeta {
   dedupe: 'group' | 'final' | 'off'
   /** 配了 --goscan-url 才能在页面上手动拉账单 */
   sync: boolean
+  /** 成本归属规则（后端 --bill-alloc）；没配就是 null，分析视图只给按产品的日均 */
+  allocation: BillAllocationMeta | null
+}
+
+export interface BillAllocationMeta {
+  /** 业务线，顺序即页面上的顺序 */
+  lines: string[]
+  rules: number
 }
 
 /** POST /api/bills/sync：同步任务已经登记，账单要等 goscan 后台拉完才进库 */
@@ -122,6 +130,21 @@ export interface BillSyncStarted {
   from: string
   to: string
   message: string
+}
+
+/**
+ * 同步跑到哪了。单位是「趟」——一个账期一种粒度算一趟。
+ *
+ * 阿里云选「月度 + 日度」时同一个账期要拉两趟（月表一趟、日表一趟），
+ * 所以总数是账期数乘以粒度数。
+ */
+export interface BillSyncProgress {
+  /** 正在拉的账期 */
+  period: string
+  /** 这一趟写哪张表；火山不分粒度，老版本 goscan 也不报，此时没有这个字段 */
+  granularity?: 'monthly' | 'daily'
+  periods_done: number
+  periods_total: number
 }
 
 /** GET /api/bills/sync/{task_id} */
@@ -141,6 +164,8 @@ export interface BillSyncTask {
   error?: string
   started_at?: string
   ended_at?: string
+  /** 老版本 goscan 不报进度，这里就是 null，页面退回不确定进度条 */
+  progress?: BillSyncProgress
 }
 
 /** 一个账期（`2026-09`）或一天（`2026-09-01`）的花费 */
@@ -213,6 +238,82 @@ export interface BillDetailRow {
   amount: number
   original: number
   paid: number
+}
+
+/** 分析视图里的一行：某条业务线里的某个产品，或不分业务线时的某个产品 */
+export interface BillAllocItem {
+  product: string
+  /** 按哪条归属规则归来的；未命中任何规则时是 null */
+  rule: string | null
+  amount: number
+  /** 日均；预付费的摊销按月计，以及没有日粒度的账单时，都是 null */
+  daily: number | null
+  share: number
+  /** 这一行是预付费摊销过来的，不是当期实际出账 */
+  prepaid: boolean
+}
+
+export interface BillAllocLine {
+  name: string
+  /** 区间合计 = 后付费实际出账 + 落在区间内的预付费摊销 */
+  amount: number
+  postpaid: number
+  amortized: number
+  /** 日均，只按后付费算 */
+  daily: number | null
+  share: number
+  /** 各账期的预付费摊销额，含区间之后的若干个月，页面据此算月度预估 */
+  amortized_by_period: Record<string, number>
+  items: BillAllocItem[]
+}
+
+/** 一天（或一个账期）各条业务线的花费 */
+export interface BillAllocPoint {
+  t: string
+  total: number
+  by_line: Record<string, number>
+}
+
+export interface BillAllocationResponse {
+  from: string
+  to: string
+  amount: BillAmount
+  /** 配了归属规则才有业务线这一层 */
+  configured: boolean
+  /** 只统计了最近这么多天 */
+  window_days: number | null
+  /** 本次统计覆盖了几天的账单（各云中最多的那个）；没有日粒度的账单时是 0 */
+  days: number
+  /** 各云各有几天的账单。日均按每朵云自己的天数折算后相加 */
+  days_by_provider: Partial<Record<BillProvider, number>>
+  /** points 的粒度 */
+  granularity: 'daily' | 'monthly'
+  /** 配了 [prepaid] 才有预付费摊销这一层 */
+  prepaid: boolean
+  /** 区间合计 = 后付费实际出账 + 落在区间内的预付费摊销 */
+  total: number
+  postpaid: number
+  amortized: number
+  /** 各账期的预付费摊销额，含区间之后的若干个月 */
+  amortized_by_period: Record<string, number>
+  /** 日均 = 后付费合计 / days；预付费不参与 */
+  daily: number | null
+  lines: BillAllocLine[]
+  /** 未命中任何规则的部分。配了 unmatched 时这笔钱已同时计入那条业务线 */
+  unmatched: BillAllocLine
+  products: BillAllocItem[]
+  points: BillAllocPoint[]
+  /** 日度账单明显少于月度账单时给出两边的合计；覆盖正常时是 null */
+  coverage: BillCoverage | null
+  stats: Stats
+}
+
+export interface BillCoverage {
+  provider: BillProvider
+  /** 所选账期内日度账单的合计 */
+  daily: number
+  /** 同一段账期月度账单的合计 */
+  monthly: number
 }
 
 export interface BillDetailResponse {

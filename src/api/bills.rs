@@ -11,7 +11,7 @@
 //! 账单表是可选的：未部署 goscan 时这几个接口一律返回 400 并说明原因，`/api/meta` 中 `bills`
 //! 为 null，前端据此不显示费用页。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::{
@@ -25,12 +25,14 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::{AppState, params::Params};
+use crate::alloc::Alloc;
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::goscan::{Goscan, SyncRequest};
 use crate::query::bills::{
-    Amount, BillFilter, BillQueries, BucketRow, DEFAULT_PERIODS, DetailRow, Dimension, KeyRow,
-    Kind, MAX_DETAIL_ROWS, MAX_PERIODS, PeriodRange, Provider, TotalRow, shift_period,
+    AllocPrepaidRow, AllocRow, Amount, BillFilter, BillQueries, BucketRow, DEFAULT_PERIODS,
+    DetailRow, Dimension, KeyRow, Kind, MAX_DETAIL_ROWS, MAX_PERIODS, PeriodRange, PeriodRow,
+    Provider, TotalRow, shift_period,
 };
 use crate::query::parse_tz;
 use crate::schema::{BillTable, BillTables, Schema};
@@ -41,6 +43,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/bills/summary", get(summary))
         .route("/api/bills/daily", get(daily))
         .route("/api/bills/breakdown", get(breakdown))
+        .route("/api/bills/allocation", get(allocation))
         .route("/api/bills/detail", get(detail))
         .route("/api/bills/export", get(export))
         .route("/api/bills/sync", post(sync))
@@ -52,8 +55,19 @@ const MAX_BREAKDOWN: u32 = 200;
 const DEFAULT_BREAKDOWN: u32 = 20;
 
 /// 查询串里这些键是控制参数，其余的当维度筛选（`product=云服务器`）解释。
-const CONTROL_KEYS: &[&str] =
-    &["from", "to", "amount", "provider", "granularity", "by", "limit", "offset", "format", "q"];
+const CONTROL_KEYS: &[&str] = &[
+    "from",
+    "to",
+    "amount",
+    "provider",
+    "granularity",
+    "by",
+    "limit",
+    "offset",
+    "format",
+    "q",
+    "days",
+];
 
 /// 账单表在不在。不在就把原因原样告诉前端。
 async fn bills(state: &AppState) -> Result<Arc<Schema>> {
@@ -179,7 +193,7 @@ async fn periods(State(state): State<AppState>, p: Params) -> Result<Json<Period
     };
     let sources = sources(tables, &providers(&p)?, false);
     let results = futures_util::future::join_all(sources.iter().map(|(kind, table)| {
-        state.client.rows::<BucketRow>(queries(&state, *kind, table).periods(&range))
+        state.client.rows::<PeriodRow>(queries(&state, *kind, table).periods(&range))
     }))
     .await;
 
@@ -438,6 +452,520 @@ async fn breakdown(State(state): State<AppState>, p: Params) -> Result<Json<Brea
     }))
 }
 
+// ---------------------------------------------------------------------------------------------
+// 成本归属（分析视图）
+// ---------------------------------------------------------------------------------------------
+
+/// 「只看最近 N 天」最多能往回看多久。再长就该直接选账期了。
+const MAX_WINDOW_DAYS: u32 = 366;
+
+/// 预付费的摊销最多往后看几个月。摊到未来的那几个月是**已经发生的购买**摊过来的，
+/// 页面据此给出下个月的预估。
+const AMORTIZE_FORWARD: i32 = 12;
+
+/// 一行费用：某条业务线里的某个产品，或不分业务线时的某个产品。
+#[derive(Serialize)]
+pub struct AllocItem {
+    pub product: String,
+    /// 按哪条规则归来的；未命中任何规则时为 null
+    pub rule: Option<String>,
+    pub amount: f64,
+    /// 日均。预付费的摊销按月计，以及没有日粒度的账单时，都是 null
+    pub daily: Option<f64>,
+    /// 占本次统计总额的比例，0~1
+    pub share: f64,
+    /// 这一行是预付费摊销过来的，不是当期实际出账
+    pub prepaid: bool,
+}
+
+#[derive(Serialize)]
+pub struct AllocLine {
+    pub name: String,
+    /// 区间合计 = 后付费实际出账 + 落在区间内的预付费摊销
+    pub amount: f64,
+    /// 其中后付费的部分
+    pub postpaid: f64,
+    /// 其中预付费摊到本区间的部分
+    pub amortized: f64,
+    /// 日均，只按后付费算：预付费是按月摊的，除以天数没有意义
+    pub daily: Option<f64>,
+    pub share: f64,
+    /// 各账期的预付费摊销额，含区间之后的若干个月（已发生的购买摊过来的），页面据此算月度预估
+    pub amortized_by_period: BTreeMap<String, f64>,
+    /// 这条线的费用由哪些产品构成，金额从大到小
+    pub items: Vec<AllocItem>,
+}
+
+/// 一天（或一个账期）各条业务线的花费。
+#[derive(Serialize)]
+pub struct AllocPoint {
+    pub t: String,
+    pub total: f64,
+    pub by_line: BTreeMap<String, f64>,
+}
+
+#[derive(Serialize)]
+pub struct AllocationResponse {
+    pub from: String,
+    pub to: String,
+    pub amount: Amount,
+    /// 配了 `--bill-alloc` 才有业务线这一层；没配时 `lines` 为空，只有按产品的日均与预估
+    pub configured: bool,
+    /// 只统计了最近这么多天（`days` 参数）
+    pub window_days: Option<u32>,
+    /// 本次统计覆盖了几天的账单（取各云中最多的那个），没有日粒度的账单时为 0。日均的分母是
+    /// **每朵云自己的天数**（见 `days_by_provider`），而不是自然月的天数——当月账单未出齐，
+    /// 按 30 天摊只会把日均算低
+    pub days: u32,
+    /// 各云各有几天的账单
+    pub days_by_provider: BTreeMap<&'static str, u32>,
+    /// `points` 的粒度：`daily` 一天一个点，`monthly` 一个账期一个点
+    pub granularity: &'static str,
+    /// 配了 `[prepaid]` 才有预付费摊销这一层
+    pub prepaid: bool,
+    /// 区间合计 = 后付费实际出账 + 落在区间内的预付费摊销
+    pub total: f64,
+    /// 其中后付费的部分
+    pub postpaid: f64,
+    /// 其中预付费摊到本区间的部分
+    pub amortized: f64,
+    /// 各账期的预付费摊销额，含区间之后的若干个月，页面据此算月度预估
+    pub amortized_by_period: BTreeMap<String, f64>,
+    /// 日均 = 后付费合计 / `days`；`days` 为 0 时为 null。**预付费不参与**：它按月摊，
+    /// 除以天数只会把两种口径搅在一起
+    pub daily: Option<f64>,
+    pub lines: Vec<AllocLine>,
+    /// 未命中任何规则的部分。配置里给了 `unmatched` 时，这笔钱已同时计入那条业务线，
+    /// 此处单列是为了让人看得见「有多少钱还没写进规则」
+    pub unmatched: AllocLine,
+    /// 不分业务线、只按产品，配没配规则都有
+    pub products: Vec<AllocItem>,
+    pub points: Vec<AllocPoint>,
+    /// 日度账单明显少于月度账单时给出两边的合计，页面据此提示「日度账单不全」；覆盖正常时为 null
+    pub coverage: Option<Coverage>,
+    pub stats: Stats,
+}
+
+#[derive(Serialize)]
+pub struct Coverage {
+    pub provider: &'static str,
+    /// 所选账期内日度账单的合计
+    pub daily: f64,
+    /// 同一段账期月度账单的合计
+    pub monthly: f64,
+}
+
+/// 业务线（或产品表）里的一组行：（产品, 规则名, 是否预付费摊销）→ 金额。
+type Items = BTreeMap<(String, String, bool), Money>;
+
+/// 命中第 `rule` 条规则的 `amount` 该分给哪几条业务线。`None` 表示没命中规则、
+/// 配置里也没说未归属的去处。
+fn spread(alloc: &Alloc, rule: i32, amount: f64) -> Vec<(Option<usize>, f64)> {
+    match usize::try_from(rule).ok().and_then(|i| alloc.rules.get(i)) {
+        Some(r) => r.split(amount).into_iter().map(|(line, v)| (Some(line), v)).collect(),
+        None => vec![(alloc.unmatched, amount)],
+    }
+}
+
+/// 成本归属：按规则把账单分摊到业务线，并给出日均——「这个月每天花多少、下个月大概多少」。
+///
+/// 与排行（[`breakdown`]）的区别在于「按什么分」：排行按账单自带的维度分，本接口按部署方给的
+/// 归属规则分，一笔共用开销可以按权重摊给几条业务线。没配规则时退化为按产品的日均。
+async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<AllocationResponse>> {
+    let schema = bills(&state).await?;
+    let tables = schema.bills.as_ref().expect("bills checked");
+    let amount = Amount::parse(p.get("amount"))?;
+    let filter = filter(&state, &p)?;
+    let window_days = match p.get_u32("days")? {
+        Some(0) => return Err(Error::bad_request("days 至少为 1")),
+        Some(n) if n > MAX_WINDOW_DAYS => {
+            return Err(Error::bad_request(format!("days 最多 {MAX_WINDOW_DAYS}")));
+        }
+        other => other,
+    };
+    let fallback = Alloc::default();
+    let alloc = state.alloc.as_deref().unwrap_or(&fallback);
+
+    // 分析要的是日粒度：日均、最近 N 天都得按天算。没有日度表的云退回月度，钱一分不少，
+    // 只是那部分算不出日均
+    let prefer_daily = !matches!(p.get("granularity"), Some("monthly"));
+    let mut sources = sources(tables, &providers(&p)?, prefer_daily);
+    if sources.is_empty() {
+        sources = self::sources(tables, &providers(&p)?, false);
+    }
+    if sources.is_empty() {
+        return Err(Error::bad_request("当前部署没有这些云的账单表"));
+    }
+    if window_days.is_some() && sources.iter().any(|(k, _)| !k.has_days()) {
+        return Err(Error::bad_request(
+            "按最近几日统计需要日度账单：请为阿里云同步 granularity=daily，或去掉 days 参数改按账期统计",
+        ));
+    }
+
+    let results = futures_util::future::join_all(sources.iter().map(|(kind, table)| {
+        let q = queries(&state, *kind, table);
+        let by_product = q.alloc_by_product(&filter, amount, alloc, window_days);
+        let by_bucket = q.alloc_by_bucket(&filter, amount, alloc, window_days);
+        let client = state.client.clone();
+        async move {
+            let (by_product, by_bucket) = tokio::join!(
+                client.rows::<AllocRow>(by_product?),
+                client.rows::<AllocRow>(by_bucket?)
+            );
+            Ok::<_, Error>((by_product?, by_bucket?))
+        }
+    }))
+    .await;
+
+    // 后付费。日均**按每张表自己的天数**折算后再相加：两朵云的同步进度常常不一样（阿里云的
+    // 日度账单只拉到昨天、火山的已经出到今天，或者日度表压根只补了几天），若把两边的天数取
+    // 并集当分母，天数少的那朵云会被摊薄，日均随之偏低
+    let mut by_product: BTreeMap<(i32, String), Money> = BTreeMap::new();
+    let mut by_bucket: BTreeMap<(i32, String), f64> = BTreeMap::new();
+    let mut days_by_provider: BTreeMap<&'static str, u32> = BTreeMap::new();
+    let mut stats = Vec::new();
+    for ((kind, _), r) in sources.iter().zip(results) {
+        let (products, buckets) = r?;
+        stats.push(products.stats);
+        stats.push(buckets.stats);
+        let days = if kind.has_days() {
+            buckets.rows.iter().map(|b| b.key.as_str()).collect::<BTreeSet<_>>().len() as u32
+        } else {
+            0
+        };
+        if kind.has_days() {
+            *days_by_provider.entry(kind.provider().as_str()).or_default() += days;
+        }
+        for row in products.rows {
+            let daily = if days > 0 { row.amount / f64::from(days) } else { 0.0 };
+            *by_product.entry((row.rule, row.key)).or_default() +=
+                Money { amount: row.amount, daily };
+        }
+        for row in buckets.rows {
+            *by_bucket.entry((row.rule, row.key)).or_default() += row.amount;
+        }
+    }
+    // 有一张表没有日粒度（阿里云只同步了月度账单），整体的日均就无从谈起
+    let has_days = sources.iter().all(|(k, _)| k.has_days());
+    let days = days_by_provider.values().copied().max().unwrap_or(0);
+    let per_day = |m: Money| (has_days && days > 0).then(|| round(m.daily));
+
+    // 预付费：把每一笔购买按它自己的服务期摊到各月。摊到区间之后那几个月的部分也留着——
+    // 那是已经发生的购买摊过来的，正是下个月预估里绕不开的一块。
+    //
+    // **摊销固定读月度表**：它按月摊，月度粒度正合适；更要紧的是月度表的历史最全——日度表
+    // 往往只补了最近几个月，而三年期的机器要回溯到三年前的购买记录才摊得出本月那一份
+    let mut amortized: BTreeMap<(i32, String, String), f64> = BTreeMap::new();
+    if let Some(prepaid) = &alloc.prepaid {
+        let lookback = PeriodRange {
+            from: shift_period(&filter.range.from, -(prepaid.lookback_months as i32 - 1))?,
+            to: filter.range.to.clone(),
+        };
+        let horizon = shift_period(&filter.range.to, AMORTIZE_FORWARD)?;
+        let prepaid_sources: Vec<(Kind, &BillTable)> = sources
+            .iter()
+            .map(|(kind, table)| match (kind, &tables.alicloud_monthly) {
+                (Kind::AlicloudDaily, Some(monthly)) => (Kind::AlicloudMonthly, monthly),
+                _ => (*kind, *table),
+            })
+            .collect();
+        let results =
+            futures_util::future::join_all(prepaid_sources.iter().map(|(kind, table)| {
+                let q = queries(&state, *kind, table)
+                    .alloc_prepaid(&filter, amount, alloc, prepaid, &lookback);
+                let client = state.client.clone();
+                async move {
+                    match q? {
+                        Some(q) => Ok::<_, Error>(Some(client.rows::<AllocPrepaidRow>(q).await?)),
+                        None => Ok(None),
+                    }
+                }
+            }))
+            .await;
+        for r in results {
+            let Some(rows) = r? else { continue };
+            stats.push(rows.stats);
+            for row in rows.rows {
+                // 服务期不截断：五年期的机器就摊五年。lookback_months 只管往前找多远
+                let months = row.months.clamp(1, MAX_SERVICE_MONTHS);
+                let per_month = row.amount / f64::from(months);
+                for k in 0..months {
+                    let period = shift_period(&row.period, k as i32)?;
+                    // 服务期早已跨过本次查询的范围，或还没摊到这里，都不必留
+                    if period < filter.range.from || period > horizon {
+                        continue;
+                    }
+                    *amortized.entry((row.rule, row.product.clone(), period)).or_default() +=
+                        per_month;
+                }
+            }
+        }
+    }
+
+    // 只看最近 N 天时，后付费只有这 N 天的钱，摊销却是整月的——两者直接相加，区间合计和各线
+    // 占比就被摊销撑大了。所以把落在区间内的摊销按天折算到同样的天数：
+    // 摊销 × N / 区间的自然天数。按月的那份（amortized_by_period，用于预估）不折算
+    let natural_days: u32 = filter.range.periods().iter().map(|p| days_in_period(p)).sum();
+    let scale = match window_days {
+        Some(n) if natural_days > 0 => (f64::from(n) / f64::from(natural_days)).min(1.0),
+        _ => 1.0,
+    };
+
+    // 总额以按产品那份为准：火山偶有 ExpenseDate 为空的行，它落不进任何一天，
+    // 却是实实在在的钱
+    let postpaid: f64 = by_product.values().map(|m| m.amount).sum();
+    // 摊到区间之内的那部分才计入本次合计；摊到之后几个月的只用于预估
+    let in_range = |period: &str| period <= filter.range.to.as_str();
+    let amortized_total: f64 =
+        amortized.iter().filter(|((_, _, p), _)| in_range(p)).map(|(_, v)| *v * scale).sum();
+    let total = postpaid + amortized_total;
+
+    // 业务线 → 产品 → 金额。同一个产品可能由几条规则分别归来（「某几台机器」与「其余部分」），
+    // 规则名一并作键，页面上才看得出这一行是怎么来的；预付费摊销单独标记，它不参与日均
+    let n = alloc.lines.len();
+    let mut lines: Vec<Items> = vec![BTreeMap::new(); n];
+    let mut line_postpaid = vec![Money::default(); n];
+    let mut line_amortized = vec![0.0; n];
+    let mut line_by_period: Vec<BTreeMap<String, f64>> = vec![BTreeMap::new(); n];
+    let mut amortized_by_period: BTreeMap<String, f64> = BTreeMap::new();
+    let mut unmatched: Items = BTreeMap::new();
+    let mut unmatched_postpaid = Money::default();
+    let mut unmatched_amortized = 0.0;
+    let mut products: Items = BTreeMap::new();
+    let rule_of = |rule: i32| usize::try_from(rule).ok().and_then(|i| alloc.rules.get(i));
+    let rule_name = |rule: i32| rule_of(rule).map(|r| r.name.clone()).unwrap_or_default();
+
+    for ((rule, product), value) in &by_product {
+        *products.entry((product.clone(), String::new(), false)).or_default() += *value;
+        if rule_of(*rule).is_none() {
+            *unmatched.entry((product.clone(), String::new(), false)).or_default() += *value;
+            unmatched_postpaid += *value;
+        }
+        for (line, share) in spread(alloc, *rule, 1.0) {
+            let Some(line) = line else { continue };
+            let part = *value * share;
+            *lines[line].entry((product.clone(), rule_name(*rule), false)).or_default() += part;
+            line_postpaid[line] += part;
+        }
+    }
+    for ((rule, product, period), value) in &amortized {
+        *amortized_by_period.entry(period.clone()).or_default() += *value;
+        let within = in_range(period);
+        let scaled = Money { amount: *value * scale, daily: 0.0 };
+        if within {
+            *products.entry((product.clone(), String::new(), true)).or_default() += scaled;
+            if rule_of(*rule).is_none() {
+                *unmatched.entry((product.clone(), String::new(), true)).or_default() += scaled;
+                unmatched_amortized += scaled.amount;
+            }
+        }
+        for (line, share) in spread(alloc, *rule, 1.0) {
+            let Some(line) = line else { continue };
+            *line_by_period[line].entry(period.clone()).or_default() += *value * share;
+            if within {
+                *lines[line].entry((product.clone(), rule_name(*rule), true)).or_default() +=
+                    scaled * share;
+                line_amortized[line] += scaled.amount * share;
+            }
+        }
+    }
+
+    let share_of = |v: f64| if total > 0.0 { v / total } else { 0.0 };
+    let items_of = |items: Items| {
+        let mut rows: Vec<AllocItem> = items
+            .into_iter()
+            .map(|((product, rule, prepaid), m)| AllocItem {
+                product,
+                rule: (!rule.is_empty()).then_some(rule),
+                amount: round(m.amount),
+                // 预付费是按月摊的，除以天数没有意义
+                daily: if prepaid { None } else { per_day(m) },
+                share: share_of(m.amount),
+                prepaid,
+            })
+            .collect();
+        rows.sort_by(|a, b| b.amount.total_cmp(&a.amount).then_with(|| a.product.cmp(&b.product)));
+        rows
+    };
+    let round_map = |m: BTreeMap<String, f64>| -> BTreeMap<String, f64> {
+        m.into_iter().map(|(k, v)| (k, round(v))).collect()
+    };
+
+    let mut line_rows: Vec<AllocLine> = alloc
+        .lines
+        .iter()
+        .zip(lines)
+        .zip(line_by_period)
+        .enumerate()
+        .map(|(i, ((name, items), by_period))| {
+            let sum = line_postpaid[i].amount + line_amortized[i];
+            AllocLine {
+                name: name.clone(),
+                amount: round(sum),
+                postpaid: round(line_postpaid[i].amount),
+                amortized: round(line_amortized[i]),
+                daily: per_day(line_postpaid[i]),
+                share: share_of(sum),
+                amortized_by_period: round_map(by_period),
+                items: items_of(items),
+            }
+        })
+        .collect();
+    // 空的业务线不必占一行；规则没覆盖到的月份很常见
+    line_rows.retain(|l| l.amount != 0.0 || !l.items.is_empty());
+
+    let mut points: BTreeMap<String, (f64, BTreeMap<String, f64>)> = BTreeMap::new();
+    for ((rule, bucket), value) in &by_bucket {
+        let point = points.entry(bucket.clone()).or_default();
+        point.0 += *value;
+        for (line, share) in spread(alloc, *rule, *value) {
+            if let Some(line) = line {
+                *point.1.entry(alloc.lines[line].clone()).or_default() += share;
+            }
+        }
+    }
+
+    let coverage = coverage(&state, tables, &sources, &filter, amount, &mut stats).await?;
+    let unmatched_sum = unmatched_postpaid.amount + unmatched_amortized;
+
+    Ok(Json(AllocationResponse {
+        from: filter.range.from.clone(),
+        to: filter.range.to.clone(),
+        amount,
+        configured: state.alloc.is_some(),
+        window_days,
+        days,
+        days_by_provider,
+        granularity: if has_days { "daily" } else { "monthly" },
+        prepaid: alloc.prepaid.is_some(),
+        total: round(total),
+        postpaid: round(postpaid),
+        amortized: round(amortized_total),
+        amortized_by_period: round_map(amortized_by_period),
+        daily: per_day(by_product.values().copied().sum()),
+        lines: line_rows,
+        unmatched: AllocLine {
+            name: "未归属".to_owned(),
+            amount: round(unmatched_sum),
+            postpaid: round(unmatched_postpaid.amount),
+            amortized: round(unmatched_amortized),
+            daily: per_day(unmatched_postpaid),
+            share: share_of(unmatched_sum),
+            amortized_by_period: BTreeMap::new(),
+            items: items_of(unmatched),
+        },
+        products: items_of(products),
+        points: points
+            .into_iter()
+            .map(|(t, (total, by_line))| AllocPoint {
+                t,
+                total: round(total),
+                by_line: by_line.into_iter().map(|(k, v)| (k, round(v))).collect(),
+            })
+            .collect(),
+        coverage,
+        stats: merge_stats(&stats),
+    }))
+}
+
+/// 日度账单是否明显少于月度账单。
+///
+/// 两张表是同一批账单的两种粒度，同一段账期的合计理应相当；日度表若只补了几天，分析视图
+/// 的区间合计与各业务线金额就会严重偏低，而页面本身看不出来。所以拿两张表的合计比一比，
+/// 差得多时如实告诉页面。只看阿里云：火山只有一张表，无从比较。
+async fn coverage(
+    state: &AppState,
+    tables: &BillTables,
+    sources: &[(Kind, &BillTable)],
+    filter: &BillFilter,
+    amount: Amount,
+    stats: &mut Vec<Stats>,
+) -> Result<Option<Coverage>> {
+    let (Some(daily), Some(monthly)) = (&tables.alicloud_daily, &tables.alicloud_monthly) else {
+        return Ok(None);
+    };
+    if !sources.iter().any(|(k, _)| *k == Kind::AlicloudDaily) {
+        return Ok(None);
+    }
+    let d = queries(state, Kind::AlicloudDaily, daily).total(filter, amount)?;
+    let m = queries(state, Kind::AlicloudMonthly, monthly).total(filter, amount)?;
+    let (d, m) = tokio::join!(state.client.rows::<TotalRow>(d), state.client.rows::<TotalRow>(m));
+    let (d, m) = (d?, m?);
+    stats.push(d.stats);
+    stats.push(m.stats);
+    let daily_total = d.rows.first().and_then(|r| r.amount).unwrap_or(0.0);
+    let monthly_total = m.rows.first().and_then(|r| r.amount).unwrap_or(0.0);
+    if monthly_total <= 0.0 || daily_total >= monthly_total * COVERAGE_WARN {
+        return Ok(None);
+    }
+    Ok(Some(Coverage {
+        provider: Provider::Alicloud.as_str(),
+        daily: round(daily_total),
+        monthly: round(monthly_total),
+    }))
+}
+
+/// 日度账单不到月度账单的这个比例时告警。留 5% 的余地：月度表当月的那份可能比日度表
+/// 多出一两天，也可能少一两天，差这么一点不值得打扰人。
+const COVERAGE_WARN: f64 = 0.95;
+
+/// 服务期最长认几个月。十年以上的服务期在账单里不会出现，出现了多半是脏数据。
+const MAX_SERVICE_MONTHS: u32 = 120;
+
+/// `YYYY-MM` 这个月有几天。
+fn days_in_period(period: &str) -> u32 {
+    let (Some(y), Some(m)) = (
+        period.get(..4).and_then(|v| v.parse::<i32>().ok()),
+        period.get(5..7).and_then(|v| v.parse::<u32>().ok()),
+    ) else {
+        return 30;
+    };
+    let first = chrono::NaiveDate::from_ymd_opt(y, m, 1);
+    let next = if m == 12 {
+        chrono::NaiveDate::from_ymd_opt(y + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(y, m + 1, 1)
+    };
+    match (first, next) {
+        (Some(a), Some(b)) => (b - a).num_days() as u32,
+        _ => 30,
+    }
+}
+
+/// 一笔后付费：金额，以及它对日均的贡献（金额 ÷ 它所在那张表的天数）。
+///
+/// 把日均当成一个可以相加的量来累计，是为了让「各云各按各的天数」在任意层级都成立：
+/// 一条业务线、一个产品的日均，都是其下各笔贡献之和，不必再追溯每一笔来自哪张表。
+#[derive(Debug, Default, Clone, Copy)]
+struct Money {
+    amount: f64,
+    daily: f64,
+}
+
+impl std::ops::AddAssign for Money {
+    fn add_assign(&mut self, o: Self) {
+        self.amount += o.amount;
+        self.daily += o.daily;
+    }
+}
+
+impl std::ops::Mul<f64> for Money {
+    type Output = Money;
+    fn mul(self, k: f64) -> Money {
+        Money { amount: self.amount * k, daily: self.daily * k }
+    }
+}
+
+impl std::iter::Sum for Money {
+    fn sum<I: Iterator<Item = Money>>(iter: I) -> Money {
+        let mut total = Money::default();
+        for m in iter {
+            total += m;
+        }
+        total
+    }
+}
+
 #[derive(Serialize)]
 pub struct DetailResponse {
     /// 这一页是哪朵云的。两朵云的明细列不一样，一页只看一朵
@@ -690,6 +1218,21 @@ async fn sync(
     }))
 }
 
+/// 同步跑到哪了。单位是「趟」——一个账期一种粒度算一趟，页面据此画进度条。
+///
+/// 阿里云选了「月度 + 日度」时，同一个账期会被拉两趟（一趟写月表、一趟写日表），
+/// 因此总数是账期数乘以粒度数，光有账期说不清当前在做什么，粒度要一并带上。
+#[derive(Serialize)]
+pub struct SyncProgressView {
+    /// 正在拉的账期
+    pub period: String,
+    /// `monthly` / `daily`；火山不分粒度，老版本 goscan 也不报，此时为空
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub granularity: String,
+    pub periods_done: i64,
+    pub periods_total: i64,
+}
+
 #[derive(Serialize)]
 pub struct SyncTaskResponse {
     pub id: String,
@@ -711,6 +1254,9 @@ pub struct SyncTaskResponse {
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
+    /// 跑到第几个账期了；老版本 goscan 不报，就是 null
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<SyncProgressView>,
 }
 
 /// 查询某个同步任务的当前状态。页面据此轮询，`done` 之后即刷新账单查询的缓存。
@@ -722,6 +1268,13 @@ async fn sync_task(
     let task = client.task(&task_id).await?;
     let done = matches!(task.status.as_str(), "completed" | "failed" | "cancelled");
     let result = task.result;
+    // 账期总数为 0 说明这一版 goscan 还不报进度，别把「0 / 0」当成进度画出来
+    let progress = task.progress.filter(|p| p.total > 0).map(|p| SyncProgressView {
+        period: p.period,
+        granularity: p.granularity,
+        periods_done: p.done.clamp(0, p.total),
+        periods_total: p.total,
+    });
     Ok(Json(SyncTaskResponse {
         ok: task.status == "completed" && result.as_ref().is_none_or(|r| r.success),
         done,
@@ -738,5 +1291,6 @@ async fn sync_task(
         provider: task.provider,
         started_at: task.start_time,
         ended_at: task.end_time,
+        progress,
     }))
 }
