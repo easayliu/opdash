@@ -204,12 +204,13 @@ describe('拉取账单对话框 · goscan v0.5 的新接口', () => {
       records: 109440,
       not_run: ['2026-09 monthly', '2026-09 daily'],
     }
-    expect(await screen.findByText('已停止', {}, { timeout: 4000 })).toBeInTheDocument()
+    // 这一步要等下一次轮询（每 2 秒一次），留出三个周期的余量
+    expect(await screen.findByText('已停止', {}, { timeout: 6000 })).toBeInTheDocument()
     expect(screen.getByText(/未执行：2026-09 月度、2026-09 日度，这些账期的数据保持原样/)).toBeInTheDocument()
     expect(screen.getByText(/停止前已写入 109,440 条/)).toBeInTheDocument()
     // 停下不算失败，不能标红说「同步失败」
     expect(screen.queryByText('同步失败')).not.toBeInTheDocument()
-  })
+  }, 15_000)
 
   it('点「开始拉取」撞上 409（这朵云已有同步），接上那个任务而不是只报错', async () => {
     let running: unknown = { task: null }

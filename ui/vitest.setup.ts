@@ -1,8 +1,15 @@
 import '@testing-library/jest-dom/vitest'
 import { afterEach, vi } from 'vitest'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 
 afterEach(cleanup)
+
+/**
+ * `findBy*` / `waitFor` 默认只等 1 秒。等的多是假接口的一次往返、一次轮询、一个懒加载的 chunk，
+ * 本机上几十毫秒就到，但 CI 的机器慢、又和别的任务抢 CPU，偶尔会跨过 1 秒——用例本身没错，
+ * 只是等得不够久。放宽到 3 秒：真坏掉的用例照样会失败，只是晚两秒报出来。
+ */
+configure({ asyncUtilTimeout: 3000 })
 
 /**
  * jsdom 没有的那几个浏览器 API。
