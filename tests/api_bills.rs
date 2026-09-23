@@ -337,10 +337,16 @@ async fn sync_forwards_to_goscan_and_polls_the_task() {
     assert_eq!(goscan.last_request().target, "/tasks/t-1");
 
     // 还在跑的时候 done = false，页面据此接着轮
-    goscan.respond(r#"{"id":"t-1","status":"running","provider":"alicloud"}"#);
+    // goscan 的时间是 Go 的 time.Time：没结束的任务 end_time 报零值，而不是 null。
+    // 原样转给页面，页面会当成已经结束，停表并显示「已用 0 秒」
+    goscan.respond(
+        r#"{"id":"t-1","status":"running","provider":"alicloud","start_time":"2026-09-23T09:10:00+08:00","end_time":"0001-01-01T00:00:00Z"}"#,
+    );
     let (_, body) = get_json(&app, "/api/bills/sync/t-1").await;
     assert_eq!(body["done"], false);
     assert_eq!(body["ok"], false);
+    assert_eq!(body["started_at"], "2026-09-23T09:10:00+08:00");
+    assert!(body["ended_at"].is_null(), "零值时间应当视为尚未结束: {body}");
 
     // 进度的单位是「趟」：两个账期各拉月表、日表，共四趟。粒度要一并透出，
     // 否则同一个账期出现两次，看着像卡住了

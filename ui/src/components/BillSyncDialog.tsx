@@ -38,7 +38,10 @@ function elapsed(startedAt: string | undefined, endedAt: string | undefined): st
  * 旧对象、组件不重新渲染，已用时就一直停在「0 秒」。所以自己起一个一秒的钟，任务结束即停表，
  * 此后按服务端给的结束时间显示定值。
  */
-export function Elapsed({ startedAt, endedAt }: { startedAt: string; endedAt?: string }) {
+export function Elapsed({ startedAt, endedAt: rawEnd }: { startedAt: string; endedAt?: string }) {
+  // Go 的零值时间（0001-01-01）表示「还没结束」，服务端已经滤掉，这里再兜一层：
+  // 把它当成结束时间，钟就停了，还会算出负数截成「0 秒」
+  const endedAt = rawEnd && new Date(rawEnd).getFullYear() > 1970 ? rawEnd : undefined
   const [, tick] = useState(0)
   useEffect(() => {
     if (endedAt) return

@@ -1289,8 +1289,15 @@ async fn sync_task(
         id: task.id,
         status: task.status,
         provider: task.provider,
-        started_at: task.start_time,
-        ended_at: task.end_time,
+        started_at: real_time(task.start_time),
+        ended_at: real_time(task.end_time),
         progress,
     }))
+}
+
+/// goscan 的时间是 Go 的 `time.Time`，没发生的事件报的是零值 `0001-01-01T00:00:00Z` 而不是
+/// null——任务还在跑，`end_time` 就是它。原样转给页面，页面会当成任务已经结束，停表并算出
+/// 负数的已用时（截成「0 秒」）。这里把零值（以及空串）都当作「还没有」。
+fn real_time(t: Option<String>) -> Option<String> {
+    t.filter(|v| !v.is_empty() && !v.starts_with("0001-01-01"))
 }

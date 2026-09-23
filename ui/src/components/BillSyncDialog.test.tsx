@@ -122,4 +122,14 @@ describe('拉取账单对话框', () => {
     expect(screen.getByText('已用 1 分 5 秒')).toBeInTheDocument()
     vi.useRealTimers()
   })
+
+  it('goscan 报来的零值结束时间（0001-01-01）当作尚未结束，钟照常走', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.parse('2026-09-23T08:00:10Z'))
+    render(<Elapsed startedAt="2026-09-23T08:00:00Z" endedAt="0001-01-01T00:00:00Z" />)
+    expect(screen.getByText('已用 10 秒')).toBeInTheDocument()
+    act(() => vi.advanceTimersByTime(2000))
+    expect(screen.getByText('已用 12 秒')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
 })
