@@ -10,7 +10,7 @@
 import { Dialog } from '@base-ui/react/dialog'
 import { Popover } from '@base-ui/react/popover'
 import { Tooltip } from '@base-ui/react/tooltip'
-import type { ReactElement, ReactNode, RefObject } from 'react'
+import type { ReactNode, RefObject } from 'react'
 
 export type Side = 'top' | 'bottom' | 'left' | 'right'
 
@@ -27,53 +27,54 @@ const POPUP = 'max-w-72 rounded-md border border-border bg-card px-2.5 py-1.5 te
 const LAYER = 'z-50'
 
 /**
- * 一句解释的气泡本体。触发器由调用方给（[`Hint`](./ui) 克隆好的那个元素），这里只管浮层。
+ * 一句解释的气泡本体。**只管浮层，不管触发器**：触发器是调用方（[`Hint`](./ui)）自己渲染的那个
+ * 元素，这里用 `anchor` 对准它定位，开合也由调用方控制。
+ *
+ * 不交给 Base UI 的 `Trigger` 去包，是因为本模块是懒加载的：交给它包，就得在「有人碰到」之后
+ * 把触发器挪进 `Trigger` 里，挪动会让 React 卸掉原来的按钮、另建一个——恰好发生在按下的那一刻，
+ * 这一下点击就落在了被换掉的旧节点上，手机上第一次轻触因此无效。
  *
  * `touch`：触摸设备上 tooltip 按惯例不响应点击，换成 popover，点一下开、点外面关。
- *
- * `defaultOpen`：这一坨是「人已经把鼠标放上去之后」才异步挂载的，挂载时 `pointerenter` 早过去
- * 了，不给个初始状态就得让人移开再移回来才看得见。
  */
 export function HintPopup({
   text,
   side,
   touch,
-  defaultOpen,
-  trigger,
-  children,
+  open,
+  anchor,
+  onOpenChange,
 }: {
   text: ReactNode
   side: Side
   touch: boolean
-  defaultOpen: boolean
-  trigger: ReactElement
-  children?: ReactNode
+  open: boolean
+  /** 触发器的 DOM 节点 */
+  anchor: RefObject<HTMLElement | null>
+  /** Base UI 自己要关的时候（点了外面、按了 Esc）；`target` 是触发这次变化的元素 */
+  onOpenChange: (open: boolean, target: EventTarget | null) => void
 }) {
   if (touch) {
     return (
-      <Popover.Root defaultOpen={defaultOpen}>
-        <Popover.Trigger render={trigger}>{children}</Popover.Trigger>
+      <Popover.Root open={open} onOpenChange={(next, details) => onOpenChange(next, details.event?.target ?? null)}>
         <Popover.Portal>
-          <Popover.Positioner side={side} sideOffset={6} className={LAYER}>
-            <Popover.Popup className={POPUP}>{text}</Popover.Popup>
+          <Popover.Positioner anchor={anchor} side={side} sideOffset={6} className={LAYER}>
+            {/* 只是一句解释：弹出时不抢焦点，关上时也不必把焦点送回哪里 */}
+            <Popover.Popup initialFocus={false} finalFocus={false} className={POPUP}>
+              {text}
+            </Popover.Popup>
           </Popover.Positioner>
         </Popover.Portal>
       </Popover.Root>
     )
   }
-  // Provider 管的是「连着看几个提示时第二个不再等延迟」。它本该挂在应用根部，但那样 Base UI
-  // 就进了首屏包，只好退而求其次挂在每个提示自己身上：代价是相邻两个提示之间不共享延迟
   return (
-    <Tooltip.Provider>
-      <Tooltip.Root defaultOpen={defaultOpen}>
-        <Tooltip.Trigger render={trigger}>{children}</Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Positioner side={side} sideOffset={6} className={LAYER}>
-            <Tooltip.Popup className={POPUP}>{text}</Tooltip.Popup>
-          </Tooltip.Positioner>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </Tooltip.Provider>
+    <Tooltip.Root open={open} onOpenChange={(next, details) => onOpenChange(next, details.event?.target ?? null)}>
+      <Tooltip.Portal>
+        <Tooltip.Positioner anchor={anchor} side={side} sideOffset={6} className={LAYER}>
+          <Tooltip.Popup className={POPUP}>{text}</Tooltip.Popup>
+        </Tooltip.Positioner>
+      </Tooltip.Portal>
+    </Tooltip.Root>
   )
 }
 

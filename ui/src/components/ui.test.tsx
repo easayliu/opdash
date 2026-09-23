@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { Button, Card, Combobox } from '@/components/ui'
+import { Button, Card, Combobox, Hint } from '@/components/ui'
 
 describe('Button', () => {
   it('把 active 报成 aria-pressed', () => {
@@ -76,5 +76,73 @@ describe('Combobox', () => {
 
     expect(picked).toEqual(['b'])
     expect(trigger).toHaveFocus()
+  })
+})
+
+describe('Hint', () => {
+  const desktop = window.matchMedia
+  afterEach(() => {
+    window.matchMedia = desktop
+  })
+
+  it('不先悬停、直接点，第一次点击就生效，按钮节点也不会被换掉', async () => {
+    const onClick = vi.fn()
+    render(
+      <Hint text="说明文字" asChild>
+        <button type="button" onClick={onClick}>
+          拉取账单
+        </button>
+      </Hint>,
+    )
+    const before = screen.getByRole('button', { name: '拉取账单' })
+    // userEvent.click 在同一瞬间完成移入、按下、抬起、点击——早先的实现会在按下那一刻把按钮
+    // 换成一个新节点，这一下点击就落空了。手机上的一次轻触正是这个样子
+    await userEvent.click(before)
+    expect(onClick).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: '拉取账单' })).toBe(before)
+  })
+
+  it('鼠标停留一会儿才浮出，移开即收起；子元素自己的处理函数照常执行', async () => {
+    const onEnter = vi.fn()
+    render(
+      <Hint text="说明文字" asChild>
+        <button type="button" onPointerEnter={onEnter}>
+          拉取账单
+        </button>
+      </Hint>,
+    )
+    const button = screen.getByRole('button', { name: '拉取账单' })
+    await userEvent.hover(button)
+    expect(onEnter).toHaveBeenCalled()
+    expect(await screen.findByText('说明文字', {}, { timeout: 3000 })).toBeInTheDocument()
+    await userEvent.unhover(button)
+    await waitFor(() => expect(screen.queryByText('说明文字')).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: '拉取账单' })).toBe(button)
+  })
+
+  it('触摸设备上点一下开、再点一下关，按钮本身的动作照常执行', async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia
+    const onClick = vi.fn()
+    render(
+      <Hint text="说明文字" asChild>
+        <button type="button" onClick={onClick}>
+          拉取账单
+        </button>
+      </Hint>,
+    )
+    const button = screen.getByRole('button', { name: '拉取账单' })
+    await userEvent.click(button)
+    expect(onClick).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText('说明文字', {}, { timeout: 3000 })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '拉取账单' }))
+    expect(onClick).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(screen.queryByText('说明文字')).not.toBeInTheDocument())
   })
 })

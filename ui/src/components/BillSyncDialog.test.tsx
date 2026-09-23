@@ -188,9 +188,6 @@ describe('拉取账单对话框 · goscan v0.5 的新接口', () => {
     let task: Record<string, unknown> = RUNNING
     const calls = routedApi({ running: () => ({ task: RUNNING }), task: () => task })
     dialog()
-    // 先悬停再点：按钮外面的气泡是指针移入时才挂载的，挂载时会换一个节点。真人从移入到按下
-    // 总隔着一会儿，userEvent.click 却在同一瞬间完成，点击会落在被换掉的旧节点上
-    await userEvent.hover(await screen.findByRole('button', { name: '停止同步' }))
     await userEvent.click(await screen.findByRole('button', { name: '停止同步' }))
     expect(calls).toContain('DELETE /api/bills/sync/t-9')
     expect(await screen.findByRole('button', { name: '正在停止…' })).toBeDisabled()

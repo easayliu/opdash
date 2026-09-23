@@ -4,7 +4,7 @@ import { CloudDownloadIcon, XIcon } from 'lucide-react'
 import { ApiError, apiDelete, apiGet, apiPost } from '@/api/client'
 import { useBillSyncProgress } from '@/api/sync'
 import type { BillProvider, BillSyncProgress, BillSyncRunning, BillSyncStarted, BillSyncTask } from '@/api/types'
-import { Button, Hint, ModalPanel, Select, Spinner, buttonClass } from '@/components/ui'
+import { Button, Hint, ModalPanel, Select, Spinner } from '@/components/ui'
 import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
 
 /**
@@ -368,9 +368,9 @@ export function BillSyncDialog({
             )}
             {started && !task.data?.done && (
               <Hint text="goscan 会把当前这一趟（一个账期 × 一种粒度）写完再停，未执行的账期保持原样" asChild>
-                <button type="button" onClick={stop} disabled={cancelling} className={buttonClass({ variant: 'danger' })}>
+                <Button type="button" variant="danger" onClick={stop} disabled={cancelling}>
                   {cancelling ? '正在停止…' : '停止同步'}
-                </button>
+                </Button>
               </Hint>
             )}
             {started && task.data?.done && (

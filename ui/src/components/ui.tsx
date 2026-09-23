@@ -150,19 +150,44 @@ interface HintChildProps {
   className?: string
   'aria-label'?: string
   'aria-describedby'?: string
-  onPointerEnter?: (e: React.PointerEvent) => void
-  onPointerLeave?: (e: React.PointerEvent) => void
-  onPointerDown?: (e: React.PointerEvent) => void
-  onFocus?: (e: React.FocusEvent) => void
-  onBlur?: (e: React.FocusEvent) => void
+  ref?: React.Ref<HTMLElement>
+  onPointerEnter?: (e: React.PointerEvent<HTMLElement>) => void
+  onPointerLeave?: (e: React.PointerEvent<HTMLElement>) => void
+  onPointerDown?: (e: React.PointerEvent<HTMLElement>) => void
+  onFocus?: (e: React.FocusEvent<HTMLElement>) => void
+  onBlur?: (e: React.FocusEvent<HTMLElement>) => void
+  onClick?: (e: React.MouseEvent<HTMLElement>) => void
 }
+
+/** 鼠标悬停多久才浮出来，与 Base UI Tooltip 的默认值一致：扫过去不弹，停下来才弹 */
+const HINT_DELAY_MS = 600
+
+/** 键盘聚焦才立即浮出，鼠标点出来的焦点不算——否则每点一次按钮都弹一下 */
+function focusVisible(el: Element): boolean {
+  try {
+    return el.matches(':focus-visible')
+  } catch {
+    return true
+  }
+}
+
+/** 先调子元素自己的处理函数，再调我们的。克隆时直接覆盖会把子元素原有的 onClick 之类吞掉 */
+function chain<E>(own: ((e: E) => void) | undefined, mine: ((e: E) => void) | undefined): ((e: E) => void) | undefined {
+  if (!mine) return own
+  return (e) => {
+    own?.(e)
+    mine(e)
+  }
+}
+
+type HintHandlers = Pick<HintChildProps, 'onPointerEnter' | 'onPointerLeave' | 'onPointerDown' | 'onFocus' | 'onBlur' | 'onClick'>
 
 /**
  * Base UI 那一坨（压完 43 kB）切在单独的 chunk 里，首屏不加载——见 `./base-ui`。
  *
- * 光切不预取的话，第一次悬停要等一次网络往返；更糟的是触摸设备上第一下点击会落空，因为那一
- * 下只来得及触发加载，浮层还没挂上。所以首屏画完之后趁空闲捎带取回来：不占关键路径，等人真
- * 去悬停或点击时基本已经就位。
+ * 光切不预取的话，第一次悬停要等一次网络往返才看得到气泡。所以首屏画完之后趁空闲捎带取回来：
+ * 不占关键路径，等人真去悬停或点击时基本已经就位。（没取回来也不影响按钮本身：触发器始终是
+ * 原来那个节点，点击照常生效，只是气泡晚一点出来。）
  */
 export const HintPopup = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.HintPopup })))
 export const PopoverPanel = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.PopoverPanel })))
@@ -232,60 +257,119 @@ export function Hint({
    */
   const described = !asChild && typeof text === 'string' && hasTextChild(el?.props.children)
   /**
-   * 碰到才挂载。`live` 记的是「这会儿指针 / 焦点还在不在触发器上」：浮层是异步挂上来的，挂上来
-   * 那一刻 `pointerenter` 早过去了，得靠它决定要不要直接显示；人已经移开了就别凭空弹一个。
+   * 两件事分开记：`armed` 是「气泡那一坨挂没挂上」（首屏不加载 Base UI，碰到才挂），`open` 是
+   * 「这会儿该不该显示」。开合完全由这里决定，Base UI 只负责画和定位。
    */
   const [armed, setArmed] = useState(false)
-  const live = useRef(false)
-  const arm = useCallback(() => {
-    live.current = true
-    setArmed(true)
+  const [open, setOpen] = useState(false)
+  const node = useRef<HTMLElement | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const clear = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = undefined
   }, [])
-  const release = useCallback(() => {
-    live.current = false
-  }, [])
-  const armProps = {
-    onPointerEnter: arm,
-    onPointerLeave: release,
-    onPointerDown: arm,
-    onFocus: arm,
-    onBlur: release,
-  }
-  const trigger = el
-    ? cloneElement(el, {
-        ...armProps,
-        className: cn(el.props.className, !asChild && 'cursor-help', className),
-        ...(described ? { 'aria-describedby': descId } : {}),
-        ...(typeof text === 'string' && !el.props['aria-label'] && !hasTextChild(el.props.children) ? { 'aria-label': text } : {}),
-      })
-    : <span {...armProps} className={cn('cursor-help', className)} />
-  const inner = el ? undefined : children
+  useEffect(() => clear, [clear])
+
+  // 桌面上按 Esc 收起；触摸那边的 popover 由 Base UI 自己处理
+  useEffect(() => {
+    if (!open || isMobile) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, isMobile])
+
+  const hide = useCallback(() => {
+    clear()
+    setOpen(false)
+  }, [clear])
+  const handlers: HintHandlers = isMobile
+    ? {
+        // 触摸设备没有悬停：点一下开，再点一下（或点外面）关。子元素自己的 onClick 照常执行
+        onClick: () => {
+          setArmed(true)
+          setOpen((o) => !o)
+        },
+      }
+    : {
+        onPointerEnter: (e: React.PointerEvent<HTMLElement>) => {
+          if (e.pointerType !== 'mouse') return
+          setArmed(true)
+          clear()
+          timer.current = setTimeout(() => setOpen(true), HINT_DELAY_MS)
+        },
+        onPointerLeave: hide,
+        // 按下就收起：人已经在操作这个按钮了，解释挡在旁边只会碍事
+        onPointerDown: hide,
+        onFocus: (e: React.FocusEvent<HTMLElement>) => {
+          setArmed(true)
+          if (focusVisible(e.currentTarget)) setOpen(true)
+        },
+        onBlur: hide,
+      }
+
+  const childRef = el?.props.ref
+  const ref = useMemo(
+    () => (v: HTMLElement | null) => {
+      node.current = v
+      if (typeof childRef === 'function') childRef(v)
+      else if (childRef) (childRef as React.RefObject<HTMLElement | null>).current = v
+    },
+    [childRef],
+  )
+  /**
+   * 触发器**始终渲染在同一个位置、同一层组件下**。早先是碰到之后才把它挪进 Base UI 的 Trigger，
+   * 挪动会让 React 卸掉旧按钮、另建一个——恰好在按下的那一刻，点击就落在了被换掉的旧节点上，
+   * 手机上第一次轻触因此无效。现在气泡作为兄弟节点单独挂，按 `anchor` 对准这个节点定位。
+   */
+  const trigger = el ? (
+    cloneElement(el, {
+      ref,
+      onPointerEnter: chain(el.props.onPointerEnter, handlers.onPointerEnter),
+      onPointerLeave: chain(el.props.onPointerLeave, handlers.onPointerLeave),
+      onPointerDown: chain(el.props.onPointerDown, handlers.onPointerDown),
+      onFocus: chain(el.props.onFocus, handlers.onFocus),
+      onBlur: chain(el.props.onBlur, handlers.onBlur),
+      onClick: chain(el.props.onClick, handlers.onClick),
+      className: cn(el.props.className, !asChild && 'cursor-help', className),
+      ...(described ? { 'aria-describedby': descId } : {}),
+      ...(typeof text === 'string' && !el.props['aria-label'] && !hasTextChild(el.props.children) ? { 'aria-label': text } : {}),
+    })
+  ) : (
+    <span ref={ref} {...handlers} className={cn('cursor-help', className)}>
+      {children}
+    </span>
+  )
   const desc = described ? (
     <span id={descId} hidden>
       {text}
     </span>
   ) : null
-  // 没碰过就只有触发器本身，Base UI 那个 chunk 连挂载都不挂载
-  if (!armed) {
-    return (
-      <>
-        {desc}
-        {trigger}
-      </>
-    )
-  }
   return (
     <>
       {desc}
-      <Suspense fallback={trigger}>
-        <HintPopup text={text} side={side} touch={isMobile} defaultOpen={live.current} trigger={trigger}>
-          {inner}
-        </HintPopup>
-      </Suspense>
+      {trigger}
+      {armed && (
+        <Suspense fallback={null}>
+          <HintPopup
+            text={text}
+            side={side}
+            touch={isMobile}
+            open={open}
+            anchor={node}
+            onOpenChange={(next, target) => {
+              // 点的是触发器本身：交给它自己的 onClick 去切换，这里若先关一次，紧接着又会被点开
+              if (!next && target instanceof Node && node.current?.contains(target)) return
+              if (!next) clear()
+              setOpen(next)
+            }}
+          />
+        </Suspense>
+      )}
     </>
   )
 }
-
 
 export function Badge({
   children,
