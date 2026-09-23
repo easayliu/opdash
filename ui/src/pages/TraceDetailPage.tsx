@@ -4,7 +4,7 @@ import { useMeta, useSpanAttrs, useTraceDetail, useTraceLogs } from '@/api/queri
 import type { LogRow, TraceDetailResponse } from '@/api/types'
 import { LEVEL_RANK, LogTable, sortLogRows, type ColFilter, type LogSort } from '@/components/LogTable'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Spinner, buttonClass, linkClass } from '@/components/ui'
+import { Badge, Button, Combobox, CopyButton, EmptyState, ErrorBox, Hint, InfoHint, Spinner, buttonClass, linkClass } from '@/components/ui'
 import { AnimatePresence } from 'motion/react'
 import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
@@ -225,11 +225,9 @@ export function TraceDetailPage() {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-6 gap-y-1.5 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
         {from && (
-          <Hint text={`回到${from.label}`} asChild>
-            <Link to={from.href} className="shrink-0 text-sm text-muted-fg hover:text-fg">
-              ← {from.label}
-            </Link>
-          </Hint>
+          <Link to={from.href} className="shrink-0 text-sm text-muted-fg hover:text-fg">
+            ← {from.label}
+          </Link>
         )}
         <div className="min-w-0 max-w-full">
           <h1 className="flex min-w-0 items-center gap-2 text-base font-semibold">
@@ -295,25 +293,21 @@ export function TraceDetailPage() {
         {root && (
           <div className="flex flex-wrap items-center gap-2">
             {meta.data?.metrics && (
-              <Hint text={`${root.service} 在这前后半小时的指标`} asChild>
-                <Link to={metricsHref(root.service, around(tree.startUs / 1000))} className={buttonClass({ size: 'xs' })}>
-                  服务指标
-                </Link>
-              </Hint>
+              <Link to={metricsHref(root.service, around(tree.startUs / 1000))} className={buttonClass({ size: 'xs' })}>
+                服务指标
+              </Link>
             )}
             <Link to={serviceHref(root.service, around(tree.startUs / 1000))} className={buttonClass({ size: 'xs' })}>
               服务概览
             </Link>
             {/* 时间窗按这条 trace 的实际跨度前后放宽：日志页按 id 查也要裁时间（见 logsHref），
                 不带窗口就会撞上它 1 小时的默认值 */}
-            <Hint text="这条链路的全部日志" asChild>
-              <Link
-                to={logsHref({ traceId }, { fromMs: tree.startUs / 1000 - WINDOW_AROUND_MS, toMs: tree.endUs / 1000 + WINDOW_AROUND_MS })}
-                className={buttonClass({ size: 'xs' })}
-              >
-                全部日志
-              </Link>
-            </Hint>
+            <Link
+              to={logsHref({ traceId }, { fromMs: tree.startUs / 1000 - WINDOW_AROUND_MS, toMs: tree.endUs / 1000 + WINDOW_AROUND_MS })}
+              className={buttonClass({ size: 'xs' })}
+            >
+              全部日志
+            </Link>
           </div>
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg md:ml-auto md:gap-x-4">
@@ -337,16 +331,15 @@ export function TraceDetailPage() {
           ))}
           <StatsLine stats={detail.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
           {detail.data?.windowed && (
-            <Hint text="只查了开始时间前 1 小时到后 24 小时的 span；怀疑漏了就查全部时间（慢）" asChild>
-              <button
-                type="button"
-                className={linkClass}
-                onClick={() => set({ at: null }, { replace: true })}
-              >
-                查全部时间
-              </button>
-            </Hint>
+            <button
+              type="button"
+              className={linkClass}
+              onClick={() => set({ at: null }, { replace: true })}
+            >
+              查全部时间
+            </button>
           )}
+          {detail.data?.windowed && <InfoHint text="只查了开始时间前 1 小时到后 24 小时的 span；怀疑有遗漏时可查全部时间（较慢）" />}
         </div>
       </header>
       <div className="flex min-h-0 flex-1">

@@ -8,7 +8,7 @@ import { useErrorGroups, useMeta, useMetricEvents, useServiceOperations, useServ
 import type { ErrorGroup, MetricEvent, OperationStat, OverviewResponse, ServiceStat } from '@/api/types'
 import { Sparkline } from '@/components/charts/Sparkline'
 import { StatsLine } from '@/components/StatsLine'
-import { Button, Card, EmptyState, ErrorBox, Hint, Input, Select, Spinner } from '@/components/ui'
+import { Button, Card, EmptyState, ErrorBox, Hint, InfoHint, Input, Select, Spinner } from '@/components/ui'
 import { COMPARE, DEFAULT_COMPARE, compareShort, latencyHotspot, parseCompare, topMovers, type Compare, type Mover } from '@/lib/compare'
 import { change, changeTone, formatChange, healthRank, meaningfulLatency, pct, serviceHealth, withWarning, type Health } from '@/lib/health'
 import { FADE, RISE } from '@/lib/motion'
@@ -423,7 +423,7 @@ export function ServicesPage() {
         {(q.isFetching || opsPending) && <Spinner className="size-4" />}
         <span className="ml-auto flex flex-wrap items-center gap-2">
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
-          <Button size="sm" active={onlyBad} onClick={() => set({ bad: onlyBad ? null : '1' })} disabled={!badCount && !onlyBad} title="只看错误率或延迟异常的">
+          <Button size="sm" active={onlyBad} onClick={() => set({ bad: onlyBad ? null : '1' })} disabled={!badCount && !onlyBad}>
             <AlertTriangleIcon className="size-3.5" />
             异常 {badCount}
           </Button>
@@ -488,11 +488,12 @@ export function ServicesPage() {
                 <h2 className="mb-2 flex flex-wrap items-baseline gap-x-2 text-sm font-semibold">
                   需要看一眼
                   {/* 判定口径有三条，写全了是一行半的小字。标题只留一句人话，口径收进气泡 */}
-                  <Hint text={`错误率 ≥ 1%，或服务 P95 比${cmpShort}高 1.5 倍以上（两个窗口都至少 300 次请求才比），或某一个接口 P95 翻倍、多耗的时间够长`}>
-                    <span className="text-2xs font-normal text-muted-fg">
-                      {bad.length} 个<span className="hidden sm:inline"> · 错误率、服务延迟，或单个接口明显变慢</span>
-                    </span>
-                  </Hint>
+                  <InfoHint
+                    text={`错误率 ≥ 1%，或服务 P95 比${cmpShort}高 1.5 倍以上（两个窗口都至少 300 次请求才比），或某一个接口 P95 翻倍、多耗的时间够长`}
+                    className="text-2xs font-normal text-muted-fg"
+                  >
+                    {bad.length} 个<span className="hidden sm:inline"> · 错误率、服务延迟，或单个接口明显变慢</span>
+                  </InfoHint>
                   <AnimatePresence initial={false}>
                     {opsPending && (
                       <m.span key="ops-pending" {...FADE} className="text-2xs font-normal text-muted-fg">
@@ -572,7 +573,7 @@ export function ServicesPage() {
                           className={cn('px-4 py-2.5 font-medium select-none', c.align === 'right' ? 'w-24 text-right' : 'text-left', tableSort.key === c.key && 'text-accent')}
                         >
                           {/* 点表头排序是这张表唯一的交互，原来挂在 th 的 onClick 上，键盘根本够不着 */}
-                          <Hint text={c.title ?? '点击排序'} asChild>
+                          <Hint text={c.title} asChild>
                             <button
                               type="button"
                               className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60"

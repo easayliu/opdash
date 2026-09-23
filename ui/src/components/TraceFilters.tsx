@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { FilterIcon, PlusIcon, XIcon } from 'lucide-react'
 import type { Params } from '@/api/client'
 import { useAttrKeys, useAttrValues, useTraceValues } from '@/api/queries'
-import { Button, Combobox, Hint, Input, Select, type ComboOption } from '@/components/ui'
+import { Button, Combobox, Hint, InfoHint, Input, Select, type ComboOption } from '@/components/ui'
 import { cn } from '@/lib/utils'
 
 /** facet 接口返回的 `{value, count}` → 下拉选项，条数放右边当灰字 */
@@ -89,26 +89,28 @@ export function TraceFilters({ state, rangeParams, onChange }: Props) {
           className={cn('w-full md:w-96', !mobileOpen && 'hidden md:block')}
           title={state.service ? '接口 / 操作（span_name）' : '先选服务'}
         />
-        <Hint text="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息">
-          <div
-            role="group"
-            aria-label="span 类型（可多选）"
-            className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')}
-          >
-            {KINDS.map((k) => (
-              <button
-                key={k}
-                type="button"
-                aria-pressed={state.kinds.includes(k)}
-                onClick={() => onChange({ ...state, kinds: state.kinds.includes(k) ? state.kinds.filter((x) => x !== k) : [...state.kinds, k] })}
-                className={cn('h-full flex-1 rounded-sm px-1.5 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
-              >
-                {k}
-              </button>
-            ))}
-          </div>
-        </Hint>
-        <Button size="md" active={state.error_only} className={cn(!mobileOpen && 'hidden md:inline-flex')} onClick={() => onChange({ ...state, error_only: !state.error_only })} title="只看 status = Error 的 span 所在的链路">
+        <div
+          role="group"
+          aria-label="span 类型（可多选）"
+          className={cn('flex h-9 w-full items-center gap-0.5 rounded-md border border-input p-0.5 md:w-auto', !mobileOpen && 'hidden md:flex')}
+        >
+          {KINDS.map((k) => (
+            <button
+              key={k}
+              type="button"
+              aria-pressed={state.kinds.includes(k)}
+              onClick={() => onChange({ ...state, kinds: state.kinds.includes(k) ? state.kinds.filter((x) => x !== k) : [...state.kinds, k] })}
+              className={cn('h-full flex-1 rounded-sm px-1.5 text-xs font-semibold text-muted-fg hover:bg-muted md:flex-none md:px-2.5', state.kinds.includes(k) && 'bg-accent-soft text-accent')}
+            >
+              {k}
+            </button>
+          ))}
+        </div>
+        <InfoHint
+          text="span 类型：Server = 收到的请求，Client = 对外调用（HTTP / DB / MQ），Consumer = 消费消息"
+          className={cn(!mobileOpen && 'hidden md:inline-flex')}
+        />
+        <Button size="md" active={state.error_only} className={cn(!mobileOpen && 'hidden md:inline-flex')} onClick={() => onChange({ ...state, error_only: !state.error_only })}>
           只看错误
         </Button>
         <span className={cn('flex min-w-0 items-center gap-1.5 text-sm text-muted-fg', !mobileOpen && 'hidden md:flex')}>

@@ -29,7 +29,7 @@ function dialog() {
   )
 }
 
-describe('拉取账单对话框', () => {
+describe('同步账单对话框', () => {
   it('goscan 报了进度就画确定进度条，并说明这一趟写哪张表', async () => {
     // 把「此刻」钉住：已用时是渲染时现算的，CI 的机器慢，打桩到断言之间走过的一两秒
     // 会让「1 分 15 秒」变成「1 分 17 秒」
@@ -48,12 +48,12 @@ describe('拉取账单对话框', () => {
       progress: { period: '2026-06', granularity: 'daily', periods_done: 2, periods_total: 6 },
     })
     dialog()
-    await userEvent.click(await screen.findByRole('button', { name: '开始拉取' }))
+    await userEvent.click(await screen.findByRole('button', { name: '开始同步' }))
 
-    const bar = await screen.findByRole('progressbar', { name: '账单拉取进度' })
+    const bar = await screen.findByRole('progressbar', { name: '账单同步进度' })
     expect(bar).toHaveAttribute('aria-valuenow', '2')
     expect(bar).toHaveAttribute('aria-valuemax', '6')
-    expect(await screen.findByText(/2 \/ 6 趟 · 正在拉 2026-06 日度/)).toBeInTheDocument()
+    expect(await screen.findByText(/2 \/ 6 批 · 正在同步 2026-06 日度/)).toBeInTheDocument()
     // 已用时按服务端给的开始时间算
     expect(await screen.findByText(/已用 1 分 15 秒/)).toBeInTheDocument()
     now.mockRestore()
@@ -62,11 +62,11 @@ describe('拉取账单对话框', () => {
   it('goscan 不报进度时退回不确定进度条，不编百分比', async () => {
     stubApi({ id: 't-1', status: 'running', provider: 'alicloud', done: false, ok: false, records: 0, fetched: 0, message: '' })
     dialog()
-    await userEvent.click(await screen.findByRole('button', { name: '开始拉取' }))
+    await userEvent.click(await screen.findByRole('button', { name: '开始同步' }))
 
-    const bar = await screen.findByRole('progressbar', { name: '账单拉取进度' })
+    const bar = await screen.findByRole('progressbar', { name: '账单同步进度' })
     expect(bar).not.toHaveAttribute('aria-valuenow')
-    expect(bar).toHaveAttribute('aria-valuetext', '正在拉取')
+    expect(bar).toHaveAttribute('aria-valuetext', '正在同步')
   })
 
   // 一个账期一种粒度算一趟：选了「月度 + 日度」要等的是两倍的时间，填完账期就该看得见
@@ -74,15 +74,15 @@ describe('拉取账单对话框', () => {
     stubApi({ id: 't-1', status: 'running', provider: 'alicloud', done: false, ok: false, records: 0, fetched: 0, message: '' })
     dialog()
 
-    expect(await screen.findByText('共 6 个账期、12 趟')).toBeInTheDocument()
+    expect(await screen.findByText('共 6 个账期、12 批')).toBeInTheDocument()
 
     // 只要一种粒度就是一个账期一趟，这时候再报趟数是噪声
     await userEvent.click(screen.getByRole('button', { name: '粒度' }))
-    await userEvent.click(screen.getByRole('option', { name: '只要月度' }))
+    await userEvent.click(screen.getByRole('option', { name: '仅月度' }))
     expect(screen.getByText('共 6 个账期')).toBeInTheDocument()
 
     // 火山只有一张表，粒度这一项根本不出现
-    await userEvent.click(screen.getByRole('button', { name: '云' }))
+    await userEvent.click(screen.getByRole('button', { name: '云厂商' }))
     await userEvent.click(screen.getByRole('option', { name: '火山引擎' }))
     expect(screen.queryByRole('button', { name: '粒度' })).not.toBeInTheDocument()
     expect(screen.getByText('共 6 个账期')).toBeInTheDocument()
@@ -103,11 +103,11 @@ describe('拉取账单对话框', () => {
       progress: { period: '', periods_done: 6, periods_total: 6 },
     })
     dialog()
-    await userEvent.click(await screen.findByRole('button', { name: '开始拉取' }))
+    await userEvent.click(await screen.findByRole('button', { name: '开始同步' }))
 
     expect(await screen.findByText('同步完成')).toBeInTheDocument()
     expect(await screen.findByText(/写入 1,200 条/)).toBeInTheDocument()
-    const bar = await screen.findByRole('progressbar', { name: '账单拉取进度' })
+    const bar = await screen.findByRole('progressbar', { name: '账单同步进度' })
     expect(bar).toHaveAttribute('aria-valuenow', '6')
   })
 
@@ -174,16 +174,16 @@ const RUNNING = {
   progress: { period: '2026-06', granularity: 'daily', periods_done: 4, periods_total: 12, records: 3400, records_total: 9120 },
 }
 
-describe('拉取账单对话框 · goscan v0.5 的新接口', () => {
+describe('同步账单对话框 · goscan v0.5 的新接口', () => {
   it('打开时这朵云已有同步在跑（比如 cron 起的），直接接上它的进度', async () => {
     routedApi({ running: () => ({ task: RUNNING }), task: () => RUNNING })
     dialog()
-    expect(await screen.findByText(/已有一个同步正在进行/)).toBeInTheDocument()
-    expect(await screen.findByText(/4 \/ 12 趟 · 正在拉 2026-06 日度/)).toBeInTheDocument()
+    expect(await screen.findByText(/已有同步任务正在进行/)).toBeInTheDocument()
+    expect(await screen.findByText(/4 \/ 12 批 · 正在同步 2026-06 日度/)).toBeInTheDocument()
     // 一趟要跑好几分钟，本趟的行数让人看得出还在动
-    expect(await screen.findByText(/本趟已写入 3,400 \/ 9,120 行/)).toBeInTheDocument()
+    expect(await screen.findByText(/本批已写入 3,400 \/ 9,120 条/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '停止同步' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '开始拉取' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '开始同步' })).not.toBeInTheDocument()
   })
 
   it('停止：先显示「正在停止」，停下后列出没跑的那几趟', async () => {
@@ -193,7 +193,7 @@ describe('拉取账单对话框 · goscan v0.5 的新接口', () => {
     await userEvent.click(await screen.findByRole('button', { name: '停止同步' }))
     expect(calls).toContain('DELETE /api/bills/sync/t-9')
     expect(await screen.findByRole('button', { name: '正在停止…' })).toBeDisabled()
-    expect(screen.getByText(/会把当前这一趟写完再停/)).toBeInTheDocument()
+    expect(screen.getByText(/将写完当前这一批后停止/)).toBeInTheDocument()
 
     // goscan 写完手上那一趟，停了
     task = {
@@ -206,13 +206,13 @@ describe('拉取账单对话框 · goscan v0.5 的新接口', () => {
     }
     // 这一步要等下一次轮询（每 2 秒一次），留出三个周期的余量
     expect(await screen.findByText('已停止', {}, { timeout: 6000 })).toBeInTheDocument()
-    expect(screen.getByText(/未执行：2026-09 月度、2026-09 日度，这些账期的数据保持原样/)).toBeInTheDocument()
+    expect(screen.getByText(/未执行：2026-09 月度、2026-09 日度，这些账期的数据保持不变/)).toBeInTheDocument()
     expect(screen.getByText(/停止前已写入 109,440 条/)).toBeInTheDocument()
     // 停下不算失败，不能标红说「同步失败」
     expect(screen.queryByText('同步失败')).not.toBeInTheDocument()
   }, 15_000)
 
-  it('点「开始拉取」撞上 409（这朵云已有同步），接上那个任务而不是只报错', async () => {
+  it('点「开始同步」撞上 409（这朵云已有同步），接上那个任务而不是只报错', async () => {
     let running: unknown = { task: null }
     routedApi({
       running: () => running,
@@ -226,8 +226,8 @@ describe('拉取账单对话框 · goscan v0.5 的新接口', () => {
       },
     })
     dialog()
-    await userEvent.click(await screen.findByRole('button', { name: '开始拉取' }))
-    expect(await screen.findByText(/已有一个同步正在进行/)).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: '开始同步' }))
+    expect(await screen.findByText(/已有同步任务正在进行/)).toBeInTheDocument()
     expect(screen.queryByText(/已有同步任务正在执行/)).not.toBeInTheDocument()
   })
 })
@@ -260,11 +260,11 @@ describe('同步进度走事件流', () => {
     vi.stubGlobal('EventSource', FakeEventSource)
     const calls = routedApi({ running: () => ({ task: RUNNING }), task: () => ({ ...RUNNING, progress: { ...RUNNING.progress, periods_done: 7 } }) })
     dialog()
-    await screen.findByText(/已有一个同步正在进行/)
+    await screen.findByText(/已有同步任务正在进行/)
     const es = FakeEventSource.last!
     expect(es.url).toBe('/api/bills/sync/t-9/events')
     act(() => es.emit('task', RUNNING))
-    expect(await screen.findByText(/4 \/ 12 趟/)).toBeInTheDocument()
+    expect(await screen.findByText(/4 \/ 12 批/)).toBeInTheDocument()
     // 有事件流就不轮询
     expect(calls.filter((c) => c === 'GET /api/bills/sync/t-9')).toHaveLength(0)
 
@@ -273,7 +273,7 @@ describe('同步进度走事件流', () => {
       es.readyState = FakeEventSource.CLOSED
       es.onerror?.()
     })
-    expect(await screen.findByText(/7 \/ 12 趟/)).toBeInTheDocument()
+    expect(await screen.findByText(/7 \/ 12 批/)).toBeInTheDocument()
     expect(calls).toContain('GET /api/bills/sync/t-9')
     // 只还原 EventSource：unstubAllGlobals 会把 vitest.setup.ts 里打的 IntersectionObserver 等桩一并撤掉
     vi.stubGlobal('EventSource', undefined)
@@ -283,7 +283,7 @@ describe('同步进度走事件流', () => {
     vi.stubGlobal('EventSource', FakeEventSource)
     routedApi({ running: () => ({ task: RUNNING }) })
     dialog()
-    await screen.findByText(/已有一个同步正在进行/)
+    await screen.findByText(/已有同步任务正在进行/)
     const es = FakeEventSource.last!
     act(() => {
       es.emit('task', { ...RUNNING, status: 'completed', done: true, ok: true, records: 120, fetched: 120 })

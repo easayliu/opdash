@@ -848,9 +848,16 @@ impl<'a> BillQueries<'a> {
         Ok(sql)
     }
 
-    /// 按「第几条规则 + 产品」汇总。一条规则可能横跨多个产品（除 `[[include]]` 外并无限制），
-    /// 分产品列出方能与账单本身对得上，也正是费用表中「业务线 → 产品 → 金额」那几行。
-    pub fn alloc_by_product(
+    /// 按「第几条规则 + 产品 + 哪一天 + 哪个账期」汇总：分析视图的后付费全从这一条里拆出来。
+    ///
+    /// 按产品（业务线 → 产品 → 金额那几行，一条规则可能横跨多个产品，分产品列出方能与账单
+    /// 对得上）、按天（趋势与天数）、按账期（月度拆分表）原是三条查询，扫的是同一批行、做的
+    /// 是同一套去重。去重要把各分片的中间结果收到一台上再开窗，三条并发时彼此争抢：线上实测
+    /// 各 1.2~1.4 秒，合成一条约 0.6 秒，回来的也只有几千行，在进程里再分三份。
+    ///
+    /// `bucket` 是日期，月度表没有日期时退为账期。**不筛掉空的 bucket**：火山偶有 `ExpenseDate`
+    /// 为空的行，落不进任何一天，却是实实在在的钱，按产品、按账期都要算上它。
+    pub fn alloc_detail(
         &self,
         filter: &BillFilter,
         amount: Amount,
@@ -860,14 +867,18 @@ impl<'a> BillQueries<'a> {
         let mut b = Bindings::new();
         let where_sql = self.alloc_where(filter, alloc, window_days, &mut b)?;
         let classify = self.classify_expr(alloc, &mut b);
+        let bucket =
+            if self.kind.has_days() { self.kind.date_expr() } else { self.kind.period_expr() };
         let cols = [
             col(classify, "rule"),
             col(Dimension::Product.expr(self.kind), "product"),
+            col(bucket, "bucket"),
+            col(self.kind.period_expr(), "period"),
             col(self.amount_expr(amount), "amount"),
         ];
         let inner = self.deduped(&cols, &where_sql)?;
         Ok(b.into_query(format!(
-            "SELECT _rule AS rule, _product AS product, sum(_amount) AS amount\nFROM (\n  {inner}\n)\nGROUP BY _rule, _product\nORDER BY amount DESC"
+            "SELECT _rule AS rule, _product AS product, _bucket AS bucket, _period AS period, sum(_amount) AS amount\nFROM (\n  {inner}\n)\nGROUP BY _rule, _product, _bucket, _period"
         )))
     }
 
@@ -918,25 +929,27 @@ impl<'a> BillQueries<'a> {
         ))))
     }
 
-    /// 按「第几条规则 + 哪一天（月度表则为哪个账期）」汇总，用以绘制业务线的趋势，并据以
-    /// 统计共有几天的账单。
-    pub fn alloc_by_bucket(
+    /// 按「第几条规则 + 账期」汇总，给月度拆分表用：那张表一列一个自然月。
+    ///
+    /// 只在「只看最近 N 天」时单独发：那时 [`Self::alloc_detail`] 只含这 N 天，拆分表却要整月。
+    /// 平常直接从 `alloc_detail` 的结果里按账期归并，不多扫一遍。
+    pub fn alloc_by_period(
         &self,
         filter: &BillFilter,
         amount: Amount,
         alloc: &Alloc,
-        window_days: Option<u32>,
     ) -> Result<Query> {
         let mut b = Bindings::new();
-        let where_sql = self.alloc_where(filter, alloc, window_days, &mut b)?;
+        let where_sql = self.alloc_where(filter, alloc, None, &mut b)?;
         let classify = self.classify_expr(alloc, &mut b);
-        let bucket =
-            if self.kind.has_days() { self.kind.date_expr() } else { self.kind.period_expr() };
-        let cols =
-            [col(classify, "rule"), col(bucket, "bucket"), col(self.amount_expr(amount), "amount")];
+        let cols = [
+            col(classify, "rule"),
+            col(self.kind.period_expr(), "period"),
+            col(self.amount_expr(amount), "amount"),
+        ];
         let inner = self.deduped(&cols, &where_sql)?;
         Ok(b.into_query(format!(
-            "SELECT _rule AS rule, _bucket AS bucket, sum(_amount) AS amount\nFROM (\n  {inner}\n)\nWHERE _bucket != ''\nGROUP BY _rule, _bucket\nORDER BY bucket"
+            "SELECT _rule AS rule, _period AS period, sum(_amount) AS amount\nFROM (\n  {inner}\n)\nWHERE _period != ''\nGROUP BY _rule, _period\nORDER BY period"
         )))
     }
 
@@ -1013,8 +1026,20 @@ pub struct AllocPrepaidRow {
 #[derive(Debug, Deserialize)]
 pub struct AllocRow {
     pub rule: i32,
-    #[serde(rename = "product", alias = "bucket")]
+    #[serde(rename = "period")]
     pub key: String,
+    #[serde(deserialize_with = "num::de")]
+    pub amount: f64,
+}
+
+/// [`BillQueries::alloc_detail`] 的一行。
+#[derive(Debug, Deserialize)]
+pub struct AllocDetailRow {
+    pub rule: i32,
+    pub product: String,
+    /// 日期（`YYYY-MM-DD`），月度表为账期；火山偶有空串
+    pub bucket: String,
+    pub period: String,
     #[serde(deserialize_with = "num::de")]
     pub amount: f64,
 }
@@ -1318,7 +1343,7 @@ subscription = ["Subscription", "包年包月"]
         });
         let filter = BillFilter::new(PeriodRange::new(None, None, "2026-09").unwrap());
         let q = queries(&t, Kind::AlicloudDaily, Dedupe::Group)
-            .alloc_by_product(&filter, Amount::Payable, &alloc(), None)
+            .alloc_detail(&filter, Amount::Payable, &alloc(), None)
             .unwrap();
         let sql = q.sql();
         assert!(sql.contains("multiIf("), "{sql}");
@@ -1340,7 +1365,7 @@ subscription = ["Subscription", "包年包月"]
         let t = table("volcengine_bill", Kind::Volcengine);
         let filter = BillFilter::new(PeriodRange::new(None, None, "2026-09").unwrap());
         let q = queries(&t, Kind::Volcengine, Dedupe::Group)
-            .alloc_by_product(&filter, Amount::Payable, &alloc(), None)
+            .alloc_detail(&filter, Amount::Payable, &alloc(), None)
             .unwrap();
         let sql = q.sql();
         assert!(!sql.contains("intranet_ip"), "{sql}");
@@ -1366,7 +1391,7 @@ subscription = ["Subscription", "包年包月"]
         let filter = BillFilter::new(PeriodRange::new(None, None, "2026-09").unwrap());
         let q = queries(&t, Kind::AlicloudDaily, Dedupe::Group);
 
-        let as_billed = q.alloc_by_product(&filter, Amount::Payable, &alloc, None).unwrap();
+        let as_billed = q.alloc_detail(&filter, Amount::Payable, &alloc, None).unwrap();
         assert!(as_billed.sql().contains("AND NOT (subscription_type IN {"), "{}", as_billed.sql());
 
         let range = PeriodRange { from: "2024-10".into(), to: "2026-09".into() };
@@ -1397,7 +1422,7 @@ subscription = ["Subscription", "包年包月"]
         assert!(
             q.alloc_prepaid(&filter, Amount::Payable, &alloc, &prepaid, &range).unwrap().is_none()
         );
-        let as_billed = q.alloc_by_product(&filter, Amount::Payable, &alloc, None).unwrap();
+        let as_billed = q.alloc_detail(&filter, Amount::Payable, &alloc, None).unwrap();
         assert!(!as_billed.sql().contains("AND NOT"), "{}", as_billed.sql());
     }
 
@@ -1407,7 +1432,7 @@ subscription = ["Subscription", "包年包月"]
         let t = table("alicloud_bill_daily", Kind::AlicloudDaily);
         let filter = BillFilter::new(PeriodRange::new(None, None, "2026-09").unwrap());
         let q = queries(&t, Kind::AlicloudDaily, Dedupe::Group)
-            .alloc_by_bucket(&filter, Amount::Payable, &crate::alloc::Alloc::default(), Some(7))
+            .alloc_detail(&filter, Amount::Payable, &crate::alloc::Alloc::default(), Some(7))
             .unwrap();
         let sql = q.sql();
         assert!(
@@ -1416,7 +1441,7 @@ subscription = ["Subscription", "包年包月"]
         );
         // 含最后一日在内共 7 天，故往回数 6 日
         assert_eq!(q.params().last().unwrap().1, "6");
-        assert!(sql.contains("GROUP BY _rule, _bucket"), "{sql}");
+        assert!(sql.contains("GROUP BY _rule, _product, _bucket, _period"), "{sql}");
         // 一条规则也没有：整张表均为未归属
         assert!(sql.contains("toInt32(-1)"), "{sql}");
 
@@ -1424,7 +1449,7 @@ subscription = ["Subscription", "包年包月"]
         let m = table("alicloud_bill_monthly", Kind::AlicloudMonthly);
         assert!(
             queries(&m, Kind::AlicloudMonthly, Dedupe::Group)
-                .alloc_by_bucket(&filter, Amount::Payable, &crate::alloc::Alloc::default(), Some(7))
+                .alloc_detail(&filter, Amount::Payable, &crate::alloc::Alloc::default(), Some(7))
                 .is_err()
         );
     }

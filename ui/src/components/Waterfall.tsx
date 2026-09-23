@@ -400,47 +400,45 @@ export function Waterfall({ tree, colors, selected, onSelect }: Props) {
         <div className="flex shrink-0 items-center gap-1 overflow-hidden px-2 md:px-3" style={{ width: leftW }}>
           <span className="mr-auto hidden whitespace-nowrap md:inline">服务 / 操作</span>
           {rootIsPartial && (
-            <Button size="xs" variant="ghost" className="px-1.5 md:px-2.5" active={isRoot} onClick={() => setZoom(root)} title="只看根请求的时间窗口（不含返回之后才跑的异步 span）">
+            <Button size="xs" variant="ghost" className="px-1.5 md:px-2.5" active={isRoot} onClick={() => setZoom(root)}>
               根请求<span className="hidden md:inline"> {formatDuration((root!.endUs - root!.startUs) * 1000)}</span>
             </Button>
           )}
           {(rootIsPartial || !isFull) && (
-            <Button size="xs" variant="ghost" className="px-1.5 md:px-2.5" active={isFull} onClick={() => setZoom(full)} title="最早 span 开始到最晚 span 结束">
+            <Button size="xs" variant="ghost" className="px-1.5 md:px-2.5" active={isFull} onClick={() => setZoom(full)}>
               全部<span className="hidden md:inline"> {formatDuration(fullLen * 1000)}</span>
             </Button>
           )}
         </div>
-        <Hint text="拖动选择范围放大；双击还原">
-          <div
-            className="relative flex-1 cursor-col-resize touch-pan-y select-none"
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerCancel={endDrag}
-            onDoubleClick={() => setZoom(null)}
-          >
-            {ticks.map((t) => (
-              <span
-                key={t}
-                className={cn('absolute top-0 leading-8 tabular-nums', t === 0 ? 'pl-1.5' : t === 1 ? 'pr-1.5' : '-translate-x-1/2')}
-                // 两端的刻度给「窗口外 N 个」的角标让位
-                style={t === 1 ? { right: outside.after > 0 ? '3.5rem' : 0 } : { left: t === 0 && outside.before > 0 ? '3.5rem' : `${t * 100}%` }}
-              >
-                {offsetLabel(view.startUs + viewLen * t)}
-              </span>
-            ))}
-            {outside.before > 0 && (
-              <Hint text={`${outside.before} 个 span 在窗口之前`}>
-                <span className="absolute top-0 left-0 rounded-br bg-warn-soft px-1.5 leading-[1.125rem] text-warn">◂ {outside.before}</span>
-              </Hint>
-            )}
-            {outside.after > 0 && (
-              <Hint text={`${outside.after} 个 span 在窗口之后（异步）`}>
-                <span className="absolute top-0 right-0 rounded-bl bg-warn-soft px-1.5 leading-[1.125rem] text-warn">{outside.after} ▸</span>
-              </Hint>
-            )}
-          </div>
-        </Hint>
+        <div
+          className="relative flex-1 cursor-col-resize touch-pan-y select-none"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={endDrag}
+          onDoubleClick={() => setZoom(null)}
+        >
+          {ticks.map((t) => (
+            <span
+              key={t}
+              className={cn('absolute top-0 leading-8 tabular-nums', t === 0 ? 'pl-1.5' : t === 1 ? 'pr-1.5' : '-translate-x-1/2')}
+              // 两端的刻度给「窗口外 N 个」的角标让位
+              style={t === 1 ? { right: outside.after > 0 ? '3.5rem' : 0 } : { left: t === 0 && outside.before > 0 ? '3.5rem' : `${t * 100}%` }}
+            >
+              {offsetLabel(view.startUs + viewLen * t)}
+            </span>
+          ))}
+          {outside.before > 0 && (
+            <Hint text={`${outside.before} 个 span 在窗口之前`}>
+              <span className="absolute top-0 left-0 rounded-br bg-warn-soft px-1.5 leading-[1.125rem] text-warn">◂ {outside.before}</span>
+            </Hint>
+          )}
+          {outside.after > 0 && (
+            <Hint text={`${outside.after} 个 span 在窗口之后（异步）`}>
+              <span className="absolute top-0 right-0 rounded-bl bg-warn-soft px-1.5 leading-[1.125rem] text-warn">{outside.after} ▸</span>
+            </Hint>
+          )}
+        </div>
       </div>
       <div ref={dragBox} className="pointer-events-none absolute inset-y-0 z-[2] border-x border-accent bg-accent/15" style={{ display: 'none' }} />
       {/*
@@ -799,11 +797,9 @@ export function SpanPanel({
           <CopyButton text={span.span_id} title="复制 span id" size="xs" />
           <span className="ml-auto flex items-center gap-1">
             {metricsLink && (
-              <Hint text={`${span.service} 在这一刻前后的指标（GC、连接池、CPU……）`} asChild>
-                <Link to={metricsLink} className={buttonClass({ size: 'xs', variant: 'ghost' })}>
-                  这个服务的指标
-                </Link>
-              </Hint>
+              <Link to={metricsLink} className={buttonClass({ size: 'xs', variant: 'ghost' })}>
+                这个服务的指标
+              </Link>
             )}
             <Button size="xs" variant="ghost" onClick={onShowLogs}>
               只看这个 span 的日志

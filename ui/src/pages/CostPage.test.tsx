@@ -59,6 +59,10 @@ const ALLOCATION = {
         { product: '云服务器 ECS', rule: 'ECS 其余部分', amount: 100, daily: 50, share: 0.1, prepaid: false },
         { product: '云服务器 ECS', rule: '包年包月机器', amount: 200, daily: null, share: 0.2, prepaid: true },
       ],
+      by_provider: {
+        alicloud: { daily: 120, amortized_by_period: { '2026-10': 200 } },
+        volcengine: { daily: 80, amortized_by_period: {} },
+      },
     },
     { name: '乙线', amount: 300, postpaid: 300, amortized: 0, daily: 150, share: 0.3, amortized_by_period: {}, items: [] },
     { name: '公共', amount: 100, postpaid: 100, amortized: 0, daily: 50, share: 0.1, amortized_by_period: {}, items: [] },
@@ -73,6 +77,15 @@ const ALLOCATION = {
     amortized_by_period: {},
     items: [{ product: '对象存储', rule: null, amount: 100, daily: 50, share: 0.1, prepaid: false }],
   },
+  unmatched_into: null,
+  monthly: [
+    { provider: 'alicloud', kind: 'postpaid', line: '甲线', by_period: { '2026-09': 250 } },
+    { provider: 'volcengine', kind: 'postpaid', line: '甲线', by_period: { '2026-09': 150 } },
+    { provider: 'alicloud', kind: 'prepaid', line: '甲线', by_period: { '2026-09': 200 } },
+    { provider: 'alicloud', kind: 'postpaid', line: '乙线', by_period: { '2026-08': 100, '2026-09': 200 } },
+    { provider: 'volcengine', kind: 'postpaid', line: '公共', by_period: { '2026-09': 100 } },
+    { provider: 'alicloud', kind: 'postpaid', line: null, by_period: { '2026-09': 100 } },
+  ],
   products: [{ product: '云服务器 ECS', rule: null, amount: 700, daily: 350, share: 0.7, prepaid: false }],
   points: [
     { t: '2026-09-20', total: 550, by_line: { 甲线: 250, 乙线: 300 } },
@@ -173,19 +186,29 @@ function page(path = '/cost') {
   )
 }
 
+/** 构成图的图例按钮：列表行也是同名按钮，图例靠 `aria-pressed` 区分 */
+const legends = (name: string) =>
+  screen.queryAllByRole('button', { name: new RegExp(`^${name}`) }).filter((b) => b.hasAttribute('aria-pressed'))
+const findLegend = async (name: string) => {
+  await screen.findAllByRole('button', { name: new RegExp(`^${name}`) })
+  const [el] = legends(name)
+  if (!el) throw new Error(`没有「${name}」的图例`)
+  return el
+}
+
 describe('费用页', () => {
   it('画出账期趋势、排行和明细', async () => {
     stubApi()
     page()
     // 最后一个账期是「本期」，上一个是对比
-    expect(await screen.findByText('2026-09 花费')).toBeInTheDocument()
+    expect(await screen.findByText('2026-09 费用')).toBeInTheDocument()
     expect(await screen.findByText('250.00')).toBeInTheDocument()
     // 环比 (250-100)/100
     expect(await screen.findByText('+150.0%')).toBeInTheDocument()
     // 三个账期的柱子都在轴上（没数据的 7 月也要占一格）
-    const chart = await screen.findByRole('img', { name: /按账期的花费/ })
+    const chart = await screen.findByRole('img', { name: /按账期的费用/ })
     expect(chart).toBeInTheDocument()
-    expect(within(chart).getAllByRole('button')).toHaveLength(3)
+    for (const month of ['7月', '8月', '9月']) expect(within(chart).getByText(month)).toBeInTheDocument()
     // 排行和「其它」
     expect(await screen.findByText('云服务器 ECS')).toBeInTheDocument()
     expect(await screen.findByText(/未进入排行的其余项合计/)).toBeInTheDocument()
@@ -197,15 +220,15 @@ describe('费用页', () => {
   it('下拉一律用筛选栏的自绘下拉，不再弹系统原生菜单', async () => {
     stubApi()
     const { container } = page()
-    await screen.findByText('2026-09 花费')
+    await screen.findByText('2026-09 费用')
     expect(container.querySelector('select')).toBeNull()
 
     // 云筛选：第一项是「全部云」，选中某一朵云后触发器描成强调色，表示筛选生效
-    await userEvent.click(screen.getByRole('button', { name: '按云筛选' }))
+    await userEvent.click(screen.getByRole('button', { name: '按云厂商筛选' }))
     const options = screen.getAllByRole('option').map((o) => o.textContent)
-    expect(options).toEqual(['全部云', '火山引擎', '阿里云'])
+    expect(options).toEqual(['全部云厂商', '火山引擎', '阿里云'])
     await userEvent.click(screen.getByRole('option', { name: '阿里云' }))
-    const trigger = screen.getByRole('button', { name: '按云筛选' })
+    const trigger = screen.getByRole('button', { name: '按云厂商筛选' })
     expect(trigger).toHaveTextContent('阿里云')
     expect(trigger.className).toContain('border-accent')
 
@@ -223,17 +246,17 @@ describe('费用页', () => {
     expect(within(chips).getByText('云服务器 ECS')).toBeInTheDocument()
   })
 
-  it('配了 goscan 才显示「拉取账单」', async () => {
+  it('配了 goscan 才显示「同步账单」', async () => {
     stubApi()
     page()
-    expect(await screen.findByRole('button', { name: /拉取账单/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /同步账单/ })).toBeInTheDocument()
   })
 
-  it('没配 goscan 就不显示「拉取账单」', async () => {
+  it('没配 goscan 就不显示「同步账单」', async () => {
     stubApi({ '/api/meta': { ...META, bills: { ...META.bills, sync: false } } })
     page()
-    await screen.findByText('2026-09 花费')
-    expect(screen.queryByRole('button', { name: /拉取账单/ })).not.toBeInTheDocument()
+    await screen.findByText('2026-09 费用')
+    expect(screen.queryByRole('button', { name: /同步账单/ })).not.toBeInTheDocument()
   })
 
   it('表在但一条账单都没有时，说清楚是同步还没跑', async () => {
@@ -250,20 +273,71 @@ describe('费用页', () => {
     // 日均那张卡片与甲线那一行都是 400.00，此处只确认它确实出现
     expect((await screen.findAllByText('400.00')).length).toBeGreaterThan(0)
     // 10 月 31 天：后付费 400 × 31，再加该月摊过来的预付费 200
-    expect(await screen.findByText('2026-10 预估')).toBeInTheDocument()
-    expect(await screen.findByText('12,600.00')).toBeInTheDocument()
+    // 统计卡片与按月拆分表的表头各一处
+    expect((await screen.findAllByText('2026-10 预估')).length).toBe(2)
+    // 卡片与拆分表合计行的预估列各一处
+    expect((await screen.findAllByText('12,600.00')).length).toBe(2)
     // 合计分两段列出，预付费摊销单独标明
     expect(await screen.findByText(/后付费 800.00 · 预付费摊销 200.00/)).toBeInTheDocument()
-    // 三条业务线各占一行（图例上还有一份同名的），未归属单列
-    expect((await screen.findAllByText('甲线')).length).toBeGreaterThan(0)
-    expect(await screen.findByText('未归属')).toBeInTheDocument()
+
+    // 按月拆分：业务线 × 月份，末行两云合计。9 月 1,000，8 月 100，小计 1,100
+    const split = await screen.findByRole('region', { name: '按月拆分' })
+    expect(within(split).getByText('两云合计', { selector: 'th span' })).toBeInTheDocument()
+    expect(within(split).getByText('1,000.00')).toBeInTheDocument()
+    expect(within(split).getAllByText('1,100.00').length).toBeGreaterThan(0)
+    // 未命中规则、也没并入哪条线的钱单列一行
+    expect(within(split).getByText('未归属')).toBeInTheDocument()
+    expect(within(split).getByText('未命中规则')).toBeInTheDocument()
+    // 切到「阿里云 · 后付费」：只剩阿里云的后付费，合计 250 + 300 + 100 = 650
+    await userEvent.click(within(split).getByRole('button', { name: '阿里云 · 后付费' }))
+    expect(within(split).getAllByText('650.00').length).toBeGreaterThan(0)
+    // 分段页签也给预估：甲线在阿里云的日均 120 × 10 月 31 天
+    expect(within(split).getAllByText('3,720.00').length).toBeGreaterThan(0)
+    // 预付费摊销页签：预估就是摊入 10 月的金额，不按天计
+    await userEvent.click(within(split).getByRole('button', { name: '阿里云 · 预付费摊销' }))
+    expect(within(split).getAllByText('200.00').length).toBeGreaterThan(0)
+    await userEvent.click(within(split).getByRole('button', { name: '两云合计' }))
+
+    // 按云与付费方式汇总：阿里云两种付费方式各一行，再加阿里云小计与两云合计
+    const summary = screen.getByRole('region', { name: '按云厂商与付费方式汇总' })
+    expect(within(summary).getByText('阿里云 · 预付费摊销')).toBeInTheDocument()
+    expect(within(summary).getByText('阿里云小计')).toBeInTheDocument()
+    expect(within(summary).getByText('火山引擎 · 后付费')).toBeInTheDocument()
 
     // 展开甲线，看得到它由哪两条规则构成
-    await userEvent.click((await screen.findAllByRole('button', { name: /甲线/ }))[0])
+    await userEvent.click(within(split).getByRole('button', { name: '甲线' }))
     expect(await screen.findByText('甲线专用机器')).toBeInTheDocument()
     expect(await screen.findByText('ECS 其余部分')).toBeInTheDocument()
     // 预付费摊来的那一行标着「摊销」，且不给日均
-    expect(await screen.findByText('摊销')).toBeInTheDocument()
+    expect(await screen.findByText('预付费摊销')).toBeInTheDocument()
+  })
+
+  it('构成图画出未归属的部分，点图例可单独查看某条线', async () => {
+    // 第二天合计 400，各线只摊到 250：多出的 150 就是未归属
+    const points = [ALLOCATION.points[0], { ...ALLOCATION.points[1], total: 400 }]
+    stubApi({ '/api/bills/allocation': { ...ALLOCATION, points } })
+    page('/cost?view=analysis&est=2026-10')
+    expect(await findLegend('未归属')).toHaveAttribute('aria-pressed', 'false')
+
+    await userEvent.click(await findLegend('乙线'))
+    expect(await findLegend('乙线')).toHaveAttribute('aria-pressed', 'true')
+    // 单独查看时列出这条线的金额，并给出复原的入口
+    // 乙线区间合计 300.00，占 30.0%
+    expect(await screen.findByText('（30.0%）')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '查看全部业务线' }))
+    expect(await findLegend('乙线')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('未归属已按配置并入某条业务线时如实标明，构成图也不重复画', async () => {
+    const points = [ALLOCATION.points[0], { ...ALLOCATION.points[1], total: 400 }]
+    stubApi({ '/api/bills/allocation': { ...ALLOCATION, points, unmatched_into: '公共' } })
+    page('/cost?view=analysis&est=2026-10')
+    // 拆分表下方的口径说明写明这笔钱去了哪里
+    expect(await screen.findByText(/已按配置计入「\s*公共」/)).toBeInTheDocument()
+    await findLegend('乙线')
+    expect(legends('未归属')).toHaveLength(0)
+    // 图上不另画，改在并入的那条线的图例上注明
+    expect(await findLegend('公共')).toHaveTextContent('含未归属 100')
   })
 
   it('日度账单不完整时如实提示，并给出补拉的办法', async () => {
@@ -278,8 +352,8 @@ describe('费用页', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('阿里云的日度账单不完整')
     // 覆盖比例：7618.53 / 152958.18
     expect(screen.getByRole('alert')).toHaveTextContent('5.0%')
-    // 配了 goscan 就指向「拉取账单」
-    expect(screen.getByRole('alert')).toHaveTextContent('拉取账单')
+    // 配了 goscan 就指向「同步账单」
+    expect(screen.getByRole('alert')).toHaveTextContent('同步账单')
   })
 
   it('没配归属规则时只给按产品的日均，并说明怎么配', async () => {

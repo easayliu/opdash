@@ -6,7 +6,7 @@ import type { ErrorGroup } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
 import { AnimatePresence } from 'motion/react'
 import * as m from 'motion/react-m'
-import { Badge, Card, Combobox, CopyButton, EmptyState, ErrorBox, Hint, Input, Spinner, buttonClass, linkClass, type ComboOption } from '@/components/ui'
+import { Badge, Card, Combobox, CopyButton, EmptyState, ErrorBox, Hint, InfoHint, Input, Spinner, buttonClass, linkClass, type ComboOption } from '@/components/ui'
 import { errorTitle, errorTitleFull, errorWhere, hasDetail, shortException } from '@/lib/errors'
 import { errorsHref, logsHref, tracesHref, traceHref, type Window } from '@/lib/links'
 import { DISCLOSE, FADE } from '@/lib/motion'
@@ -99,18 +99,29 @@ export function ErrorsPage() {
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <span role="group" aria-label="统计哪一层的错误" className="flex h-8 items-center rounded-md border border-input p-0.5">
             {KINDS.map((k) => (
-              <Hint key={k.value} text={k.hint} asChild>
-                <button
-                  type="button"
-                  aria-pressed={kind === k.value}
-                  onClick={() => set({ kind: k.value === 'entry' ? null : k.value, g: null })}
-                  className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', kind === k.value && 'bg-accent-soft text-accent')}
-                >
-                  {k.label}
-                </button>
-              </Hint>
+              <button
+                key={k.value}
+                type="button"
+                aria-pressed={kind === k.value}
+                onClick={() => set({ kind: k.value === 'entry' ? null : k.value, g: null })}
+                className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', kind === k.value && 'bg-accent-soft text-accent')}
+              >
+                {k.label}
+              </button>
             ))}
           </span>
+          {/* 三个按钮的说明合并成组旁一个 ⓘ，不再每个按钮各挂一段 */}
+          <InfoHint
+            text={
+              <span className="flex flex-col gap-1">
+                {KINDS.map((k) => (
+                  <span key={k.value}>
+                    <b className="font-medium">{k.label}</b>：{k.hint}
+                  </span>
+                ))}
+              </span>
+            }
+          />
           <Combobox
             value={service}
             onChange={(v) => set({ service: v || null, span_name: null, g: null })}

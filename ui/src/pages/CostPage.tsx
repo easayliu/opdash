@@ -2,11 +2,11 @@ import { Suspense, lazy, useMemo, useState } from 'react'
 import { CloudDownloadIcon, DownloadIcon, SearchIcon } from 'lucide-react'
 import { apiUrl } from '@/api/client'
 import { useBillBreakdown, useBillDaily, useBillDetail, useBillPeriods, useBillSummary, useMeta } from '@/api/queries'
-import { CostAnalysis } from '@/components/CostAnalysis'
+import { AnalysisControls, CostAnalysis } from '@/components/CostAnalysis'
 import type { BillAmount, BillPoint, BillProvider } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
 import { StackedBars } from '@/components/charts/StackedBars'
-import { Badge, Card, Combobox, EmptyState, ErrorBox, Hint, Input, Spinner, buttonClass } from '@/components/ui'
+import { Badge, Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Input, Spinner, buttonClass } from '@/components/ui'
 import {
   AMOUNTS,
   DIMENSIONS,
@@ -17,6 +17,8 @@ import {
   formatChange,
   formatMoney,
   formatMoneyShort,
+  formatMoneyTick,
+  periodSlots,
   periodSpan,
   periodTick,
   shiftPeriod,
@@ -43,12 +45,8 @@ const DEFAULT_MONTHS = 6
 
 /** 两个视图。账单看「钱花在哪个产品上」，分析看「这笔钱该记在哪条业务线头上、照此推算一个月多少」 */
 const VIEWS = [
-  { value: 'bills', label: '账单', hint: '按账单本身的维度查看：账期趋势、产品与实例排行、明细与导出' },
-  {
-    value: 'analysis',
-    label: '分析',
-    hint: '按归属规则分摊到业务线，并以日均推算月度预估；未配置规则时仍可查看按产品的日均',
-  },
+  { value: 'bills', label: '账单' },
+  { value: 'analysis', label: '分析' },
 ]
 const DETAIL_PAGE = 50
 
@@ -122,7 +120,7 @@ export function CostPage() {
       <div className="flex min-h-0 flex-1 items-center justify-center p-6">
         <EmptyState
           title="费用页未启用"
-          hint={meta.data.bills_note ?? '当前部署没有 goscan 的账单表。goscan 按账期将火山引擎、阿里云的账单同步至同一数据库，接入后本页方有内容。'}
+          hint={meta.data.bills_note ?? '当前部署没有 goscan 的账单表。goscan 按账期将火山引擎、阿里云的账单同步至同一数据库，接入后本页即可显示数据。'}
         />
       </div>
     )
@@ -130,33 +128,33 @@ export function CostPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
-        <h1 className="text-base font-semibold">费用</h1>
-        <span role="group" aria-label="视图" className="flex h-8 items-center rounded-md border border-input p-0.5">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 pt-2 md:px-4">
+        {/* 与指标页一致：两个视图就是这一页的导航，视觉上不再放标题；读屏仍需要一个 */}
+        <h1 className="sr-only">费用</h1>
+        <nav aria-label="视图" className="order-last flex w-full items-stretch gap-1 md:order-none md:w-auto">
           {VIEWS.map((v) => (
-            <Hint key={v.value} text={v.hint} asChild>
-              <button
-                type="button"
-                aria-pressed={view === v.value}
-                onClick={() => set({ view: v.value === 'bills' ? null : v.value, page: null })}
-                className={cn('h-full rounded-sm px-2.5 text-xs text-muted-fg hover:text-fg', view === v.value && 'bg-accent-soft text-accent')}
-              >
-                {v.label}
-              </button>
-            </Hint>
+            <button
+              key={v.value}
+              type="button"
+              aria-current={view === v.value ? 'page' : undefined}
+              onClick={() => set({ view: v.value === 'bills' ? null : v.value, page: null })}
+              className={cn('cf-tab flex h-9 items-center px-3 text-sm font-medium text-muted-fg hover:text-fg', view === v.value && 'text-fg')}
+              data-active={view === v.value ? 'true' : undefined}
+            >
+              {v.label}
+            </button>
           ))}
-        </span>
-        <Hint text="账单以账期（自然月）为单位出具，与顶栏的时间范围无关；本页单独选择账期">
-          <span className="hidden text-xs text-muted-fg xl:inline">云账单，按账期查看</span>
-        </Hint>
-        {(summary.isFetching || periods.isFetching) && <Spinner className="size-4" />}
-        <span className="ml-auto flex flex-wrap items-center gap-2">
+        </nav>
+        {/* 筛选在前、动作在后：两个视图共用的条件一组，分析视图独有的口径一组，「同步账单」放在最末 */}
+        <span className="flex flex-wrap items-center gap-2 py-2 md:ml-auto">
+          {(summary.isFetching || periods.isFetching) && <Spinner className="size-4" />}
           <StatsLine stats={summary.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <PeriodPicker known={known} from={from} to={to} onChange={(next) => set({ ...next, page: null })} />
-          <span role="group" aria-label="金额口径" className="flex h-8 items-center rounded-md border border-input p-0.5">
-            {AMOUNTS.map((a) => (
-              <Hint key={a.value} text={a.hint} asChild>
+          <span className="flex items-center gap-1.5">
+            <span role="group" aria-label="金额口径" className="flex h-8 items-center rounded-md border border-input p-0.5">
+              {AMOUNTS.map((a) => (
                 <button
+                  key={a.value}
                   type="button"
                   aria-pressed={amount === a.value}
                   onClick={() => set({ amount: a.value === 'payable' ? null : a.value })}
@@ -164,28 +162,31 @@ export function CostPage() {
                 >
                   {a.label}
                 </button>
-              </Hint>
-            ))}
+              ))}
+            </span>
+            <InfoHint
+              text={
+                <span className="flex flex-col gap-1">
+                  {AMOUNTS.map((a) => (
+                    <span key={a.value}>
+                      <b className="font-medium">{a.label}</b>：{a.hint}
+                    </span>
+                  ))}
+                </span>
+              }
+            />
           </span>
-          {bills?.sync && (
-            <Hint text="账单由 goscan 按账期向云厂商拉取，并非实时推送；缺少哪些账期即可就地补拉" asChild>
-              <button type="button" onClick={() => setSyncing(true)} className={buttonClass({ size: 'sm' })}>
-                <CloudDownloadIcon className="size-4" />
-                拉取账单
-              </button>
-            </Hint>
-          )}
-        {(bills?.providers.length ?? 0) > 1 && (
+          {(bills?.providers.length ?? 0) > 1 && (
             <Combobox
               value={provider}
               onChange={(v) => set({ provider: v || null, page: null })}
               options={(bills?.providers ?? []).map((p) => ({ value: p, label: PROVIDER_LABELS[p] }))}
-              placeholder="全部云"
-              searchPlaceholder="筛云…"
-              emptyText="没有匹配的云"
-              title="按云筛选"
+              placeholder="全部云厂商"
+              searchPlaceholder="筛云厂商…"
+              emptyText="没有匹配的云厂商"
+              title="按云厂商筛选"
               size="sm"
-              className="w-28"
+              className="w-32"
             />
           )}
           <span className="relative">
@@ -201,6 +202,18 @@ export function CostPage() {
               aria-label="搜索产品 / 计费项 / 实例名"
             />
           </span>
+          {ready && view === 'analysis' && (
+            <>
+              <span aria-hidden className="mx-1 hidden h-5 w-px bg-border md:block" />
+              <AnalysisControls base={base} ready={ready} days={days} estimate={estimate} onChange={set} />
+            </>
+          )}
+          {bills?.sync && (
+            <button type="button" onClick={() => setSyncing(true)} className={buttonClass({ size: 'sm' })}>
+              <CloudDownloadIcon className="size-4" />
+              同步账单
+            </button>
+          )}
         </span>
       </header>
 
@@ -237,31 +250,30 @@ export function CostPage() {
             title="账单表暂无数据"
             hint={
               bills?.sync
-                ? '表结构已建好，但尚未同步到任何账单。goscan 按账期定时向云厂商拉取（并非常驻采集），可点击右上角「拉取账单」立即同步一次。'
-                : '表结构已建好，但尚未同步到任何账单。goscan 按账期定时向云厂商拉取（并非常驻采集），请先确认其已运行、凭据已配置并至少同步过一次。'
+                ? '账单表已创建，但尚未同步任何账单。goscan 按账期定时向云厂商同步（并非实时采集），可点击右上角「同步账单」立即同步一次。'
+                : '账单表已创建，但尚未同步任何账单。goscan 按账期定时向云厂商同步（并非实时采集），请确认其已运行、凭据已配置，且至少完成过一次同步。'
             }
           />
         )}
 
         {ready && bills && known.length > 0 && view === 'analysis' && (
-          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} onChange={set} />
+          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} />
         )}
 
         {ready && known.length > 0 && view === 'bills' && (
           <div className="flex flex-col gap-3 md:gap-4">
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <StatCard
-                label={`${current?.t ?? to} 花费`}
+                label={`${current?.t ?? to} 费用`}
                 value={formatMoney(current?.total ?? 0)}
-                hint={`${AMOUNTS.find((a) => a.value === amount)?.label}口径。金额按账单原币种直接相加；账号中若有非人民币账单，可切换「币种」维度核对`}
                 stale={summary.isFetching}
               />
-              <StatCard label={`${previous?.t ?? '上一账期'} 花费`} value={formatMoney(previous?.total ?? 0)} stale={summary.isFetching} />
+              <StatCard label={`${previous?.t ?? '上一账期'} 费用`} value={formatMoney(previous?.total ?? 0)} stale={summary.isFetching} />
               <StatCard
                 label="环比"
                 value={formatChange(mom)}
                 tone={mom === null ? 'muted' : mom > 0 ? 'danger' : 'ok'}
-                hint="以最后一个账期与其上一账期相比；当月账单尚未出齐时，该值天然偏低"
+                hint="以最后一个账期与上一账期相比；当月账单尚未出齐时，该值会偏低"
                 stale={summary.isFetching}
               />
               <StatCard
@@ -280,28 +292,32 @@ export function CostPage() {
               />
             </div>
 
-            <Card title="按账期" extra={<span className="text-2xs text-muted-fg">点击柱体可只看该账期</span>}>
-              <PeriodBars
-                points={points}
-                providers={summary.data?.providers ?? []}
-                stale={summary.isFetching}
-                onPick={(period) => set({ from_period: period, to_period: period, page: null })}
-              />
-            </Card>
-
-            {dailyProviders.length > 0 && (
-              <Card
-                title="按天"
-                extra={
-                  <span className="text-2xs text-muted-fg">
-                    {dailyProviders.map((p) => PROVIDER_LABELS[p]).join(' / ')}
-                    {dailyProviders.length < (bills?.providers.length ?? 0) && '（另一朵云未同步日度账单）'}
-                  </span>
-                }
-              >
-                <DailyChart points={daily.data?.points ?? []} providers={dailyProviders} stale={daily.isFetching} />
+            {/* 宽屏上两张图并排：账期只有寥寥几根柱子，独占一整行时柱体被拉得过宽；按天的点多，分到更宽的一侧 */}
+            <div className="grid gap-3 md:gap-4 xl:grid-cols-5">
+              <Card title="按账期" className={dailyProviders.length > 0 ? 'xl:col-span-2' : 'xl:col-span-5'} extra={<span className="text-2xs text-muted-fg">点击柱体可筛选至该账期</span>}>
+                <PeriodBars
+                  points={points}
+                  providers={summary.data?.providers ?? []}
+                  stale={summary.isFetching}
+                  onPick={(period) => set({ from_period: period, to_period: period, page: null })}
+                />
               </Card>
-            )}
+
+              {dailyProviders.length > 0 && (
+                <Card
+                  title="按天"
+                  className="xl:col-span-3"
+                  extra={
+                    <span className="text-2xs text-muted-fg">
+                      {dailyProviders.map((p) => PROVIDER_LABELS[p]).join(' / ')}
+                      {dailyProviders.length < (bills?.providers.length ?? 0) && '（另一云厂商未同步日度账单）'}
+                    </span>
+                  }
+                >
+                  <DailyChart points={daily.data?.points ?? []} providers={dailyProviders} stale={daily.isFetching} />
+                </Card>
+              )}
+            </div>
 
             <Card
               title={`按${DIMENSIONS.find((d) => d.value === by)?.label}排行`}
@@ -337,7 +353,7 @@ export function CostPage() {
                   {detail.data && (
                     <span className="text-2xs text-muted-fg">
                       {PROVIDER_LABELS[detail.data.provider]}
-                      {detail.data.granularity === 'daily' ? ' · 按天' : ' · 按月'}
+                      {detail.data.granularity === 'daily' ? ' · 日度' : ' · 月度'}
                       {detail.data.total !== null && ` · ${detail.data.total.toLocaleString('zh-CN')} 行`}
                     </span>
                   )}
@@ -356,12 +372,10 @@ export function CostPage() {
                       className="w-24"
                     />
                   )}
-                  <Hint text="导出当前筛选条件下的明细 CSV" asChild>
-                    <a href={apiUrl('/bills/export', { ...base, granularity: params.get('gran') || undefined, format: 'csv' })} className={buttonClass({ size: 'sm' })} download>
-                      <DownloadIcon className="size-4" />
-                      CSV
-                    </a>
-                  </Hint>
+                  <a href={apiUrl('/bills/export', { ...base, granularity: params.get('gran') || undefined, format: 'csv' })} className={buttonClass({ size: 'sm' })} download>
+                    <DownloadIcon className="size-4" />
+                    导出 CSV
+                  </a>
                 </span>
               }
             >
@@ -405,9 +419,9 @@ function StatCard({
   extra?: React.ReactNode
   stale?: boolean
 }) {
-  const body = (
+  return (
     <div className={cn('rounded-lg border border-border bg-card px-4 py-3', stale && 'opacity-60 transition-opacity')}>
-      <div className="text-xs text-muted-fg">{label}</div>
+      <div className="text-xs text-muted-fg">{hint ? <InfoHint text={hint}>{label}</InfoHint> : label}</div>
       <div
         className={cn(
           'mt-1 text-xl font-semibold tabular-nums',
@@ -421,14 +435,11 @@ function StatCard({
       {extra}
     </div>
   )
-  return hint ? <Hint text={hint}>{body}</Hint> : body
 }
 
 /**
- * 账期柱状图。
- *
- * 不复用 `StackedBars`：它以时间为轴，按毫秒摊开；而账期是**分类**，2 月与 8 月等宽，
- * 若按时间轴绘制，2 月会明显偏窄。分类轴用 flex 排布即可，还省去一套 SVG 坐标计算。
+ * 账期柱状图。复用按时间分桶的 `StackedBars`，账期经 `periodSlots` 排成等宽的桶
+ * （自然月长短不一，按真实时间摆会偏），横轴标「4月」而非日期。
  */
 function PeriodBars({
   points,
@@ -441,46 +452,39 @@ function PeriodBars({
   stale?: boolean
   onPick: (period: string) => void
 }) {
-  const max = Math.max(1, ...points.map((p) => p.total))
+  const slots = useMemo(() => periodSlots(points.map((p) => p.t)), [points])
+  const buckets = useMemo(
+    () => points.map((p, i) => ({ t_ms: slots.at(i), values: Object.fromEntries(providers.map((k) => [k, p.by_provider[k] ?? 0])) })),
+    [points, providers, slots],
+  )
+  const periodAt = (tMs: number) => points[slots.index(tMs)]?.t ?? ''
   return (
-    <div className={cn('px-3 pt-4 pb-2', stale && 'opacity-60 transition-opacity')}>
-      <div className="flex h-40 items-end gap-1.5" role="img" aria-label={`按账期的花费，共 ${points.length} 个账期`}>
-        {points.map((p) => (
-          <Hint
-            key={p.t}
-            text={[
-              `${p.t} 合计 ${formatMoney(p.total)}`,
-              ...Object.entries(p.by_provider).map(([k, v]) => `${PROVIDER_LABELS[k as BillProvider] ?? k} ${formatMoney(v)}`),
-            ].join('\n')}
-            asChild
-          >
-            <button type="button" onClick={() => onPick(p.t)} className="flex h-full min-w-0 flex-1 flex-col justify-end gap-px rounded-sm hover:bg-muted/40">
-              {/* 单根柱体按云堆叠，顺序与图例一致 */}
-              {providers.map((provider) => {
-                const v = p.by_provider[provider] ?? 0
-                if (v <= 0) return null
-                return <span key={provider} style={{ height: `${(v / max) * 100}%`, background: PROVIDER_COLORS[provider] }} className="w-full rounded-[2px]" />
-              })}
-              {p.total <= 0 && <span className="h-px w-full bg-border" />}
-            </button>
-          </Hint>
-        ))}
-      </div>
-      <div className="mt-1.5 flex gap-1.5 text-center text-2xs text-muted-fg">
-        {points.map((p) => (
-          <span key={p.t} className="min-w-0 flex-1 truncate tabular-nums">
-            {periodTick(p.t)}
-          </span>
-        ))}
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-border/60 pt-2 text-2xs text-muted-fg">
+    <div className="px-2 py-3">
+      <StackedBars
+        fromMs={slots.fromMs}
+        toMs={slots.toMs}
+        widthMs={slots.widthMs}
+        buckets={buckets}
+        series={providers.map((p) => ({ key: p, label: PROVIDER_LABELS[p], color: PROVIDER_COLORS[p] }))}
+        format={formatMoneyTick}
+        valueFormat={formatMoney}
+        xTicks={points.map((p, i) => ({ t_ms: slots.at(i), label: periodTick(p.t) }))}
+        bucketTitle={periodAt}
+        onPointClick={({ tMs }) => {
+          const period = periodAt(tMs)
+          if (period) onPick(period)
+        }}
+        stale={stale}
+        label="按账期的费用"
+        height={190}
+      />
+      <div className="flex flex-wrap items-center gap-3 px-2 text-2xs text-muted-fg">
         {providers.map((p) => (
           <span key={p} className="flex items-center gap-1.5">
             <span className="size-2 rounded-[2px]" style={{ background: PROVIDER_COLORS[p] }} />
             {PROVIDER_LABELS[p]}
           </span>
         ))}
-        <span className="ml-auto">纵轴上限 {formatMoneyShort(max)}</span>
       </div>
     </div>
   )
@@ -498,7 +502,7 @@ function DailyChart({ points, providers, stale }: { points: BillPoint[]; provide
     [points, providers],
   )
   if (!points.length) {
-    return <div className="px-4 py-8 text-center text-xs text-muted-fg">所选账期没有按天的账单数据</div>
+    return <div className="px-4 py-8 text-center text-xs text-muted-fg">所选账期内没有日度账单</div>
   }
   const first = buckets[0].t_ms
   const last = buckets[buckets.length - 1].t_ms
@@ -511,10 +515,13 @@ function DailyChart({ points, providers, stale }: { points: BillPoint[]; provide
         widthMs={DAY}
         buckets={buckets}
         series={providers.map((p) => ({ key: p, label: PROVIDER_LABELS[p], color: PROVIDER_COLORS[p] }))}
-        format={formatMoneyShort}
+        format={formatMoneyTick}
+        valueFormat={formatMoney}
+        bucketTitle={(t) => points[buckets.findIndex((b) => b.t_ms === t)]?.t ?? ''}
         stale={stale}
-        label="按天的花费"
-        height={150}
+        label="按天的费用"
+        // 与并排的「按账期」等高，免得右侧那张卡片底部空出一截
+        height={190}
       />
       <div className="px-2 text-2xs text-muted-fg">
         {points.length} 天，{dayTick(points[0].t)} – {dayTick(points[points.length - 1].t)}
@@ -546,7 +553,7 @@ function Breakdown({
       </div>
     )
   }
-  if (!rows.length) return <div className="px-4 py-8 text-center text-xs text-muted-fg">所选账期没有账单数据</div>
+  if (!rows.length) return <div className="px-4 py-8 text-center text-xs text-muted-fg">所选账期内没有账单</div>
   return (
     <div className={cn(stale && 'opacity-60 transition-opacity')}>
       <ul>
@@ -561,7 +568,7 @@ function Breakdown({
               <span className="min-w-0 flex-1">
                 <span className="flex items-baseline gap-2">
                   <span className="truncate text-xs">{r.key}</span>
-                  {Object.keys(r.by_provider).length > 1 && <Badge tone="muted">两朵云</Badge>}
+                  {Object.keys(r.by_provider).length > 1 && <Badge tone="muted">两云均有</Badge>}
                 </span>
                 {/* 占比条：长度为占总额的比例，一眼可见哪几项占去大半 */}
                 <span className="mt-1 block h-1.5 w-full rounded-full bg-muted">
@@ -614,13 +621,13 @@ function DetailTable({ rows, pending, stale }: { rows: import('@/api/types').Bil
             <tr key={`${r.instance_id}-${r.item}-${i}`} className="border-b border-border/60 last:border-b-0">
               <td className="px-3 py-1.5 whitespace-nowrap tabular-nums">{r.day || r.period}</td>
               <td className="max-w-40 truncate px-3 py-1.5">
-                <Hint text={`${PROVIDER_LABELS[r.provider]} · ${r.account || '—'} · ${r.subscription || '—'}`}>
+                <Hint text={`${PROVIDER_LABELS[r.provider]} · ${r.account || '—'} · ${r.subscription || '—'}`} asChild>
                   <span>{r.product}</span>
                 </Hint>
               </td>
               <td className="max-w-40 truncate px-3 py-1.5 text-muted-fg">{r.item}</td>
               <td className="max-w-48 truncate px-3 py-1.5">
-                <Hint text={r.instance_id || r.instance}>
+                <Hint text={r.instance_id || r.instance} asChild>
                   <span className="mono">{r.instance || r.instance_id || '—'}</span>
                 </Hint>
               </td>
@@ -631,7 +638,7 @@ function DetailTable({ rows, pending, stale }: { rows: import('@/api/types').Bil
               <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums font-medium">
                 {formatMoney(r.amount)}
                 {r.original > r.amount && (
-                  <Hint text={`原价 ${formatMoney(r.original)}`}>
+                  <Hint text={`原价 ${formatMoney(r.original)}`} asChild>
                     <span className="ml-1 text-2xs text-muted-fg line-through">{formatMoneyShort(r.original)}</span>
                   </Hint>
                 )}

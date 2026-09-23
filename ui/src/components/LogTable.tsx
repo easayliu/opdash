@@ -138,12 +138,10 @@ function SortHeader({ label, col, sort, onSort }: { label: string; col: string; 
   if (!onSort) return <>{label}</>
   const active = sort?.key === col
   return (
-    <Hint text="点击排序" asChild>
-      <button type="button" onClick={() => onSort(col)} className={cn('inline-flex items-center gap-0.5 hover:text-fg', active && 'text-fg')}>
-        {label}
-        {active ? <span aria-hidden>{sort?.dir === 'asc' ? '▲' : '▼'}</span> : <ChevronsUpDownIcon className="size-3 opacity-50" />}
-      </button>
-    </Hint>
+    <button type="button" onClick={() => onSort(col)} className={cn('inline-flex items-center gap-0.5 hover:text-fg', active && 'text-fg')}>
+      {label}
+      {active ? <span aria-hidden>{sort?.dir === 'asc' ? '▲' : '▼'}</span> : <ChevronsUpDownIcon className="size-3 opacity-50" />}
+    </button>
   )
 }
 

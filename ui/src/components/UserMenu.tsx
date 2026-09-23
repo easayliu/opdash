@@ -32,7 +32,7 @@ export function UserMenu() {
         </Hint>
       )}
       {data.api_keys && (
-        <Button variant="ghost" className="px-2.5" title="生成 API key（给 Claude Code 等 MCP 客户端 / 脚本用）" onClick={() => setKeys(true)}>
+        <Button variant="ghost" className="px-2.5" title="API key" onClick={() => setKeys(true)}>
           <KeyRoundIcon className="size-4" />
         </Button>
       )}

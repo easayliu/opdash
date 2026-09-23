@@ -281,6 +281,18 @@ export interface BillAllocLine {
   /** 各账期的预付费摊销额，含区间之后的若干个月，页面据此算月度预估 */
   amortized_by_period: Record<string, number>
   items: BillAllocItem[]
+  /** 按云厂商拆开的日均与摊销，拆分表切到单朵云、单种付费方式时用 */
+  by_provider?: Partial<Record<BillProvider, { daily: number | null; amortized_by_period: Record<string, number> }>>
+}
+
+/** 月度拆分表的一行：某朵云、某种付费方式下，一条业务线在各账期的金额 */
+export interface BillAllocMonthRow {
+  provider: BillProvider
+  /** postpaid 后付费（按出账月份）/ prepaid 预付费按服务期摊到各月的部分 */
+  kind: 'postpaid' | 'prepaid'
+  /** 业务线；未命中规则、配置里也没给去处的那部分为 null */
+  line: string | null
+  by_period: Record<string, number>
 }
 
 /** 一天（或一个账期）各条业务线的花费 */
@@ -317,8 +329,12 @@ export interface BillAllocationResponse {
   lines: BillAllocLine[]
   /** 未命中任何规则的部分。配了 unmatched 时这笔钱已同时计入那条业务线 */
   unmatched: BillAllocLine
+  /** 配置里 `unmatched` 指向的业务线：非空时未归属的钱已计入它，不能再与各业务线相加 */
+  unmatched_into: string | null
   products: BillAllocItem[]
   points: BillAllocPoint[]
+  /** 月度拆分表：云 × 付费方式 × 业务线 × 账期，按整月统计，不受 days 影响 */
+  monthly: BillAllocMonthRow[]
   /** 日度账单明显少于月度账单时给出两边的合计；覆盖正常时是 null */
   coverage: BillCoverage | null
   stats: Stats

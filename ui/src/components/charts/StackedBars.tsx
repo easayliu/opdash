@@ -48,6 +48,15 @@ interface Props {
   ghost?: { key: string; label: string }
   /** 读屏念的那句话里，这张图叫什么。不给就是「堆叠柱状图」 */
   label?: string
+  /**
+   * 自定义横轴刻度，标在所给那个桶的正中。费用页按账期画时用：桶是自然月，按时间挑刻度会标出
+   * 「04-01」这种日期，而要的是「4月」。不给就按时间自动挑
+   */
+  xTicks?: { t_ms: number; label: string }[]
+  /** 悬停提示的标题。不给就是「几点起多少分钟」，按天、按月的桶要换成日期或账期 */
+  bucketTitle?: (tMs: number) => string
+  /** 悬停提示里的数值怎么显示，不给就同 `format`。刻度要短、提示要准时分开给（金额：刻度「13万」，提示「131,323.25」） */
+  valueFormat?: (v: number) => string
   className?: string
 }
 
@@ -56,7 +65,7 @@ const M = { left: 48, right: 8, top: 8, bottom: 22 }
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
 /** 按时间分桶的堆叠柱状图：日志直方图、请求量 / 错误数都用它。 */
-export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, onPointClick, events, syncTs, onHoverTs, format = formatCompact, ghost, label, className }: Props) {
+export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 140, stale, onBrush, onPointClick, events, syncTs, onHoverTs, format = formatCompact, ghost, label, xTicks, bucketTitle, valueFormat, className }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; bucket: BarBucket } | null>(null)
   const [brush, setBrush] = useState<{ x0: number; x1: number } | null>(null)
@@ -126,6 +135,7 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
   }
 
   const ticks = useMemo(() => timeTicks(x0, x1), [x0, x1])
+  const fmtValue = valueFormat ?? format
   const yTicks = niceTicks(yMax)
 
   // 读屏念的那句话：什么图、哪一段时间、合计多少、各系列各多少（见 ./describe）
@@ -166,11 +176,17 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
             </g>
           ))}
           <line x1={M.left} x2={M.left + W} y1={M.top + H} y2={M.top + H} stroke="var(--axis)" strokeWidth={1} />
-          {ticks.map((t) => (
-            <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
-              {formatTick(t, widthMs)}
-            </text>
-          ))}
+          {xTicks
+            ? xTicks.map((t) => (
+                <text key={t.t_ms} x={xOf(t.t_ms) + slot / 2} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
+                  {t.label}
+                </text>
+              ))
+            : ticks.map((t) => (
+                <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
+                  {formatTick(t, widthMs)}
+                </text>
+              ))}
           {ghost &&
             buckets.map((b) => {
               const v = b.values[ghost.key] ?? 0
@@ -256,14 +272,18 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
           x={hover.x}
           y={hover.y}
           width={width}
-          title={`${formatTs(hover.bucket.t_ms, { ms: false })} 起 ${widthMs >= 60_000 ? `${Math.round(widthMs / 60_000)} 分钟` : `${Math.round(widthMs / 1000)} 秒`}`}
+          title={
+            bucketTitle
+              ? bucketTitle(hover.bucket.t_ms)
+              : `${formatTs(hover.bucket.t_ms, { ms: false })} 起 ${widthMs >= 60_000 ? `${Math.round(widthMs / 60_000)} 分钟` : `${Math.round(widthMs / 1000)} 秒`}`
+          }
           rows={[
-            { label: '合计', value: format(series.reduce((s, k) => s + (hover.bucket.values[k.key] ?? 0), 0)) },
+            { label: '合计', value: fmtValue(series.reduce((s, k) => s + (hover.bucket.values[k.key] ?? 0), 0)) },
             ...series
               .filter((s) => (hover.bucket.values[s.key] ?? 0) > 0)
-              .map((s) => ({ color: s.color, label: s.label, value: format(hover.bucket.values[s.key] ?? 0) })),
+              .map((s) => ({ color: s.color, label: s.label, value: fmtValue(hover.bucket.values[s.key] ?? 0) })),
             ...(ghost && (hover.bucket.values[ghost.key] ?? 0) > 0
-              ? [{ label: ghost.label, value: format(hover.bucket.values[ghost.key] ?? 0) }]
+              ? [{ label: ghost.label, value: fmtValue(hover.bucket.values[ghost.key] ?? 0) }]
               : []),
           ]}
         />

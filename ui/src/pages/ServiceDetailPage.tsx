@@ -176,11 +176,9 @@ export function ServiceDetailPage() {
           </Link>
           {/* 指标表可能没有（没部署 metricpipe），有才给入口 */}
           {meta.data?.metrics && (
-            <Hint text="JVM、连接池、Kafka 这些链路里看不到的" asChild>
-              <Link to={metricsHref(service, win)} className={buttonClass({ size: 'sm' })}>
-                指标看板
-              </Link>
-            </Hint>
+            <Link to={metricsHref(service, win)} className={buttonClass({ size: 'sm' })}>
+              指标看板
+            </Link>
           )}
         </span>
       </header>
@@ -290,20 +288,18 @@ export function ServiceDetailPage() {
               )}
               <StatsLine stats={ops.data?.stats} className="hidden text-2xs text-muted-fg md:inline" />
               {!isMobile && (
-                <Hint text="点表头是按这一列排；切到「变化」就按这一列和对比窗口的变化排">
-                  <span className="flex h-7 items-center rounded-md border border-input p-0.5">
-                    {(['value', 'delta'] as const).map((m) => (
-                      <button
-                        key={m}
-                        type="button"
-                        onClick={() => setByDelta(m === 'delta')}
-                        className={cn('h-full rounded-sm px-2 text-2xs text-muted-fg hover:text-fg', byDelta === (m === 'delta') && 'bg-accent-soft text-accent')}
-                      >
-                        {m === 'value' ? '按值排' : '按变化排'}
-                      </button>
-                    ))}
-                  </span>
-                </Hint>
+                <span className="flex h-7 items-center rounded-md border border-input p-0.5">
+                  {(['value', 'delta'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setByDelta(m === 'delta')}
+                      className={cn('h-full rounded-sm px-2 text-2xs text-muted-fg hover:text-fg', byDelta === (m === 'delta') && 'bg-accent-soft text-accent')}
+                    >
+                      {m === 'value' ? '按值排' : '按变化排'}
+                    </button>
+                  ))}
+                </span>
               )}
             </>
           }
@@ -411,7 +407,6 @@ export function ServiceDetailPage() {
                     key={`${o.kind}:${o.span_name}`}
                     className={cn('row-hover cursor-pointer border-b border-border/60 last:border-b-0', op === o.span_name && 'row-selected')}
                     onClick={() => select(o.span_name)}
-                    title="点击只看这个操作的趋势"
                   >
                     <td className="truncate px-4 py-2">
                       {/* 整行可点是给鼠标的方便；「只看这个接口」这个动作本身得有个真按钮，

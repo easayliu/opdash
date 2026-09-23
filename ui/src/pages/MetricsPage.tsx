@@ -7,7 +7,7 @@ import type { MetricAgg, MetricField, MetricInfo, MetricQueryResponse } from '@/
 import { LineChart, type ChartEvent, type ChartMarker, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { StatsLine } from '@/components/StatsLine'
-import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Hint, Input, Select, Spinner, buttonClass, linkClass } from '@/components/ui'
+import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Input, Select, Spinner, buttonClass, linkClass } from '@/components/ui'
 import { ColorAssigner, SERIES_SLOTS } from '@/lib/colors'
 import { coveredMetricNames, isErrorLabel, resolveDashboard, type ResolvedPanel } from '@/lib/dashboards'
 import { ERROR_RATE_BAD, ERROR_RATE_WARN } from '@/lib/health'
@@ -417,12 +417,12 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
   // 日志表上服务这一维叫什么，按 /api/meta 给的维度列来（老表没有 service_name 就退回 container）
   const logDim = meta.data?.logs.dimensions.includes('service_name') ? 'service_name' : 'container'
   const win = { fromMs: Number(rangeParams.from), toMs: Number(rangeParams.to) }
-  const links: { to: string; label: string; title: string }[] = [
-    { to: tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer', attrs }, win), label: '最慢的链路', title: '这段时间里这个服务最慢的请求' },
-    { to: errorsHref({ service }, win), label: '错误分组', title: '这个服务在报哪几种错，按次数排' },
-    { to: tracesHref({ service, errorOnly: true, attrs }, win), label: '出错的链路', title: '这段时间里出错的请求' },
-    { to: logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win), label: '错误日志', title: '这段时间这个服务的 ERROR / WARN 日志' },
-    { to: serviceHref(service, win), label: '服务概览', title: '按链路算出来的请求量 / 错误率 / 分位数' },
+  const links: { to: string; label: string }[] = [
+    { to: tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer', attrs }, win), label: '最慢的链路' },
+    { to: errorsHref({ service }, win), label: '错误分组' },
+    { to: tracesHref({ service, errorOnly: true, attrs }, win), label: '出错的链路' },
+    { to: logsHref({ dim: logDim, service, levels: 'ERROR,WARN' }, win), label: '错误日志' },
+    { to: serviceHref(service, win), label: '服务概览' },
   ]
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -431,11 +431,9 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
         横向拖一段是缩小时间范围。整段跳：
       </span>
       {links.map((l) => (
-        <Hint key={l.label} text={l.title} asChild>
-          <Link to={l.to} className={buttonClass({ size: 'xs' })}>
-            {l.label}
-          </Link>
-        </Hint>
+        <Link key={l.label} to={l.to} className={buttonClass({ size: 'xs' })}>
+          {l.label}
+        </Link>
       ))}
     </div>
   )
@@ -872,14 +870,12 @@ function DrillPopover({
     {
       to: tracesHref({ service: svc, attrs: ctx.traceAttrs, spanName: ctx.spanName, errorOnly: ctx.errorOnly, sort: 'duration' }, win),
       label: '这一格的链路',
-      title: '按耗时排，最慢的在最前面',
     },
   ]
   if (minMs != null && minMs > 0) {
     links.push({
       to: tracesHref({ service: svc, attrs: ctx.traceAttrs, spanName: ctx.spanName, minMs, sort: 'duration' }, win),
       label: `≥ ${format(value as number)} 的链路`,
-      title: '只看比这个点还慢的请求',
     })
   }
   if (errGroups.length > 0) {
@@ -921,8 +917,9 @@ function DrillPopover({
         )}
         <div className="flex flex-col gap-1">
           {links.map((l) => (
-            <Hint text={l.title} asChild>
-              <Link key={l.label} to={l.to} onClick={onClose} className="rounded-md px-2 py-1 text-xs hover:bg-muted">
+            // 只有「这一格的报错」带说明：预览前三种报错与次数。其余几项的名字已经说清楚，不弹
+            <Hint key={l.label} text={l.title} asChild>
+              <Link to={l.to} onClick={onClose} className="rounded-md px-2 py-1 text-xs hover:bg-muted">
                 {l.label}
               </Link>
             </Hint>
@@ -1300,9 +1297,10 @@ function MetricExplorer({
                       ))}
                     </Select>
                   </Hint>
-                  <Button size="md" active={showExemplars} onClick={() => set({ ex: showExemplars ? '0' : null })} title="指标上挂的 trace id：点圆点直接跳那次请求">
+                  <Button size="md" active={showExemplars} onClick={() => set({ ex: showExemplars ? '0' : null })}>
                     exemplar
                   </Button>
+                  <InfoHint text="指标上挂的 trace id：点图上的圆点直接跳到那次请求" />
                 </span>
               </div>
               <GroupBy metric={metric} rangeParams={rangeParams} by={by} onChange={(v) => setList('by', v)} />

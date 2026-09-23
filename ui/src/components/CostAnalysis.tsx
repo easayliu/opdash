@@ -12,14 +12,33 @@
  * 单独列出。月度预估因此是两段相加——后付费的日均 × 天数，加上那个月的摊销额；摊到未来几个月
  * 的摊销是已经发生的购买摊过来的，所以下个月的预估里它是已知项，不必估。
  */
-import { useMemo, useState } from 'react'
-import { ChevronRightIcon } from 'lucide-react'
+import { Fragment, useMemo, useState } from 'react'
+import { CalendarDaysIcon, ChevronRightIcon, CircleAlertIcon, DownloadIcon, TrendingUpIcon, WalletIcon, type LucideIcon } from 'lucide-react'
 import { useBillAllocation } from '@/api/queries'
-import type { BillAllocItem, BillAllocLine, BillAllocPoint, BillsMeta } from '@/api/types'
-import { Card, Combobox, EmptyState, ErrorBox, Hint, Spinner } from '@/components/ui'
-import { PROVIDER_LABELS, daysInMonth, dayTick, formatMoney, formatMoneyShort, periodTick, shiftPeriod } from '@/lib/bills'
+import type { BillAllocItem, BillAllocLine, BillAllocPoint, BillAllocationResponse, BillsMeta } from '@/api/types'
+import { Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Spinner, buttonClass } from '@/components/ui'
+import { StackedBars } from '@/components/charts/StackedBars'
+import { AMOUNTS, PROVIDER_LABELS, daysInMonth, dayTick, formatMoney, formatMoneyShort, formatMoneyTick, periodSlots, periodSpan, periodTick, shiftPeriod } from '@/lib/bills'
+import { allocSection, allocSections, allocSummary, currentLabel, thisPeriod, type SectionKey } from '@/lib/allocTable'
 import { seriesVar } from '@/lib/colors'
 import { cn } from '@/lib/utils'
+
+/**
+ * 「未归属」在列表展开状态、构成图里用的内部键。不直接用「未归属」三个字：部署方完全可能
+ * 把某条业务线也叫这个名字，两者便撞在一起
+ */
+const UNMATCHED = '\u0000unmatched'
+/** 未归属统一用中性灰，与各业务线的颜色明显区分，一眼看出这部分还没有着落 */
+const UNMATCHED_COLOR = 'color-mix(in srgb, var(--muted-fg) 55%, transparent)'
+
+/**
+ * 业务线的颜色按它在**配置里的位置**取，拆分表与构成图共用：接口返回的 lines 会略去空的业务线，
+ * 若按那份列表的下标取色，某条线某月恰好为空时，排在它后面的线就全部换了颜色
+ */
+const lineColor = (order: string[], name: string) => seriesVar(Math.max(0, order.indexOf(name)))
+
+/** 「按产品」默认列出的项数 */
+const PRODUCT_TOP = 15
 
 /** 日均按多长的窗口算。`all` = 所选账期全部（URL 上不写 `days`） */
 const WINDOWS = [
@@ -35,7 +54,6 @@ export function CostAnalysis({
   bills,
   days,
   estimate,
-  onChange,
 }: {
   /** 与「账单」视图共用的查询条件：账期、金额口径、云、搜索、维度筛选 */
   base: Record<string, string | undefined>
@@ -43,14 +61,16 @@ export function CostAnalysis({
   bills: BillsMeta
   /** 日均的窗口（`days` 参数），空串表示所选账期全部 */
   days: string
-  /** 预估哪个月，`YYYY-MM` */
+  /** 预估哪个月，`YYYY-MM`。两项口径的选择器在页头，见 `AnalysisControls` */
   estimate: string
-  onChange: (next: Record<string, string | null>) => void
 }) {
   const params = useMemo(() => ({ ...base, days: days || undefined }), [base, days])
   const alloc = useBillAllocation(params, ready)
   const data = alloc.data
-  const [open, setOpen] = useState<string | null>(null)
+  // 构成图里单独查看的那条业务线；与列表的展开各管各的，互不牵动
+  const [focus, setFocus] = useState<string | null>(null)
+  const [allProducts, setAllProducts] = useState(false)
+  const products = data?.products ?? []
 
   const nights = daysInMonth(estimate)
   /**
@@ -78,61 +98,18 @@ export function CostAnalysis({
           <div className="mt-1 text-muted-fg">
             所选账期内，日度账单合计 {formatMoney(data.coverage.daily)}，月度账单合计 {formatMoney(data.coverage.monthly)}，
             日度仅覆盖其 {((data.coverage.daily / data.coverage.monthly) * 100).toFixed(1)}%。日均依现有的
-            {data.days_by_provider[data.coverage.provider] ?? 0} 天账单求得，仍可参考；区间合计与各业务线金额则明显偏低。
-            {bills.sync ? '可点击右上角「拉取账单」，选择日度粒度补齐这几个账期。' : '请让 goscan 以日度粒度补齐这几个账期。'}
+            {data.days_by_provider[data.coverage.provider] ?? 0} 天账单求得，仍可参考；所选账期合计与各业务线金额则明显偏低。
+            {bills.sync ? '可点击右上角「同步账单」，以日度粒度补齐这些账期。' : '请在 goscan 中以日度粒度补齐这些账期。'}
           </div>
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Hint text="日均 = 该区间的花费 ÷ 有账单的天数。取「最近 7 天」可避开月初扩容等早期波动，更贴近当前水位">
-          <span className="text-xs text-muted-fg">日均口径</span>
-        </Hint>
-        <Combobox
-          value={days || 'all'}
-          onChange={(v) => onChange({ days: v === 'all' ? null : v })}
-          options={WINDOWS}
-          clearable={false}
-          searchPlaceholder="筛口径…"
-          title="日均按多长的窗口计算"
-          size="sm"
-          className="w-28"
-        />
-        <Hint
-          text={
-            prepaid
-              ? '月度预估 = 后付费日均 × 该月的自然天数 + 该月的预付费摊销。前一段的前提是用量不变，扩容与活动均不计入；后一段来自已经发生的购买，是确定的'
-              : '月度预估 = 日均 × 该月的自然天数。其前提是用量不变，扩容、活动与包年包月的一次性支出均不计入'
-          }
-        >
-          <span className="ml-2 text-xs text-muted-fg">预估</span>
-        </Hint>
-        <Combobox
-          value={estimate}
-          onChange={(v) => onChange({ est: v })}
-          options={[base.to ?? '', shiftPeriod(base.to ?? '', 1)]
-            .filter(Boolean)
-            .map((p) => ({ value: p, label: `${p}（${daysInMonth(p)} 天）` }))}
-          clearable={false}
-          searchPlaceholder="筛月份…"
-          title="预估哪个月"
-          size="sm"
-          className="w-36"
-        />
-        {alloc.isFetching && <Spinner className="size-4" />}
-      </div>
-
       <div className={cn('grid grid-cols-2 gap-3', bills.allocation ? 'lg:grid-cols-4' : 'lg:grid-cols-3')}>
         <Stat
-          label="区间合计"
+          icon={WalletIcon}
+          iconTone="brand"
+          label={data?.window_days ? `最近 ${data.window_days} 天合计` : `${periodSpan(data?.from ?? base.from ?? '', data?.to ?? base.to ?? '')} 个账期合计`}
           value={formatMoney(data?.total ?? 0)}
-          hint={`${data?.from ?? ''} 至 ${data?.to ?? ''}${
-            prepaid
-              ? data?.window_days
-                ? `。含预付费摊销，已按天折算到最近 ${data.window_days} 天，与后付费口径一致`
-                : '。含预付费按服务期摊到本区间的部分'
-              : ''
-          }`}
           extra={
             prepaid ? (
               <span className="mt-1 block text-2xs text-muted-fg">
@@ -142,27 +119,19 @@ export function CostAnalysis({
           }
         />
         <Stat
+          icon={CalendarDaysIcon}
+          iconTone="accent"
           label="日均"
           value={data?.daily === null || data?.daily === undefined ? '—' : formatMoney(data.daily)}
-          hint={
-            data?.days
-              ? `依已出具的账单求得（${Object.entries(data.days_by_provider)
-                  .map(([p, n]) => `${PROVIDER_LABELS[p as keyof typeof PROVIDER_LABELS] ?? p} ${n} 天`)
-                  .join('、')}），各云按各自的天数折算后相加${data.window_days ? `；仅取最近 ${data.window_days} 天` : ''}${prepaid ? '。预付费按月摊销，不计入日均' : ''}`
-              : '所选区间内没有日粒度的账单：阿里云需同步 granularity=daily，火山引擎的明细自带费用日期'
-          }
         />
         <Stat
+          icon={TrendingUpIcon}
+          iconTone="accent"
           label={`${estimate} 预估`}
           value={
             project(data?.daily ?? null, data?.amortized_by_period) === null
               ? '—'
               : formatMoney(project(data?.daily ?? null, data?.amortized_by_period) as number)
-          }
-          hint={
-            prepaid
-              ? `后付费日均 × ${nights} 天，加上该月的预付费摊销 ${formatMoney(data?.amortized_by_period?.[estimate] ?? 0)}（已购之物摊过来的，不是估的）`
-              : `日均 × ${nights} 天，即维持当前用量时整月的花费；并非该月已出具账单的合计`
           }
           extra={
             prepaid ? (
@@ -175,10 +144,11 @@ export function CostAnalysis({
         {/* 没配归属规则时，「未归属」恒等于总额，摆出来只是重复一遍 */}
         {bills.allocation && (
         <Stat
+          icon={CircleAlertIcon}
+          iconTone={(data?.unmatched.share ?? 0) > 0.2 ? 'warn' : 'muted'}
           label="未归属"
           value={formatMoney(data?.unmatched.amount ?? 0)}
           tone={(data?.unmatched.share ?? 0) > 0.2 ? 'warn' : 'plain'}
-          hint="未命中任何归属规则的部分。占比偏高意味着规则有待补充；配置了 unmatched 时，这笔费用已计入指定的业务线"
           extra={
             <span className="mt-1 block text-2xs text-muted-fg">
               占 {((data?.unmatched.share ?? 0) * 100).toFixed(1)}%
@@ -188,19 +158,14 @@ export function CostAnalysis({
         )}
       </div>
 
-      <Card
-        title="按业务线"
-        extra={
-          <span className="text-2xs text-muted-fg">
-            {bills.allocation ? `${bills.allocation.rules} 条归属规则` : '未配置归属规则'}
-          </span>
-        }
-      >
-        {alloc.isPending ? (
+      {alloc.isPending ? (
+        <Card title="按月拆分">
           <div className="flex justify-center py-10">
             <Spinner />
           </div>
-        ) : !bills.allocation ? (
+        </Card>
+      ) : !bills.allocation ? (
+        <Card title="按月拆分" extra={<span className="text-2xs text-muted-fg">未配置归属规则</span>}>
           <EmptyState
             title="尚未配置成本归属规则"
             hint={
@@ -212,23 +177,22 @@ export function CostAnalysis({
               </>
             }
           />
-        ) : lines.length === 0 ? (
-          <div className="px-4 py-8 text-center text-xs text-muted-fg">所选账期没有可分摊的账单</div>
-        ) : (
-          <ul className={cn(alloc.isFetching && 'opacity-60 transition-opacity')}>
-            {lines.map((line) => (
-              <LineRow
-                key={line.name}
-                line={line}
-                nights={nights}
-                estimate={estimate}
-                open={open === line.name}
-                onToggle={() => setOpen(open === line.name ? null : line.name)}
-              />
-            ))}
-          </ul>
-        )}
-      </Card>
+        </Card>
+      ) : data ? (
+        <>
+          <MonthlySplit
+            data={data}
+            order={bills.allocation.lines}
+            rules={bills.allocation.rules}
+            nights={nights}
+            estimate={estimate}
+            amount={AMOUNTS.find((a) => a.value === (base.amount ?? 'payable')) ?? AMOUNTS[0]}
+            windowLabel={WINDOWS.find((w) => w.value === (days || 'all'))?.label ?? '所选账期'}
+            stale={alloc.isFetching}
+          />
+          {data.monthly.length > 0 && <MonthlySummary data={data} stale={alloc.isFetching} />}
+        </>
+      ) : null}
 
       {(data?.points.length ?? 0) > 0 && lines.length > 0 && (
         <Card
@@ -236,108 +200,464 @@ export function CostAnalysis({
           extra={
             <span className="text-2xs text-muted-fg">
               {data?.points.length} {data?.granularity === 'daily' ? '天' : '个账期'}
-              {prepaid && ' · 只含后付费'}
+              {prepaid && ' · 仅含后付费'}
             </span>
           }
         >
-          <LineBars points={data?.points ?? []} lines={lines.map((l) => l.name)} stale={alloc.isFetching} />
+          <LineBars
+            points={data?.points ?? []}
+            lines={lines}
+            order={bills.allocation?.lines ?? lines.map((l) => l.name)}
+            // 已并入某条业务线时它就在那条线的柱段里，再画一段便重复了
+            unmatched={data?.unmatched_into ? undefined : data?.unmatched}
+            absorbed={data?.unmatched_into ? { into: data.unmatched_into, amount: data.unmatched.postpaid } : undefined}
+            unit={data?.granularity === 'daily' ? '天' : '账期'}
+            nights={nights}
+            estimate={estimate}
+            focus={focus === UNMATCHED || lines.some((l) => l.name === focus) ? focus : null}
+            onFocus={setFocus}
+            stale={alloc.isFetching}
+          />
         </Card>
       )}
 
-      <Card title="按产品" extra={<span className="text-2xs text-muted-fg">不分业务线，与账单本身一致</span>}>
+      <Card title="按产品" extra={<span className="text-2xs text-muted-fg">不区分业务线，与账单口径一致</span>}>
         {alloc.isPending ? (
           <div className="flex justify-center py-10">
             <Spinner />
           </div>
         ) : (
-          <ItemTable items={data?.products ?? []} nights={nights} />
+          <>
+            {/* 七十来个产品一口气铺开，要找的那几个反被淹没；默认只列金额最大的一批 */}
+            <ItemTable items={allProducts ? products : products.slice(0, PRODUCT_TOP)} nights={nights} max={Math.max(0, ...products.map((p) => p.amount))} />
+            {products.length > PRODUCT_TOP && (
+              <button
+                type="button"
+                onClick={() => setAllProducts(!allProducts)}
+                className="w-full border-t border-border px-3 py-2 text-center text-xs text-accent hover:bg-muted/40"
+              >
+                {allProducts ? `收起，仅显示前 ${PRODUCT_TOP} 项` : `展开其余 ${products.length - PRODUCT_TOP} 项`}
+              </button>
+            )}
+          </>
         )}
       </Card>
     </div>
   )
 }
 
+/**
+ * 分析视图独有的两项口径：日均按多长的窗口算、预估哪个月。放在页头与共用筛选排在一起，
+ * 而不在正文里另起一行——它们与账期、金额口径一样是「怎么算」的条件，不是某一块内容的附属。
+ *
+ * 与 `CostAnalysis` 使用同一组查询参数，react-query 按键去重，不会多发一次请求。
+ */
+export function AnalysisControls({
+  base,
+  ready,
+  days,
+  estimate,
+  onChange,
+}: {
+  base: Record<string, string | undefined>
+  ready: boolean
+  days: string
+  estimate: string
+  onChange: (next: Record<string, string | null>) => void
+}) {
+  const params = useMemo(() => ({ ...base, days: days || undefined }), [base, days])
+  const alloc = useBillAllocation(params, ready)
+  const prepaid = alloc.data?.prepaid ?? false
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      {/* 标签与下拉成组：窄屏换行时不把「预估」和它的下拉拆到两行 */}
+      <span className="flex items-center gap-2">
+        <InfoHint text="日均 = 统计窗口内的费用 ÷ 有账单的天数。选择「最近 7 天」可排除月初扩容等早期波动，更接近当前水平" className="text-xs text-muted-fg">
+          日均口径
+        </InfoHint>
+        <Combobox
+          value={days || 'all'}
+          onChange={(v) => onChange({ days: v === 'all' ? null : v })}
+          options={WINDOWS}
+          clearable={false}
+          searchPlaceholder="筛口径…"
+          title="日均的统计窗口"
+          size="sm"
+          className="w-28"
+        />
+      </span>
+      <span className="flex items-center gap-2">
+        <InfoHint
+          text={
+            prepaid
+              ? '月度预估 = 后付费日均 × 该账期的自然天数 + 该账期的预付费摊销。前者以用量不变为前提，不计入扩容与活动；后者来自已发生的购买，属确定金额'
+              : '月度预估 = 日均 × 该账期的自然天数。以用量不变为前提，不计入扩容、活动与预付费（包年包月）的一次性支出'
+          }
+          className="text-xs text-muted-fg"
+        >
+          预估
+        </InfoHint>
+        <Combobox
+          value={estimate}
+          onChange={(v) => onChange({ est: v })}
+          options={[base.to ?? '', shiftPeriod(base.to ?? '', 1)]
+            .filter(Boolean)
+            .map((p) => ({ value: p, label: `${p}（${daysInMonth(p)} 天）` }))}
+          clearable={false}
+          searchPlaceholder="筛账期…"
+          title="预估账期"
+          size="sm"
+          className="w-40"
+        />
+      </span>
+      {alloc.isFetching && <Spinner className="size-4" />}
+    </span>
+  )
+}
+
+/** 统计卡片左上角图标的底色：品牌色标「花了多少」，强调色标「按天、往后」，警示色只给占比偏高的未归属 */
+const STAT_TONES = {
+  brand: 'bg-[color-mix(in_srgb,var(--brand)_14%,transparent)] text-brand',
+  accent: 'bg-accent-soft text-accent',
+  warn: 'bg-warn-soft text-warn',
+  muted: 'bg-muted text-muted-fg',
+} as const
+
 function Stat({
   label,
   value,
-  hint,
+  icon: Icon,
+  iconTone,
   tone = 'plain',
   extra,
 }: {
   label: string
   value: string
-  hint?: string
+  icon: LucideIcon
+  iconTone: keyof typeof STAT_TONES
   tone?: 'plain' | 'warn'
   extra?: React.ReactNode
 }) {
-  const body = (
-    <div className="rounded-lg border border-border bg-card px-4 py-3">
-      <div className="text-xs text-muted-fg">{label}</div>
-      <div className={cn('mt-1 text-xl font-semibold tabular-nums', tone === 'warn' && 'text-danger')}>{value}</div>
-      {extra}
+  return (
+    <div className="flex gap-3 rounded-lg border border-border bg-card px-4 py-3">
+      <span aria-hidden className={cn('flex size-9 shrink-0 items-center justify-center rounded-md', STAT_TONES[iconTone])}>
+        <Icon className="size-[18px]" />
+      </span>
+      <div className="min-w-0">
+        <div className="text-xs text-muted-fg">{label}</div>
+        <div className={cn('mt-0.5 text-xl font-semibold tabular-nums', tone === 'warn' && 'text-danger')}>{value}</div>
+        {extra}
+      </div>
     </div>
   )
-  return hint ? <Hint text={hint}>{body}</Hint> : body
 }
 
-/** 一条业务线。点开看它由哪些产品、按哪条规则构成 */
-function LineRow({
-  line,
+/**
+ * 金额格子的底色：单一蓝色由浅到深，按本表月份格子里的最大值折算，深的就是花得多的那条线、
+ * 那个月。只动底色、字仍是正文色；上限 26% 保证深色格子上的字依旧清楚，浅色深色主题都一样
+ */
+const heat = (value: number, max: number) =>
+  value > 0 && max > 0 ? `color-mix(in srgb, var(--accent) ${Math.round(4 + (value / max) * 22)}%, transparent)` : undefined
+
+/** 合计行、小计行的底色，对应财务表里的黄底：取品牌橙的浅色，与表身明显区分 */
+const TOTAL_BG = 'bg-[color-mix(in_srgb,var(--brand)_12%,var(--card))]'
+const SUBTOTAL_BG = 'bg-[color-mix(in_srgb,var(--brand)_6%,var(--card))]'
+/** 预估两列的底色：与实绩分开，一眼看出哪几列是推算出来的 */
+const ESTIMATE_BG = 'bg-[color-mix(in_srgb,var(--accent)_6%,var(--card))]'
+
+/** 业务线的色块，与构成图的图例同色 */
+function Swatch({ color }: { color: string }) {
+  return <span aria-hidden className="size-2.5 shrink-0 rounded-[3px]" style={{ background: color }} />
+}
+
+/** 金额单元格：0 显示为「—」，一眼分得出「没有花费」与「花了钱」 */
+function Money({ value, strong }: { value: number; strong?: boolean }) {
+  if (!value) return <span className="text-muted-fg/60">—</span>
+  return <span className={cn(strong && 'font-semibold')}>{formatMoney(value)}</span>
+}
+
+/**
+ * 按月拆分：业务线 × 月份的矩阵，照财务那张《月度费用项目拆分表》的样子排。
+ *
+ * 一行一条业务线、一列一个账期，末列小计与占比，末行合计。按云、按付费方式分段，用页签切换：
+ * 默认看合计（两朵云、后付费与预付费摊销相加），也可只看其中一段与财务表逐格核对。合计页签
+ * 再附上日均与月度预估两列，并可点开某条业务线，查看它由哪些产品、按哪条规则构成。
+ *
+ * 按整月统计，不受「日均口径」影响：那个选项只决定日均按多长的窗口算。
+ */
+function MonthlySplit({
+  data,
+  order,
+  rules,
   nights,
   estimate,
-  open,
-  onToggle,
+  amount,
+  windowLabel,
+  stale,
 }: {
-  line: BillAllocLine
+  data: BillAllocationResponse
+  /** 业务线的先后，取配置里的顺序：与财务表的行序一致，也不随金额大小跳动 */
+  order: string[]
+  rules: number
   nights: number
   estimate: string
-  open: boolean
-  onToggle: () => void
+  /** 当前金额口径，写进导出文件的标题与口径说明 */
+  amount: { label: string; hint: string }
+  /** 日均的统计窗口（「所选账期」「最近 7 天」……），同上 */
+  windowLabel: string
+  stale?: boolean
 }) {
-  // 这条线在目标月的月度预估：后付费日均 × 天数 + 那个月摊过来的预付费
-  const amortized = line.amortized_by_period?.[estimate] ?? 0
-  const projected = line.daily === null && !amortized ? null : (line.daily ?? 0) * nights + amortized
+  const [tab, setTab] = useState<SectionKey>('all')
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const onExport = async () => {
+    setExporting(true)
+    setExportError(null)
+    try {
+      // 写 xlsx 的那一坨只在点的时候才加载
+      const { exportAllocXlsx } = await import('@/lib/allocXlsx')
+      await exportAllocXlsx({ data, order, nights, estimate, amountLabel: amount.label, amountHint: amount.hint, windowLabel })
+    } catch (e) {
+      setExportError(`导出失败：${(e as Error).message}`)
+    } finally {
+      setExporting(false)
+    }
+  }
+  const [open, setOpen] = useState<string | null>(null)
+  const current = thisPeriod()
+  const sections = allocSections(data)
+  const active = sections.some((x) => x.key === tab) ? tab : 'all'
+  const section = allocSection(data, order, active, nights, estimate)
+  const { periods, total, cellMax, footDaily, footProject } = section
+  // 展开看产品只在合计页签：产品明细是两朵云、两种付费方式合在一起的，拆不到单独一段
+  const canExpand = active === 'all'
+  const colSpan = 1 + periods.length + 2 + 2
+
   return (
-    <li className="border-b border-border/60 last:border-b-0">
-      <button type="button" onClick={onToggle} aria-expanded={open} className="row-hover flex w-full items-center gap-3 px-3 py-2 text-left">
-        <ChevronRightIcon className={cn('size-3.5 shrink-0 text-muted-fg transition-transform', open && 'rotate-90')} />
-        <span className="min-w-0 flex-1">
-          <span className="truncate text-xs font-medium">{line.name}</span>
-          <span className="mt-1 block h-1.5 w-full rounded-full bg-muted">
-            <span className="block h-full rounded-full bg-brand" style={{ width: `${Math.min(100, line.share * 100)}%` }} />
+    <Card
+      title="按月拆分"
+      extra={
+        <span className="flex items-center gap-2">
+          <span className="hidden text-2xs text-muted-fg lg:inline">{rules} 条归属规则</span>
+          {sections.length > 1 && (
+            <span role="group" aria-label="拆分口径" className="flex h-7 items-center rounded-md border border-input p-0.5">
+              {sections.map((x) => (
+                <button
+                  key={x.key}
+                  type="button"
+                  aria-pressed={active === x.key}
+                  onClick={() => setTab(x.key)}
+                  className={cn('h-full rounded-sm px-2 text-xs whitespace-nowrap text-muted-fg hover:text-fg', active === x.key && 'bg-accent-soft text-accent')}
+                >
+                  {x.label}
+                </button>
+              ))}
+            </span>
+          )}
+          {/* 导出的是全部分段与汇总，不只当前页签：财务要的是整张表 */}
+          <button type="button" onClick={onExport} disabled={exporting || stale} className={buttonClass({ size: 'xs' })}>
+            <DownloadIcon className="size-3.5" />
+            {exporting ? '正在导出…' : '导出 Excel'}
+          </button>
+        </span>
+      }
+    >
+      {exportError && <p className="border-b border-border bg-danger-soft px-4 py-2 text-xs text-danger">{exportError}</p>}
+      <div className={cn('overflow-x-auto', stale && 'opacity-60 transition-opacity')}>
+        <table className="w-full text-xs tabular-nums">
+          <thead className="bg-muted/50 text-2xs text-muted-fg">
+            <tr className="border-b border-border">
+              <th className="sticky left-0 z-10 min-w-40 bg-muted px-3 py-2 text-left font-medium">业务线</th>
+              {periods.map((p) => (
+                <th key={p} className="min-w-24 px-3 py-2 text-right font-medium whitespace-nowrap">
+                  {periodTick(p)}
+                  {p === current && <span className="ml-1 font-normal text-warn">{currentLabel(data, p)}</span>}
+                </th>
+              ))}
+              <th className="min-w-28 border-l border-border px-3 py-2 text-right font-medium">小计</th>
+              <th className="min-w-16 px-3 py-2 text-right font-medium">占比</th>
+              <th className="min-w-24 border-l border-dashed border-border bg-accent-soft px-3 py-2 text-right font-medium text-accent">日均</th>
+              <th className="min-w-28 bg-accent-soft px-3 py-2 text-right font-medium whitespace-nowrap text-accent">{estimate} 预估</th>
+            </tr>
+          </thead>
+          <tbody>
+            {section.rows.map((row) => {
+              const k = row.key
+              const m = row.byPeriod
+              const sub = row.subtotal
+              const name = k ?? '未归属'
+              const { line, projected, daily } = row
+              const isOpen = canExpand && open === name
+              return (
+                <Fragment key={name}>
+                  <tr className="row-hover border-b border-border/60">
+                    <th scope="row" className="sticky left-0 z-10 bg-card px-3 py-2 text-left font-normal">
+                      {canExpand && line && line.items.length > 0 ? (
+                        <button type="button" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : name)} className="flex items-center gap-1.5 text-left">
+                          <ChevronRightIcon className={cn('size-3.5 shrink-0 text-muted-fg transition-transform', isOpen && 'rotate-90')} />
+                          <Swatch color={k === null ? UNMATCHED_COLOR : lineColor(order, k)} />
+                          <span className={cn('font-medium', k === null && 'text-muted-fg')}>{name}</span>
+                        </button>
+                      ) : (
+                        <span className={cn('inline-flex items-center gap-1.5', canExpand && 'pl-5')}>
+                          <Swatch color={k === null ? UNMATCHED_COLOR : lineColor(order, k)} />
+                          <span className={cn('font-medium', k === null && 'text-muted-fg')}>{name}</span>
+                        </span>
+                      )}
+                      {k === null && (
+                        <Hint text="未命中任何归属规则的费用，不计入任何业务线。展开可查看涉及的产品，据此补充规则" asChild>
+                          <span className="ml-2 rounded bg-warn-soft px-1 text-2xs text-warn">未命中规则</span>
+                        </Hint>
+                      )}
+                    </th>
+                    {periods.map((p) => (
+                      <td key={p} className="px-3 py-2 text-right whitespace-nowrap" style={{ background: heat(m?.[p] ?? 0, cellMax) }}>
+                        <Money value={m?.[p] ?? 0} />
+                      </td>
+                    ))}
+                    <td className="border-l border-border px-3 py-2 text-right whitespace-nowrap">
+                      <Money value={sub} strong />
+                    </td>
+                    <td className="px-3 py-2 text-right text-muted-fg">
+                      {total ? (
+                        <span className="inline-flex items-center justify-end gap-2">
+                          {/* 占比条用这条线自己的颜色，与构成图对得上 */}
+                          <span className="hidden h-1.5 w-20 overflow-hidden rounded-full bg-muted sm:block">
+                            <span
+                              className="block h-full rounded-full"
+                              style={{ width: `${Math.min(100, (sub / total) * 100)}%`, background: k === null ? UNMATCHED_COLOR : lineColor(order, k) }}
+                            />
+                          </span>
+                          {/* 百分比定宽：「9.5%」比「15.0%」窄，不定宽的话右对齐会把左边的进度条推得参差不齐 */}
+                          <span className="w-12 text-right">{((sub / total) * 100).toFixed(1)}%</span>
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td className={cn('border-l border-dashed border-border px-3 py-2 text-right whitespace-nowrap text-muted-fg', ESTIMATE_BG)}>
+                      {daily === null ? '—' : formatMoney(daily)}
+                    </td>
+                    <td className={cn('px-3 py-2 text-right font-medium whitespace-nowrap', ESTIMATE_BG)}>{projected === null ? '—' : formatMoney(projected)}</td>
+                  </tr>
+                  {isOpen && line && (
+                    <tr className="border-b border-border/60 bg-muted/20">
+                      <td colSpan={colSpan} className="px-3 py-1">
+                        <ItemTable items={line.items} nights={nights} compact />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+          <tfoot>
+            <tr className={cn('border-t-2 border-[color-mix(in_srgb,var(--brand)_45%,var(--border))] font-semibold', TOTAL_BG)}>
+              <th scope="row" className={cn('sticky left-0 z-10 px-3 py-2 text-left', TOTAL_BG)}>
+                <span className={cn(canExpand && 'pl-5')}>{sections.find((x) => x.key === active)?.label ?? '合计'}</span>
+              </th>
+              {periods.map((p) => (
+                <td key={p} className="px-3 py-2 text-right whitespace-nowrap">
+                  <Money value={section.colTotals[p]} />
+                </td>
+              ))}
+              <td className="border-l border-border px-3 py-2 text-right whitespace-nowrap">
+                <Money value={total} />
+              </td>
+              <td className="px-3 py-2 text-right">{total ? '100%' : '—'}</td>
+              <td className="border-l border-dashed border-border px-3 py-2 text-right whitespace-nowrap text-accent">
+                {footDaily === null ? '—' : formatMoney(footDaily)}
+              </td>
+              <td className="px-3 py-2 text-right whitespace-nowrap text-accent">{footProject === null ? '—' : formatMoney(footProject)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      {/* 口径说明：与财务表表头那几行说明同一个作用，数字怎么来的写在数字旁边 */}
+      <ul className="space-y-0.5 border-t border-border px-4 py-2.5 text-2xs leading-5 text-muted-fg">
+        <li className="flex items-center gap-2">
+          <span aria-hidden className="flex h-2 w-16 overflow-hidden rounded-full">
+            {[4, 11, 18, 26].map((pct) => (
+              <span key={pct} className="flex-1" style={{ background: `color-mix(in srgb, var(--accent) ${pct}%, transparent)` }} />
+            ))}
           </span>
-        </span>
-        <span className="shrink-0 text-right">
-          <span className="block text-xs font-semibold tabular-nums">{formatMoney(line.amount)}</span>
-          <span className="block text-2xs text-muted-fg tabular-nums">{(line.share * 100).toFixed(1)}%</span>
-        </span>
-        <span className="hidden w-24 shrink-0 text-right text-xs tabular-nums text-muted-fg sm:block">
-          {line.daily === null ? '—' : `${formatMoney(line.daily)}/天`}
-        </span>
-        <Hint
-          text={
-            amortized
-              ? `${formatMoney((line.daily ?? 0) * nights)}（后付费）+ ${formatMoney(amortized)}（预付费摊销）`
-              : '后付费日均 × 该月天数'
-          }
-          asChild
-        >
-          <span className="w-24 shrink-0 text-right text-xs font-medium tabular-nums">
-            {projected === null ? '—' : formatMoney(projected)}
-          </span>
-        </Hint>
-      </button>
-      {open && (
-        <div className="border-t border-border/60 bg-muted/20 px-3 py-1">
-          <ItemTable items={line.items} nights={nights} compact />
-        </div>
-      )}
-    </li>
+          格子底色越深，金额越高；深浅按本表各格中的最大值折算。
+        </li>
+        <li>后付费计入出账所在的账期；预付费（包年包月）按服务期摊入各账期，未配置预付费规则时同样计入出账所在的账期。</li>
+        <li>本表按整月统计，不受「日均口径」影响。分段页签中，后付费的预估为该云厂商的日均 × 天数，预付费摊销的预估为摊入该账期的金额。</li>
+        {data.unmatched_into && data.unmatched.amount > 0 && (
+          <li>
+            未命中任何归属规则的 <span className="tabular-nums text-fg">{formatMoney(data.unmatched.amount)}</span> 已按配置计入「
+            {data.unmatched_into}」，占 {(data.unmatched.share * 100).toFixed(1)}%，规则有待补充。
+          </li>
+        )}
+      </ul>
+    </Card>
+  )
+}
+
+/**
+ * 按云与付费方式汇总：对应财务表里的《云费用汇总表》，一行一种付费方式，每朵云一个小计，
+ * 末行两云合计。数字就是「按月拆分」各页签的合计行，放在一起便于与财务汇总表核对。
+ */
+function MonthlySummary({ data, stale }: { data: BillAllocationResponse; stale?: boolean }) {
+  const current = thisPeriod()
+  const { periods, rows } = allocSummary(data)
+  return (
+    <Card title="按云厂商与付费方式汇总" extra={<span className="text-2xs text-muted-fg">与「按月拆分」各页签的合计行一致</span>}>
+      <div className={cn('overflow-x-auto', stale && 'opacity-60 transition-opacity')}>
+        <table className="w-full text-xs tabular-nums">
+          <thead className="bg-muted/50 text-2xs text-muted-fg">
+            <tr className="border-b border-border">
+              <th className="sticky left-0 z-10 min-w-40 bg-muted px-3 py-2 text-left font-medium">云厂商 · 付费方式</th>
+              {periods.map((p) => (
+                <th key={p} className="min-w-24 px-3 py-2 text-right font-medium whitespace-nowrap">
+                  {periodTick(p)}
+                  {p === current && <span className="ml-1 font-normal text-warn">{currentLabel(data, p)}</span>}
+                </th>
+              ))}
+              <th className="min-w-28 border-l border-border px-3 py-2 text-right font-medium">小计</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const values = periods.map((p) => r.byPeriod[p])
+              const sub = r.subtotal
+              return (
+                <tr
+                  key={r.key}
+                  className={cn(
+                    'border-b border-border/60 last:border-b-0',
+                    r.tone === 'sub' && cn('font-medium', SUBTOTAL_BG),
+                    r.tone === 'total' && cn('border-t-2 border-t-[color-mix(in_srgb,var(--brand)_45%,var(--border))] font-semibold', TOTAL_BG),
+                  )}
+                >
+                  <th
+                    scope="row"
+                    className={cn('sticky left-0 z-10 px-3 py-2 text-left font-[inherit]', r.tone === 'plain' ? 'bg-card' : r.tone === 'sub' ? SUBTOTAL_BG : TOTAL_BG)}
+                  >
+                    {r.label}
+                  </th>
+                  {values.map((v, i) => (
+                    <td key={periods[i]} className="px-3 py-2 text-right whitespace-nowrap">
+                      <Money value={v} />
+                    </td>
+                  ))}
+                  <td className="border-l border-border px-3 py-2 text-right whitespace-nowrap">
+                    <Money value={sub} strong={r.tone === 'plain'} />
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   )
 }
 
 /** 产品明细：金额、日均、月度预估 */
-function ItemTable({ items, nights, compact }: { items: BillAllocItem[]; nights: number; compact?: boolean }) {
+function ItemTable({ items, nights, compact, max = Math.max(0, ...items.map((i) => i.amount)) }: { items: BillAllocItem[]; nights: number; compact?: boolean; max?: number }) {
   if (!items.length) return <div className="px-4 py-6 text-center text-xs text-muted-fg">暂无数据</div>
   return (
     <div className="overflow-x-auto">
@@ -358,12 +678,22 @@ function ItemTable({ items, nights, compact }: { items: BillAllocItem[]; nights:
                 {/* 同一个产品可能由几条规则分别归来，标出这一行是怎么来的 */}
                 {item.rule && <span className="ml-2 text-2xs text-muted-fg">{item.rule}</span>}
                 {item.prepaid && (
-                  <Hint text="预付费（包年包月）按服务期摊到各月，此处是摊到本区间的部分，不按天计" asChild>
-                    <span className="ml-2 rounded bg-accent-soft px-1 text-2xs text-accent">摊销</span>
+                  <Hint text="预付费（包年包月）按服务期摊入各账期，此处为摊入所选账期的部分，不计入日均" asChild>
+                    <span className="ml-2 rounded bg-accent-soft px-1 text-2xs text-accent">预付费摊销</span>
                   </Hint>
                 )}
               </td>
-              <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums">{formatMoney(item.amount)}</td>
+              <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums">
+                <span className="inline-flex items-center justify-end gap-2">
+                  {/* 金额的比例条：按本表最大的一项折算，扫一眼就知道钱集中在哪几项 */}
+                  {!compact && (
+                    <span aria-hidden className="hidden h-1.5 w-24 overflow-hidden rounded-full bg-muted md:block">
+                      <span className="block h-full rounded-full bg-accent/70" style={{ width: `${max > 0 ? Math.max(0, (item.amount / max) * 100) : 0}%` }} />
+                    </span>
+                  )}
+                  {formatMoney(item.amount)}
+                </span>
+              </td>
               <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums text-muted-fg">
                 {item.daily === null ? '—' : formatMoney(item.daily)}
               </td>
@@ -381,54 +711,160 @@ function ItemTable({ items, nights, compact }: { items: BillAllocItem[]; nights:
 /**
  * 业务线构成的堆叠柱状图。
  *
- * 与「按账期」那张一样按分类等宽排布，而非按时间轴摊开：这里的一根柱子是一天或一个账期，
- * 2 月与 8 月在图上应当等宽。
+ * 复用 `StackedBars`（纵轴刻度、网格线、悬停提示与点选某一段都由它提供）。按账期时与
+ * 「按账期」那张一样经 `periodSlots` 排成等宽的桶，2 月与 8 月在图上等宽。
+ *
+ * 点图例或柱子上的某一段即单独查看那条线：只画它、纵轴按它重新缩放（小业务线叠在底下时
+ * 只有一两个像素高，不单独拎出来根本看不出走势），并在图上方列出它的金额。再点一次复原。
  */
-function LineBars({ points, lines, stale }: { points: BillAllocPoint[]; lines: string[]; stale?: boolean }) {
-  const max = Math.max(1, ...points.map((p) => p.total))
-  // 点数多时不逐个标注横轴，否则文字叠成一团
-  const ticks = points.length <= 31
+function LineBars({
+  points,
+  lines,
+  unmatched,
+  absorbed,
+  unit,
+  nights,
+  estimate,
+  focus,
+  onFocus,
+  order,
+  stale,
+}: {
+  points: BillAllocPoint[]
+  lines: BillAllocLine[]
+  /** 未并入任何业务线的未归属费用；传了才在柱顶画一段灰色 */
+  unmatched?: BillAllocLine
+  /** 未归属已按配置并入的那条业务线及其金额（后付费）：图上不另画，只在那条线上注明 */
+  absorbed?: { into: string; amount: number }
+  unit: '天' | '账期'
+  nights: number
+  estimate: string
+  focus: string | null
+  onFocus: (line: string | null) => void
+  /** 配置里业务线的顺序，决定颜色（见 lineColor） */
+  order: string[]
+  stale?: boolean
+}) {
+  // 接口的 by_line 只有各业务线，未归属 = 当天合计 − 各线之和。四舍五入会留下几分钱的零头，不算
+  const rest = (p: BillAllocPoint) => {
+    const v = p.total - Object.values(p.by_line).reduce((a, b) => a + b, 0)
+    return v > 0.005 ? v : 0
+  }
+  const withRest = !!unmatched && points.some((p) => rest(p) > 0)
+  // 系列：各业务线在前，未归属压在柱顶。键与显示名分开，见 UNMATCHED
+  const series = [
+    ...lines.map((l) => ({ key: l.name, line: l, color: lineColor(order, l.name) })),
+    ...(withRest && unmatched ? [{ key: UNMATCHED, line: unmatched, color: UNMATCHED_COLOR }] : []),
+  ]
+  const valueAt = (p: BillAllocPoint, key: string) => (key === UNMATCHED ? rest(p) : (p.by_line[key] ?? 0))
+  const current = series.find((x) => x.key === focus)
+  const shown = current ? [current] : series
+  const toggle = (key: string) => onFocus(focus === key ? null : key)
   const tick = (t: string) => (t.length > 7 ? dayTick(t) : periodTick(t))
+  /**
+   * 横轴：按天就是真实日期（刻度由 StackedBars 按时间自动挑）；按账期则经 periodSlots 排成
+   * 等宽的桶，逐个标「4月」。
+   */
+  const axis = useMemo(() => {
+    if (unit === '天') {
+      const DAY = 86_400_000
+      const ts = points.map((p) => new Date(`${p.t}T00:00:00`).getTime())
+      const fromMs = ts[0] ?? 0
+      return {
+        fromMs,
+        toMs: (ts[ts.length - 1] ?? 0) + DAY,
+        widthMs: DAY,
+        at: (i: number) => ts[i],
+        index: (t: number) => ts.indexOf(t),
+        xTicks: undefined,
+      }
+    }
+    const slots = periodSlots(points.map((p) => p.t))
+    return { ...slots, xTicks: points.map((p, i) => ({ t_ms: slots.at(i), label: periodTick(p.t) })) }
+  }, [points, unit])
+  const buckets = points.map((p, i) => ({ t_ms: axis.at(i), values: Object.fromEntries(series.map((x) => [x.key, valueAt(p, x.key)])) }))
+  const amortized = current?.line.amortized_by_period?.[estimate] ?? 0
+  const projected = !current || (current.line.daily === null && !amortized) ? null : (current.line.daily ?? 0) * nights + amortized
   return (
-    <div className={cn('px-3 pt-4 pb-2', stale && 'opacity-60 transition-opacity')}>
-      <div className="flex h-40 items-end gap-px" role="img" aria-label={`按业务线的花费，共 ${points.length} 个点`}>
-        {points.map((p) => (
-          <Hint
-            key={p.t}
-            text={[`${p.t} 合计 ${formatMoney(p.total)}`, ...lines.map((l) => `${l} ${formatMoney(p.by_line[l] ?? 0)}`)].join('\n')}
-            asChild
-          >
-            <span className="flex h-full min-w-0 flex-1 flex-col justify-end gap-px rounded-sm hover:bg-muted/40">
-              {lines.map((line, i) => {
-                const v = p.by_line[line] ?? 0
-                if (v <= 0) return null
-                return <span key={line} style={{ height: `${(v / max) * 100}%`, background: seriesVar(i) }} className="w-full rounded-[1px]" />
-              })}
-              {p.total <= 0 && <span className="h-px w-full bg-border" />}
+    <div className="px-2 pt-3 pb-2">
+      {current && (
+        <div className="mx-1 mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 rounded-md bg-muted/40 px-3 py-2 text-xs">
+          <span className="flex items-center gap-1.5 font-medium">
+            <span className="size-2 rounded-[2px]" style={{ background: current.color }} />
+            {current.line.name}
+          </span>
+          <span>
+            <span className="text-muted-fg">合计 </span>
+            <span className="font-semibold tabular-nums">{formatMoney(current.line.amount)}</span>
+            <span className="text-muted-fg tabular-nums">（{(current.line.share * 100).toFixed(1)}%）</span>
+          </span>
+          {absorbed?.into === current.key && absorbed.amount > 0 && (
+            <span className="text-warn">
+              其中未命中归属规则、按配置计入的 <span className="tabular-nums">{formatMoney(absorbed.amount)}</span>
             </span>
-          </Hint>
-        ))}
-      </div>
-      {ticks && (
-        <div className="mt-1.5 flex gap-px text-center text-2xs text-muted-fg">
-          {points.map((p) => (
-            <span key={p.t} className="min-w-0 flex-1 truncate tabular-nums">
-              {tick(p.t)}
+          )}
+          {current.line.amortized > 0 && (
+            <span className="text-muted-fg">
+              后付费 <span className="tabular-nums text-fg">{formatMoney(current.line.postpaid)}</span> · 预付费摊销{' '}
+              <span className="tabular-nums text-fg">{formatMoney(current.line.amortized)}</span>
             </span>
-          ))}
+          )}
+          <span>
+            <span className="text-muted-fg">日均 </span>
+            <span className="tabular-nums">{current.line.daily === null ? '—' : formatMoney(current.line.daily)}</span>
+          </span>
+          <span>
+            <span className="text-muted-fg">{estimate} 预估 </span>
+            <span className="font-semibold tabular-nums">{projected === null ? '—' : formatMoney(projected)}</span>
+          </span>
+          <button type="button" onClick={() => onFocus(null)} className="ml-auto text-2xs text-accent hover:underline">
+            查看全部业务线
+          </button>
         </div>
       )}
-      <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-border/60 pt-2 text-2xs text-muted-fg">
-        {lines.map((line, i) => (
-          <span key={line} className="flex items-center gap-1.5">
-            <span className="size-2 rounded-[2px]" style={{ background: seriesVar(i) }} />
-            {line}
-          </span>
+      <StackedBars
+        fromMs={axis.fromMs}
+        toMs={axis.toMs}
+        widthMs={axis.widthMs}
+        buckets={buckets}
+        series={shown.map((x) => ({ key: x.key, label: x.line.name, color: x.color }))}
+        format={formatMoneyTick}
+        valueFormat={formatMoney}
+        xTicks={axis.xTicks}
+        bucketTitle={(t) => points[axis.index(t)]?.t ?? ''}
+        // 点在哪一段就单独查看哪条线；已在单独查看时再点即复原
+        onPointClick={({ seriesKey }) => onFocus(seriesKey && seriesKey !== focus ? seriesKey : null)}
+        stale={stale}
+        label={`按业务线的费用（${unit === '天' ? '按天' : '按账期'}）`}
+        height={200}
+      />
+      <div className="flex flex-wrap items-center gap-x-1 gap-y-1 px-1 text-2xs text-muted-fg">
+        {/* 图例即开关，并标出每条线在图中的金额（图只含后付费，所以这里也取后付费） */}
+        {series.map((x) => (
+          <button
+            key={x.key}
+            type="button"
+            aria-pressed={focus === x.key}
+            onClick={() => toggle(x.key)}
+            className={cn(
+              'flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-muted/60 hover:text-fg',
+              focus === x.key && 'bg-accent-soft text-fg',
+              focus && focus !== x.key && 'opacity-50',
+            )}
+          >
+            <span className="size-2 rounded-[2px]" style={{ background: x.color }} />
+            {x.line.name}
+            <span className="tabular-nums text-fg">{formatMoneyShort(x.line.postpaid)}</span>
+            {absorbed?.into === x.key && absorbed.amount > 0 && (
+              <span className="tabular-nums text-warn">含未归属 {formatMoneyShort(absorbed.amount)}</span>
+            )}
+          </button>
         ))}
-        <span className="ml-auto">
-          纵轴上限 {formatMoneyShort(max)}
-          {!ticks && ` · ${tick(points[0].t)} – ${tick(points[points.length - 1].t)}`}
-        </span>
+        {points.length > 0 && (
+          <span className="ml-auto tabular-nums">
+            {tick(points[0].t)} – {tick(points[points.length - 1].t)}
+          </span>
+        )}
       </div>
     </div>
   )

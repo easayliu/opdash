@@ -31,7 +31,7 @@ trace、日志、指标和云账单的查询页面。数据来自 [logpipe](../l
 | `/errors` | **错误分组**：把出错的 span 按「同一种报错」归堆——异常类 + 消息 + 哪个接口，一行一种，带次数 / 影响多少条链路 / 最后一次什么时候；展开就是堆栈、样本链路和三个去处 |
 | `/services`（首页） | 服务总览：每个服务一张卡——请求量 / 错误率 / P95 各带「和上一个同样长的时间窗比」、一条迷你趋势；错误率 ≥1% / P95 涨 1.5 倍以上的标黄、≥5% / 3 倍标红并排到最前面；可切成表格 |
 | `/services/:name` | 单个服务：**和对比时段比，是哪些接口变了**（变化榜 + 每一列都带变化的接口表），请求量与错误、延迟分位趋势（都叠着对比时段） |
-| `/cost` | **云账单**（goscan 同步的火山引擎 + 阿里云），两个视图：**账单**看按账期的花费和环比、按天的曲线、按产品 / 计费项 / 地域 / 账号 / 实例 / 项目排行（点一行就加成筛选条件）、明细表和 CSV 导出；**分析**按归属规则把费用摊到业务线，给出日均、预付费摊销与月度预估（见下面「成本归属」）。两朵云合在一张图上，金额口径可切「应付 / 现金 / 原价」。配了 `--goscan-url` 时右上角还有「拉取账单」，可现场补一段账期。**本页按账期查询，顶栏的时间范围在此隐藏** |
+| `/cost` | **云账单**（goscan 同步的火山引擎 + 阿里云），两个视图：**账单**看按账期的花费和环比、按天的曲线、按产品 / 计费项 / 地域 / 账号 / 实例 / 项目排行（点一行就加成筛选条件）、明细表和 CSV 导出；**分析**按归属规则把费用摊到业务线，给出日均、预付费摊销与月度预估（见下面「成本归属」）。两朵云合在一张图上，金额口径可切「应付 / 现金 / 原价」。配了 `--goscan-url` 时右上角还有「同步账单」，可现场补一段账期。**本页按账期查询，顶栏的时间范围在此隐藏** |
 
 ### 首页 · 服务总览（照着 Cloudflare 的 Zone Overview 做的）
 
@@ -231,7 +231,7 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--database` / `--log-table` / `--trace-table` | `OPDASH_DATABASE` / `OPDASH_LOG_TABLE` / `OPDASH_TRACE_TABLE` | `logs` / `app_log` / `otel_trace` | 和采集端 sink 配置一致；集群上填 Distributed 表名 |
 | `--metric-table` | `OPDASH_METRIC_TABLE` | `otel_metric` | metricpipe 的表。**可以不存在**——那样指标页不显示，启动日志里说一句原因 |
 | `--volcengine-bill-table` / `--alicloud-monthly-table` / `--alicloud-daily-table` | `OPDASH_VOLCENGINE_BILL_TABLE` / `OPDASH_ALICLOUD_MONTHLY_TABLE` / `OPDASH_ALICLOUD_DAILY_TABLE` | `volcengine_bill` / `alicloud_bill_monthly` / `alicloud_bill_daily` | goscan 的三张账单表，**各自可以不存在**（只接了一朵云是常态），一张都没有就不显示费用页。**一般不用配**：表名按「基础名 → `<名字>_distributed` →（火山那张还找）`volcengine_bill_details` → `volcengine_bill_details_distributed`」依次找，goscan 两轮改名建出来的表都认得 |
-| `--goscan-url` | `OPDASH_GOSCAN_URL` | 不配 | goscan 的地址（`http://goscan.logging.svc.cluster.local:8080`）。配了费用页上才有「拉取账单」按钮，见下面「手动拉取账单」。**这是 opdash 唯一一处会向外发出「改变状态」请求的功能**，对 ClickHouse 依旧只读 |
+| `--goscan-url` | `OPDASH_GOSCAN_URL` | 不配 | goscan 的地址（`http://goscan.logging.svc.cluster.local:8080`）。配了费用页上才有「同步账单」按钮，见下面「手动同步账单」。**这是 opdash 唯一一处会向外发出「改变状态」请求的功能**，对 ClickHouse 依旧只读 |
 | `--goscan-timeout` | `OPDASH_GOSCAN_TIMEOUT` | `10s` | 调 goscan 接口的超时。触发同步只是登记一个后台任务，很快返回；真正的拉取在 goscan 侧进行，与此超时无关 |
 | `--bill-dedupe` | `OPDASH_BILL_DEDUPE` | `group` | 账单查询怎么去重：`group` 按建表排序键分组（默认，跨分片也对）、`final` 给表加 `FINAL`、`off` 不去重。见下面「账单表：为什么要在查询里再去重一次」 |
 | `--bill-alloc` | `OPDASH_BILL_ALLOC` | 不配 | 成本归属规则文件（TOML），费用页的「分析」视图据此把费用摊到业务线、把预付费按服务期摊到各月。不配也能用，只是少了业务线这一层。示例与写法见 `examples/bill-alloc.toml` 和下面「成本归属」。**文件有误时进程直接退出**，不会静默降级 |
@@ -584,10 +584,10 @@ split = { "业务线甲" = 130, "业务线乙" = 400 }  # 或按权重摊给若�
   占比几何，以便知晓规则还有多少没覆盖到。
 * **不配规则也能用**：分析视图照常给出按产品的日均与月度预估，只是没有业务线这一层。
 
-#### 手动拉取账单
+#### 手动同步账单
 
 账单不是推上来的：goscan 按自己的 cron 去云厂商的接口拉。刚接入、补历史账期、或者当天的调度还没到点时，
-页面上就是空的——所以费用页右上角有一个「拉取账单」，把这个动作转给 goscan：
+页面上就是空的——所以费用页右上角有一个「同步账单」，把这个动作转给 goscan：
 
 ```text
 浏览器 ──▶ POST   /api/bills/sync                ──▶ POST   {goscan}/sync              登记后台任务，拿 task id
@@ -608,7 +608,7 @@ split = { "业务线甲" = 130, "业务线乙" = 400 }  # 或按权重摊给若�
   一帧，opdash 逐帧转给浏览器，并换成与轮询接口相同的 JSON；收到 `done` 后页面主动关闭连接，否则 `EventSource`
   会不停重连。老版本 goscan 没有这个接口，opdash 回 404，浏览器不再重连，页面随即改为每 2 秒轮询一次。
   进度的单位是「趟」（一个账期 × 一种粒度），一趟可能要跑好几分钟，其间以「本趟已写入 N / M 行」显示仍在推进。
-* **同一朵云同时只能有一个同步**。打开「拉取账单」时，若这朵云已有同步在跑（包括 cron 发起的），页面直接接上
+* **同一朵云同时只能有一个同步**。打开「同步账单」时，若这朵云已有同步在跑（包括 cron 发起的），页面直接接上
   它的进度；点「开始拉取」撞上 409 时也一样，而不是只报一句「正在同步中」。关闭窗口不会中断任务，重新打开仍能看到。
 * **可以中途停下，但停在两趟之间**。goscan 每一趟拉之前都会先清空那个账期，半路掐断会留下只写了一半的账期，
   所以它把手上这一趟写完才停，按下去到真正停下要等几秒到几分钟，其间按钮显示「正在停止…」。停下之后，没跑的

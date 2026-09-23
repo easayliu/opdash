@@ -4,7 +4,7 @@ import { CloudDownloadIcon, XIcon } from 'lucide-react'
 import { ApiError, apiDelete, apiGet, apiPost } from '@/api/client'
 import { useBillSyncProgress } from '@/api/sync'
 import type { BillProvider, BillSyncProgress, BillSyncRunning, BillSyncStarted, BillSyncTask } from '@/api/types'
-import { Button, Combobox, Hint, ModalPanel, Spinner } from '@/components/ui'
+import { Button, Combobox, InfoHint, ModalPanel, Spinner } from '@/components/ui'
 import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
 
 /**
@@ -65,11 +65,11 @@ function ProgressBar({ task }: { task?: BillSyncTask }) {
   return (
     <div
       role="progressbar"
-      aria-label="账单拉取进度"
+      aria-label="账单同步进度"
       aria-valuemin={0}
       aria-valuemax={progress?.periods_total ?? undefined}
       aria-valuenow={progress?.periods_done ?? undefined}
-      aria-valuetext={progress ? `${progress.periods_done} / ${progress.periods_total} 趟` : '正在拉取'}
+      aria-valuetext={progress ? `${progress.periods_done} / ${progress.periods_total} 批` : '正在同步'}
       className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted"
     >
       {ratio === null ? (
@@ -83,8 +83,8 @@ function ProgressBar({ task }: { task?: BillSyncTask }) {
 
 const GRANULARITIES = [
   { value: 'both', label: '月度 + 日度' },
-  { value: 'monthly', label: '只要月度' },
-  { value: 'daily', label: '只要日度' },
+  { value: 'monthly', label: '仅月度' },
+  { value: 'daily', label: '仅日度' },
 ]
 
 /** 进度里那一趟写的是哪张表。火山不分粒度，goscan 不报时这里就是空的 */
@@ -218,10 +218,10 @@ export function BillSyncDialog({
           <CloudDownloadIcon className="mt-0.5 size-4 shrink-0 text-muted-fg" />
           <div className="min-w-0 flex-1">
             <h2 id="bill-sync-title" className="text-sm font-semibold">
-              拉取账单
+              同步账单
             </h2>
             <p className="mt-0.5 text-2xs text-muted-fg">
-              立即让 goscan 向云厂商拉取一次。任务完成后账单才会入库，其间页面数字不会变化
+              立即由 goscan 向云厂商同步一次账单。任务完成后账单方才入库，在此之前页面数据保持不变
             </p>
           </div>
           <Button variant="ghost" className="px-2" onClick={onClose} title="关闭 (Esc)">
@@ -232,15 +232,15 @@ export function BillSyncDialog({
         <form onSubmit={submit} className="flex flex-col gap-3 px-4 py-3 text-xs">
           <div className="flex items-center gap-2">
             <span className="w-16 shrink-0 text-muted-fg" aria-hidden="true">
-              云
+              云厂商
             </span>
             <Combobox
               value={provider}
               onChange={(v) => setProvider(v as BillProvider)}
               options={providers.map((p) => ({ value: p, label: PROVIDER_LABELS[p] }))}
               clearable={false}
-              searchPlaceholder="筛云…"
-              title="云"
+              searchPlaceholder="筛云厂商…"
+              title="云厂商"
               disabled={!!started}
               size="sm"
               floating
@@ -267,7 +267,7 @@ export function BillSyncDialog({
               className="h-8 w-28 rounded-md border border-input bg-card px-2 text-fg tabular-nums focus:border-brand focus:ring-2 focus:ring-brand/25 focus:outline-none"
             />
             <span className="text-2xs text-muted-fg">
-              {months > 0 ? `共 ${months} 个账期${pulls > months ? `、${pulls} 趟` : ''}` : '账期格式为 2026-09'}
+              {months > 0 ? `共 ${months} 个账期${pulls > months ? `、${pulls} 批` : ''}` : '账期格式为 2026-09'}
             </span>
           </label>
           {provider === 'alicloud' && (
@@ -289,19 +289,20 @@ export function BillSyncDialog({
               />
             </div>
           )}
-          <Hint text="不勾选时，goscan 遇到已有数据的账期会跳过；补数据或云厂商调整过账单时请勾选">
+          <div className="flex items-center gap-2">
+            <span className="w-16 shrink-0" aria-hidden="true" />
             <label className="flex items-center gap-2">
-              <span className="w-16 shrink-0" aria-hidden="true" />
               <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} disabled={!!started} className="size-3.5 accent-[var(--brand)]" />
-              已有数据也重新拉取
+              重新同步已有数据的账期
             </label>
-          </Hint>
+            <InfoHint text="未勾选时，goscan 会跳过已有数据的账期；补充数据或云厂商调整过账单时请勾选" />
+          </div>
 
           {error && <p className="rounded-md bg-danger-soft px-3 py-2 text-danger">{error}</p>}
 
           {started && adopted && (
             <p className="rounded-md bg-accent-soft px-3 py-2 text-accent">
-              {PROVIDER_LABELS[started.provider]}已有一个同步正在进行（可能由定时任务发起），同一朵云同时只能有一个同步，以下是它的进度
+              {PROVIDER_LABELS[started.provider]}已有同步任务正在进行（可能由定时任务发起）。同一云厂商同时只能运行一个同步任务，以下为该任务的进度
             </p>
           )}
 
@@ -319,7 +320,7 @@ export function BillSyncDialog({
                     : cancelling
                       ? '正在停止…'
                       : task.data?.status === 'running'
-                        ? '正在拉取…'
+                        ? '正在同步…'
                         : '已提交，等待执行…'}
                 </span>
                 <span className="ml-auto text-2xs text-muted-fg">
@@ -331,28 +332,28 @@ export function BillSyncDialog({
               <p className="mt-1 flex flex-wrap items-center gap-x-2 text-2xs text-muted-fg">
                 {task.data?.progress && (
                   <span className="tabular-nums">
-                    {task.data.progress.periods_done} / {task.data.progress.periods_total} 趟
-                    {pulling(task.data.progress) && ` · 正在拉 ${pulling(task.data.progress)}`}
+                    {task.data.progress.periods_done} / {task.data.progress.periods_total} 批
+                    {pulling(task.data.progress) && ` · 正在同步 ${pulling(task.data.progress)}`}
                   </span>
                 )}
                 {!task.data?.done && !!task.data?.progress?.records && (
                   <span className="tabular-nums">
-                    本趟已写入 {task.data.progress.records.toLocaleString('zh-CN')}
-                    {task.data.progress.records_total ? ` / ${task.data.progress.records_total.toLocaleString('zh-CN')}` : ''} 行
+                    本批已写入 {task.data.progress.records.toLocaleString('zh-CN')}
+                    {task.data.progress.records_total ? ` / ${task.data.progress.records_total.toLocaleString('zh-CN')}` : ''} 条
                   </span>
                 )}
                 {task.data?.started_at && <Elapsed startedAt={task.data.started_at} endedAt={task.data.ended_at} />}
               </p>
               {task.data?.done && task.data.ok && (
                 <p className="mt-1 text-2xs text-muted-fg">
-                  取回 {task.data.fetched.toLocaleString('zh-CN')} 条，写入 {task.data.records.toLocaleString('zh-CN')} 条；页面数据已重新查询
+                  共获取 {task.data.fetched.toLocaleString('zh-CN')} 条、写入 {task.data.records.toLocaleString('zh-CN')} 条，页面数据已刷新
                 </p>
               )}
               {task.data?.done && task.data.status === 'cancelled' && (
                 <p className="mt-1 text-2xs text-muted-fg">
-                  停止前已写入 {task.data.records.toLocaleString('zh-CN')} 条；页面数据已重新查询
+                  停止前已写入 {task.data.records.toLocaleString('zh-CN')} 条，页面数据已刷新
                   {task.data.not_run?.length
-                    ? `。未执行：${task.data.not_run.map(passLabel).join('、')}，这些账期的数据保持原样`
+                    ? `。未执行：${task.data.not_run.map(passLabel).join('、')}，这些账期的数据保持不变`
                     : ''}
                 </p>
               )}
@@ -362,7 +363,7 @@ export function BillSyncDialog({
               {!task.data?.done && (
                 <p className="mt-1 text-2xs text-muted-fg">
                   {cancelling
-                    ? '已请求停止：goscan 会把当前这一趟写完再停，以免留下只写了一半的账期，通常需要数秒至数分钟'
+                    ? '已请求停止：goscan 将写完当前这一批后停止，以免账期数据残缺，通常需要数秒至数分钟'
                     : '需按账期逐页调用云厂商接口，通常耗时数十秒至数分钟；关闭本窗口不会中断任务，重新打开仍可查看进度'}
                 </p>
               )}
@@ -377,15 +378,13 @@ export function BillSyncDialog({
             </Button>
             {!started && (
               <Button type="submit" variant="primary" disabled={busy || months === 0}>
-                {busy ? '提交中…' : '开始拉取'}
+                {busy ? '提交中…' : '开始同步'}
               </Button>
             )}
             {started && !task.data?.done && (
-              <Hint text="goscan 会把当前这一趟（一个账期 × 一种粒度）写完再停，未执行的账期保持原样" asChild>
-                <Button type="button" variant="danger" onClick={stop} disabled={cancelling}>
-                  {cancelling ? '正在停止…' : '停止同步'}
-                </Button>
-              </Hint>
+              <Button type="button" variant="danger" onClick={stop} disabled={cancelling}>
+                {cancelling ? '正在停止…' : '停止同步'}
+              </Button>
             )}
             {started && task.data?.done && (
               <Button
@@ -396,7 +395,7 @@ export function BillSyncDialog({
                   setError(null)
                 }}
               >
-                再拉取一次
+                再次同步
               </Button>
             )}
           </div>

@@ -19,7 +19,7 @@ import {
   type ReactNode,
   type SelectHTMLAttributes,
 } from 'react'
-import { CheckIcon, ChevronDownIcon, CopyIcon, FilterIcon, Loader2Icon, SearchIcon } from 'lucide-react'
+import { CheckIcon, ChevronDownIcon, CopyIcon, FilterIcon, InfoIcon, Loader2Icon, SearchIcon } from 'lucide-react'
 import type { Side } from '@/components/base-ui'
 import { useIsMobile } from '@/lib/media'
 import { cn, copyText } from '@/lib/utils'
@@ -159,8 +159,17 @@ interface HintChildProps {
   onClick?: (e: React.MouseEvent<HTMLElement>) => void
 }
 
-/** 鼠标悬停多久才浮出来，与 Base UI Tooltip 的默认值一致：扫过去不弹，停下来才弹 */
-const HINT_DELAY_MS = 600
+/**
+ * 鼠标悬停多久才浮出来：扫过去不弹，停下来才弹。原来用 Base UI 的默认值 600ms，停在上面要干等
+ * 半秒多，嫌慢；300ms 仍足以挡住鼠标一路扫过满页格子时的乱弹。带 ⓘ 的标签不等（见 InfoHint）
+ */
+const HINT_DELAY_MS = 300
+/**
+ * 刚收起一个提示之后多久之内，移到下一个就不再等：连着看几处说明时，每一处都重新等一遍很磨人。
+ * 和常见 tooltip 的「预热」一样，只在短时间内有效，过后又回到正常的延迟
+ */
+const HINT_WARM_MS = 500
+let lastHintClosedAt = 0
 
 /** 键盘聚焦才立即浮出，鼠标点出来的焦点不算——否则每点一次按钮都弹一下 */
 function focusVisible(el: Element): boolean {
@@ -189,12 +198,20 @@ type HintHandlers = Pick<HintChildProps, 'onPointerEnter' | 'onPointerLeave' | '
  * 不占关键路径，等人真去悬停或点击时基本已经就位。（没取回来也不影响按钮本身：触发器始终是
  * 原来那个节点，点击照常生效，只是气泡晚一点出来。）
  */
-export const HintPopup = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.HintPopup })))
-export const PopoverPanel = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.PopoverPanel })))
-export const ModalPanel = lazy(() => import('@/components/base-ui').then((m) => ({ default: m.ModalPanel })))
+/**
+ * 取回之后把模块记下来。`lazy` 组件哪怕文件早已在缓存里，第一次渲染也要先挂起一次，而 React
+ * 挂起后重新显示内容有约 300ms 的节流——页面上第一次悬停提示因此要干等三百多毫秒，之后才快。
+ * 模块到手之后，气泡直接用模块里的组件渲染，不再经过 `lazy`（见 Hint 里的 `Popup`）
+ */
+let baseUi: typeof import('@/components/base-ui') | null = null
+const loadBaseUi = () => import('@/components/base-ui').then((m) => (baseUi = m))
+
+export const HintPopup = lazy(() => loadBaseUi().then((m) => ({ default: m.HintPopup })))
+export const PopoverPanel = lazy(() => loadBaseUi().then((m) => ({ default: m.PopoverPanel })))
+export const ModalPanel = lazy(() => loadBaseUi().then((m) => ({ default: m.ModalPanel })))
 
 export function prefetchBaseUi(): void {
-  const load = () => void import('@/components/base-ui')
+  const load = () => void loadBaseUi()
   if ('requestIdleCallback' in window) window.requestIdleCallback(load, { timeout: 3_000 })
   else setTimeout(load, 1_000)
 }
@@ -216,11 +233,14 @@ export function Hint({
   side = 'top',
   className,
   asChild,
+  delay = HINT_DELAY_MS,
 }: {
   text: ReactNode
   children: ReactNode
   side?: Side
   className?: string
+  /** 悬停多少毫秒后浮出。默认 300；人主动来看说明的地方（ⓘ）传 0 */
+  delay?: number
   /**
    * 子元素本身就是触发器（按钮、链接这些），别再套一层 span：套了就是可聚焦的东西里面还嵌一个
    * 可聚焦的东西，tab 要按两下才过得去，读屏也会念两遍。
@@ -280,8 +300,13 @@ export function Hint({
     return () => document.removeEventListener('keydown', onKey)
   }, [open, isMobile])
 
+  const openRef = useRef(false)
+  useEffect(() => {
+    openRef.current = open
+  }, [open])
   const hide = useCallback(() => {
     clear()
+    if (openRef.current) lastHintClosedAt = Date.now()
     setOpen(false)
   }, [clear])
   const handlers: HintHandlers = isMobile
@@ -297,7 +322,8 @@ export function Hint({
           if (e.pointerType !== 'mouse') return
           setArmed(true)
           clear()
-          timer.current = setTimeout(() => setOpen(true), HINT_DELAY_MS)
+          if (delay <= 0 || Date.now() - lastHintClosedAt < HINT_WARM_MS) setOpen(true)
+          else timer.current = setTimeout(() => setOpen(true), delay)
         },
         onPointerLeave: hide,
         // 按下就收起：人已经在操作这个按钮了，解释挡在旁边只会碍事
@@ -332,12 +358,14 @@ export function Hint({
       onFocus: chain(el.props.onFocus, handlers.onFocus),
       onBlur: chain(el.props.onBlur, handlers.onBlur),
       onClick: chain(el.props.onClick, handlers.onClick),
-      className: cn(el.props.className, !asChild && 'cursor-help', className),
+      // 不加 cursor-help：满页的格子、徽标、标题都挂着 Hint，全换成问号鼠标，就成了「移到哪里都是问号」。
+      // 问号只留给真正要人来看说明的地方——带 ⓘ 的标签，见 InfoHint
+      className: cn(el.props.className, className),
       ...(described ? { 'aria-describedby': descId } : {}),
       ...(typeof text === 'string' && !el.props['aria-label'] && !hasTextChild(el.props.children) ? { 'aria-label': text } : {}),
     })
   ) : (
-    <span ref={ref} {...handlers} className={cn('cursor-help', className)}>
+    <span ref={ref} {...handlers} className={className}>
       {children}
     </span>
   )
@@ -346,13 +374,16 @@ export function Hint({
       {text}
     </span>
   ) : null
+  // 模块已取回就直接用，免得第一次悬停被 lazy 的挂起节流拖慢（见 loadBaseUi）
+  const Popup = baseUi?.HintPopup ?? HintPopup
   return (
     <>
       {desc}
       {trigger}
-      {armed && (
+      {/* 说明为空（调用方按条件传 undefined）就不弹：弹出来也只是一个空白的小框 */}
+      {armed && text != null && text !== '' && (
         <Suspense fallback={null}>
-          <HintPopup
+          <Popup
             text={text}
             side={side}
             touch={isMobile}
@@ -368,6 +399,26 @@ export function Hint({
         </Suspense>
       )}
     </>
+  )
+}
+
+/**
+ * 带 ⓘ 的标签：说明只挂在「标签文字 + ⓘ」这一小段上，鼠标移上去才出现问号与说明。
+ *
+ * 传了 `children` 就把标签文字一并作为悬停目标——14px 的图标单独作目标太小，不好碰到。
+ *
+ * 不要用 `Hint` 直接包住整张卡片、整行或表头：那样鼠标移到哪里都是问号，说明四处弹出。
+ * 按钮上也别挂长段解释。也不必处处都放：只给名字本身说不清的概念加，能从上下文看懂的就不加。
+ */
+export function InfoHint({ text, children, className }: { text: ReactNode; children?: ReactNode; className?: string }) {
+  return (
+    // 移到 ⓘ 上就是来看说明的，不必再等
+    <Hint text={text} delay={0}>
+      <span className={cn('group/info inline-flex cursor-help items-center gap-1', className)}>
+        {children}
+        <InfoIcon aria-hidden className="size-3.5 shrink-0 text-muted-fg/70 group-hover/info:text-fg" />
+      </span>
+    </Hint>
   )
 }
 

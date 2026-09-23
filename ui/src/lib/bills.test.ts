@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changeRatio, dayTick, daysInMonth, formatChange, formatMoneyShort, periodSpan, periodTick, periodsBetween, shiftPeriod } from './bills'
+import { changeRatio, dayTick, daysInMonth, formatChange, formatMoneyShort, formatMoneyTick, periodSlots, periodSpan, periodTick, periodsBetween, shiftPeriod } from './bills'
 
 describe('账期算术', () => {
   it('跨年加减', () => {
@@ -51,5 +51,33 @@ describe('账期的天数', () => {
     expect(daysInMonth('2024-02')).toBe(29)
     // 格式不对时给一个不会让预估爆掉的默认值
     expect(daysInMonth('2026')).toBe(30)
+  })
+})
+
+describe('periodSlots', () => {
+  it('账期等宽排布，悬停位置换回下标不随月份长短漂移', () => {
+    // 跨年、含 2 月：逐月按真实天数摆，到第 13 个月会指错一格
+    const periods = ['2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09']
+    const s = periodSlots(periods)
+    expect(s.fromMs).toBe(new Date(2025, 8, 1).getTime())
+    expect(s.toMs).toBe(new Date(2026, 9, 1).getTime())
+    periods.forEach((_, i) => {
+      expect(s.index(s.at(i))).toBe(i)
+      // 落在格子中间任意位置（悬停时量到的多半不是格子起点）也换回同一格
+      expect(s.index(s.at(i) + s.widthMs * 0.4)).toBe(i)
+    })
+  })
+
+  it('没有账期时给出空壳，不抛异常', () => {
+    expect(periodSlots([]).index(123)).toBe(-1)
+  })
+})
+
+describe('formatMoneyTick', () => {
+  it('刻度不带多余的小数，一万以上换成「万」', () => {
+    expect(formatMoneyTick(0)).toBe('0')
+    expect(formatMoneyTick(7500)).toBe('7,500')
+    expect(formatMoneyTick(0.5)).toBe('0.5')
+    expect(formatMoneyTick(20_000)).toBe(formatMoneyShort(20_000))
   })
 })

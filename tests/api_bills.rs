@@ -448,27 +448,17 @@ async fn allocation_splits_by_the_configured_rules() {
     assert_eq!(meta["bills"]["allocation"]["lines"], serde_json::json!(["甲线", "乙线", "公共"]));
     assert_eq!(meta["bills"]["allocation"]["rules"], 2);
 
+    // 一条查询按「规则 + 产品 + 日期 + 账期」给出，按产品、按天都从它拆
     fake.respond_to(
-        "_rule, _product",
+        "GROUP BY _rule, _product, _bucket, _period",
         concat!(
-            r#"{"rule":0,"product":"云服务器 ECS","amount":300}"#,
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":150}"#,
             "\n",
-            r#"{"rule":1,"product":"云服务器 ECS","amount":400}"#,
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-21","period":"2026-09","amount":150}"#,
             "\n",
-            r#"{"rule":-1,"product":"对象存储","amount":100}"#,
+            r#"{"rule":1,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":400}"#,
             "\n",
-        ),
-    );
-    fake.respond_to(
-        "_rule, _bucket",
-        concat!(
-            r#"{"rule":0,"bucket":"2026-09-20","amount":150}"#,
-            "\n",
-            r#"{"rule":0,"bucket":"2026-09-21","amount":150}"#,
-            "\n",
-            r#"{"rule":1,"bucket":"2026-09-20","amount":400}"#,
-            "\n",
-            r#"{"rule":-1,"bucket":"2026-09-21","amount":100}"#,
+            r#"{"rule":-1,"product":"对象存储","bucket":"2026-09-21","period":"2026-09","amount":100}"#,
             "\n",
         ),
     );
@@ -530,15 +520,11 @@ async fn allocation_without_rules_still_gives_the_daily_average() {
     assert!(meta["bills"]["allocation"].is_null(), "{meta}");
 
     fake.respond_to(
-        "_rule, _product",
-        "{\"rule\":-1,\"product\":\"云服务器 ECS\",\"amount\":600}\n",
-    );
-    fake.respond_to(
-        "_rule, _bucket",
+        "GROUP BY _rule, _product, _bucket, _period",
         concat!(
-            r#"{"rule":-1,"bucket":"2026-09-20","amount":300}"#,
+            r#"{"rule":-1,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":300}"#,
             "\n",
-            r#"{"rule":-1,"bucket":"2026-09-21","amount":300}"#,
+            r#"{"rule":-1,"product":"云服务器 ECS","bucket":"2026-09-21","period":"2026-09","amount":300}"#,
             "\n",
         ),
     );
@@ -615,22 +601,13 @@ async fn prepaid_is_amortized_over_its_service_period() {
     let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC_WITH_PREPAID)]).await;
 
     fake.respond_to(
-        "GROUP BY _rule, _product\n",
+        "GROUP BY _rule, _product, _bucket, _period",
         concat!(
-            r#"{"rule":0,"product":"云服务器 ECS","amount":300}"#,
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":300}"#,
             "\n",
-            r#"{"rule":1,"product":"云服务器 ECS","amount":400}"#,
+            r#"{"rule":1,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":400}"#,
             "\n",
-            r#"{"rule":-1,"product":"对象存储","amount":100}"#,
-            "\n",
-        ),
-    );
-    fake.respond_to(
-        "_rule, _bucket",
-        concat!(
-            r#"{"rule":0,"bucket":"2026-09-20","amount":400}"#,
-            "\n",
-            r#"{"rule":-1,"bucket":"2026-09-21","amount":400}"#,
+            r#"{"rule":-1,"product":"对象存储","bucket":"2026-09-21","period":"2026-09","amount":100}"#,
             "\n",
         ),
     );
@@ -667,6 +644,15 @@ async fn prepaid_is_amortized_over_its_service_period() {
     assert_eq!(line("甲线")["amortized"], 100.0);
     assert_eq!(line("甲线")["amount"], 500.0);
     assert_eq!(line("甲线")["amortized_by_period"]["2026-10"], 100.0);
+    // 按云厂商拆开：甲线在阿里云的后付费日均 (300 + 400 ÷ 4) ÷ 2 天，摊销同上
+    let ali = &line("甲线")["by_provider"]["alicloud"];
+    assert_eq!(ali["daily"], 200.0, "{ali}");
+    assert_eq!(ali["amortized_by_period"]["2026-10"], 100.0, "{ali}");
+    // 没命中规则的 RDS 一个月期摊销，记在未归属的阿里云名下
+    assert_eq!(
+        body["unmatched"]["by_provider"]["alicloud"]["amortized_by_period"]["2026-09"],
+        300.0
+    );
     // 摊销那一行标了 prepaid，且不给日均
     let items = line("甲线")["items"].as_array().unwrap();
     let prepaid_item = items.iter().find(|i| i["prepaid"] == true).unwrap();
@@ -676,8 +662,72 @@ async fn prepaid_is_amortized_over_its_service_period() {
     assert_eq!(body["unmatched"]["amount"], 400.0);
 
     // 预付费从「按发生月计入」那条路里排掉了，不会两头各算一次
-    let as_billed = sql_for(&fake, "GROUP BY _rule, _product\n");
+    let as_billed = sql_for(&fake, "GROUP BY _rule, _product, _bucket, _period");
     assert!(as_billed.contains("AND NOT (subscription_type IN {"), "{as_billed}");
+}
+
+/// 月度拆分表：按「云 × 付费方式 × 业务线 × 账期」给出金额，与财务那张拆分表同一个口径。
+/// 后付费按出账月份、预付费按服务期摊到各月；未命中规则的钱按配置并入「公共」；摊到区间之后的
+/// 月份只用于预估，不进这张表。
+#[tokio::test]
+async fn monthly_rows_split_by_cloud_kind_and_line() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC_WITH_PREPAID)]).await;
+
+    fake.respond_to(
+        "GROUP BY _rule, _product, _bucket, _period",
+        concat!(
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-08-10","period":"2026-08","amount":300}"#,
+            "\n",
+            r#"{"rule":1,"product":"云服务器 ECS","bucket":"2026-09-10","period":"2026-09","amount":400}"#,
+            "\n",
+            r#"{"rule":-1,"product":"对象存储","bucket":"2026-09-11","period":"2026-09","amount":100}"#,
+            "\n",
+        ),
+    );
+    // 6 月买的一年期机器 1200（每月 100）
+    fake.respond_to(
+        "_months",
+        r#"{"rule":0,"product":"云服务器 ECS","period":"2026-06","months":12,"amount":1200}"#,
+    );
+    let (status, body) =
+        get_json(&app, "/api/bills/allocation?from=2026-08&to=2026-09&provider=alicloud").await;
+    assert_eq!(status, 200, "{body}");
+
+    let rows = body["monthly"].as_array().unwrap();
+    let row = |kind: &str, line: &str| {
+        rows.iter()
+            .find(|r| r["provider"] == "alicloud" && r["kind"] == kind && r["line"] == line)
+            .unwrap_or_else(|| panic!("没有 {kind} / {line}: {body}"))
+    };
+    // 后付费：甲线专用 300 在 8 月；ECS 其余部分 400 按 1:3 拆给甲、乙线
+    assert_eq!(row("postpaid", "甲线")["by_period"]["2026-08"], 300.0);
+    assert_eq!(row("postpaid", "甲线")["by_period"]["2026-09"], 100.0);
+    assert_eq!(row("postpaid", "乙线")["by_period"]["2026-09"], 300.0);
+    // 未命中规则的 100 按配置并入公共
+    assert_eq!(row("postpaid", "公共")["by_period"]["2026-09"], 100.0);
+    // 预付费：每月摊 100，只列区间内的 8、9 月
+    let prepaid = &row("prepaid", "甲线")["by_period"];
+    assert_eq!(prepaid["2026-08"], 100.0);
+    assert_eq!(prepaid["2026-09"], 100.0);
+    assert!(prepaid["2026-10"].is_null(), "区间之后的摊销不进拆分表: {prepaid}");
+
+    // 平常从那一条查询里按账期归并，不另发按账期的查询
+    let q = sql_for(&fake, "GROUP BY _rule, _product, _bucket, _period");
+    assert!(q.contains("formatDateTime(billing_date, '%Y-%m')"), "{q}");
+    assert!(!sql(&fake).iter().any(|s| s.contains("GROUP BY _rule, _period")), "不该多扫一遍");
+
+    // 只看最近 N 天时那一条只含这 N 天，拆分表要整月：此时另查一次，且不带「最近 N 天」的条件
+    fake.respond_to("GROUP BY _rule, _period", r#"{"rule":1,"period":"2026-09","amount":4000}"#);
+    let (status, body) =
+        get_json(&app, "/api/bills/allocation?from=2026-08&to=2026-09&provider=alicloud&days=7")
+            .await;
+    assert_eq!(status, 200, "{body}");
+    let whole = sql_for(&fake, "GROUP BY _rule, _period");
+    assert!(!whole.contains("SELECT max(billing_date)"), "整月不受窗口限制: {whole}");
+    let rows = body["monthly"].as_array().unwrap();
+    let yi = rows.iter().find(|r| r["kind"] == "postpaid" && r["line"] == "乙线").unwrap();
+    assert_eq!(yi["by_period"]["2026-09"], 3000.0, "4000 的四分之三: {body}");
 }
 
 /// 没配 `[prepaid]` 就还是只统计后付费，包年包月按出账当月原样计入。
@@ -687,10 +737,9 @@ async fn without_the_prepaid_section_nothing_is_amortized() {
     let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC)]).await;
 
     fake.respond_to(
-        "GROUP BY _rule, _product\n",
-        "{\"rule\":-1,\"product\":\"云服务器 ECS\",\"amount\":600}\n",
+        "GROUP BY _rule, _product, _bucket, _period",
+        r#"{"rule":-1,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":600}"#,
     );
-    fake.respond_to("_rule, _bucket", "{\"rule\":-1,\"bucket\":\"2026-09-20\",\"amount\":600}\n");
     let (status, body) =
         get_json(&app, "/api/bills/allocation?from=2026-09&to=2026-09&provider=alicloud").await;
     assert_eq!(status, 200, "{body}");
@@ -699,7 +748,7 @@ async fn without_the_prepaid_section_nothing_is_amortized() {
     assert_eq!(body["total"], 600.0);
     // 没有摊销那条查询
     assert!(!sql(&fake).iter().any(|s| s.contains("_months")), "不该有摊销查询");
-    assert!(!sql_for(&fake, "GROUP BY _rule, _product\n").contains("AND NOT"));
+    assert!(!sql_for(&fake, "GROUP BY _rule, _product, _bucket, _period").contains("AND NOT"));
 }
 
 /// 日均按每朵云自己的天数折算再相加。两朵云的同步进度常常不一样——这里火山有两天、阿里云的
@@ -711,24 +760,16 @@ async fn daily_average_uses_each_clouds_own_day_count() {
 
     fake.respond_to(
         "any(if(ProductZh != '', ProductZh, Product)) AS _product",
-        "{\"rule\":-1,\"product\":\"云服务器\",\"amount\":200}\n",
-    );
-    fake.respond_to(
-        "any(ifNull(toString(toDateOrNull(ExpenseDate)), '')) AS _bucket",
         concat!(
-            r#"{"rule":-1,"bucket":"2026-09-20","amount":100}"#,
+            r#"{"rule":-1,"product":"云服务器","bucket":"2026-09-20","period":"2026-09","amount":100}"#,
             "\n",
-            r#"{"rule":-1,"bucket":"2026-09-21","amount":100}"#,
+            r#"{"rule":-1,"product":"云服务器","bucket":"2026-09-21","period":"2026-09","amount":100}"#,
             "\n",
         ),
     );
     fake.respond_to(
         "any(if(product_name != '', product_name, product_code)) AS _product",
-        "{\"rule\":-1,\"product\":\"对象存储\",\"amount\":900}\n",
-    );
-    fake.respond_to(
-        "any(toString(billing_date)) AS _bucket",
-        "{\"rule\":-1,\"bucket\":\"2026-09-21\",\"amount\":900}\n",
+        r#"{"rule":-1,"product":"对象存储","bucket":"2026-09-21","period":"2026-09","amount":900}"#,
     );
     let (status, body) = get_json(&app, "/api/bills/allocation?from=2026-09&to=2026-09").await;
     assert_eq!(status, 200, "{body}");
@@ -740,6 +781,39 @@ async fn daily_average_uses_each_clouds_own_day_count() {
     let products = body["products"].as_array().unwrap();
     let oss = products.iter().find(|p| p["product"] == "对象存储").unwrap();
     assert_eq!(oss["daily"], 900.0);
+    // 拆分表切到单朵云时用的日均：各按各的天数，不相加（没命中规则的都按 unmatched 归入公共）
+    let common = body["lines"].as_array().unwrap().iter().find(|l| l["name"] == "公共").unwrap();
+    assert_eq!(common["by_provider"]["volcengine"]["daily"], 100.0, "{common}");
+    assert_eq!(common["by_provider"]["alicloud"]["daily"], 900.0, "{common}");
+    assert_eq!(body["unmatched"]["by_provider"]["alicloud"]["daily"], 900.0);
+}
+
+/// 火山偶有 `ExpenseDate` 为空的行：落不进任何一天，却是实实在在的钱。合并成一条查询之后，
+/// 它仍要计入合计、按产品与按月拆分，只是不算作一天、不进趋势。
+#[tokio::test]
+async fn rows_without_a_day_still_count_but_not_as_a_day() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC)]).await;
+
+    fake.respond_to(
+        "GROUP BY _rule, _product, _bucket, _period",
+        concat!(
+            r#"{"rule":-1,"product":"云服务器","bucket":"2026-09-20","period":"2026-09","amount":100}"#,
+            "\n",
+            r#"{"rule":-1,"product":"云服务器","bucket":"","period":"2026-09","amount":50}"#,
+            "\n",
+        ),
+    );
+    let (status, body) =
+        get_json(&app, "/api/bills/allocation?from=2026-09&to=2026-09&provider=volcengine").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["total"], 150.0);
+    assert_eq!(body["days"], 1, "空日期不算一天: {body}");
+    assert_eq!(body["products"][0]["amount"], 150.0);
+    assert_eq!(body["points"].as_array().unwrap().len(), 1, "空日期不进趋势");
+    let rows = body["monthly"].as_array().unwrap();
+    let total: f64 = rows.iter().map(|r| r["by_period"]["2026-09"].as_f64().unwrap_or(0.0)).sum();
+    assert_eq!(total, 150.0, "按月拆分也要算上它: {body}");
 }
 
 /// 摊销固定读月度表：日度表往往只补了最近几天，没有三年前的购买记录。
@@ -750,10 +824,9 @@ async fn prepaid_reads_the_monthly_table_and_thin_daily_bills_are_flagged() {
     let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC_WITH_PREPAID)]).await;
 
     fake.respond_to(
-        "GROUP BY _rule, _product\n",
-        "{\"rule\":-1,\"product\":\"对象存储\",\"amount\":100}\n",
+        "GROUP BY _rule, _product, _bucket, _period",
+        r#"{"rule":-1,"product":"对象存储","bucket":"2026-09-22","period":"2026-09","amount":100}"#,
     );
-    fake.respond_to("_rule, _bucket", "{\"rule\":-1,\"bucket\":\"2026-09-22\",\"amount\":100}\n");
     // 一笔五年期的购买：服务期不截断，五年摊满（lookback_months 只管往前找多远）
     fake.respond_to(
         "_months",
@@ -796,10 +869,9 @@ async fn a_short_window_scales_the_amortized_part_to_the_same_days() {
     let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC_WITH_PREPAID)]).await;
 
     fake.respond_to(
-        "GROUP BY _rule, _product\n",
-        "{\"rule\":-1,\"product\":\"对象存储\",\"amount\":70}\n",
+        "GROUP BY _rule, _product, _bucket, _period",
+        r#"{"rule":-1,"product":"对象存储","bucket":"2026-09-22","period":"2026-09","amount":70}"#,
     );
-    fake.respond_to("_rule, _bucket", "{\"rule\":-1,\"bucket\":\"2026-09-22\",\"amount\":70}\n");
     fake.respond_to(
         "_months",
         "{\"rule\":-1,\"product\":\"云服务器 ECS\",\"period\":\"2026-09\",\"months\":1,\"amount\":3000}\n",

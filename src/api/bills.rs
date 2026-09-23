@@ -30,9 +30,9 @@ use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::goscan::{Goscan, SyncRequest, TaskRow};
 use crate::query::bills::{
-    AllocPrepaidRow, AllocRow, Amount, BillFilter, BillQueries, BucketRow, DEFAULT_PERIODS,
-    DetailRow, Dimension, KeyRow, Kind, MAX_DETAIL_ROWS, MAX_PERIODS, PeriodRange, PeriodRow,
-    Provider, TotalRow, shift_period,
+    AllocDetailRow, AllocPrepaidRow, AllocRow, Amount, BillFilter, BillQueries, BucketRow,
+    DEFAULT_PERIODS, DetailRow, Dimension, KeyRow, Kind, MAX_DETAIL_ROWS, MAX_PERIODS, PeriodRange,
+    PeriodRow, Provider, TotalRow, shift_period,
 };
 use crate::query::parse_tz;
 use crate::schema::{BillTable, BillTables, Schema};
@@ -496,6 +496,32 @@ pub struct AllocLine {
     pub amortized_by_period: BTreeMap<String, f64>,
     /// 这条线的费用由哪些产品构成，金额从大到小
     pub items: Vec<AllocItem>,
+    /// 按云厂商拆开的日均与摊销。月度拆分表切到单朵云、单种付费方式时，日均与预估要用这一段
+    /// 自己的数字——合计那份把两朵云、两种付费方式揉在一起，拆不回来
+    pub by_provider: BTreeMap<&'static str, ProviderPart>,
+}
+
+/// 一条业务线在某朵云上的日均与摊销。
+#[derive(Serialize, Default, Clone)]
+pub struct ProviderPart {
+    /// 后付费日均：按这朵云自己有账单的天数折算。没有日度账单时为 null
+    pub daily: Option<f64>,
+    /// 这朵云的预付费摊到各账期的金额，含区间之后的若干个月
+    pub amortized_by_period: BTreeMap<String, f64>,
+}
+
+/// 月度拆分表的一行：某朵云、某种付费方式下，一条业务线在各账期的金额。
+///
+/// 页面据此排出「业务线 × 月份」的矩阵，按云、按付费方式分段，与财务那张拆分表同一个样子。
+/// 按整月统计，不受「最近 N 天」影响。
+#[derive(Serialize)]
+pub struct AllocMonthRow {
+    pub provider: &'static str,
+    /// `postpaid` 后付费（按出账月份）/ `prepaid` 预付费按服务期摊到各月的部分
+    pub kind: &'static str,
+    /// 业务线；未命中规则、配置里也没给去处的那部分为 null
+    pub line: Option<String>,
+    pub by_period: BTreeMap<String, f64>,
 }
 
 /// 一天（或一个账期）各条业务线的花费。
@@ -540,9 +566,13 @@ pub struct AllocationResponse {
     /// 未命中任何规则的部分。配置里给了 `unmatched` 时，这笔钱已同时计入那条业务线，
     /// 此处单列是为了让人看得见「有多少钱还没写进规则」
     pub unmatched: AllocLine,
+    /// 配置里 `unmatched` 指向的业务线：非空时 `unmatched` 已计入它，页面不能再把两者相加
+    pub unmatched_into: Option<String>,
     /// 不分业务线、只按产品，配没配规则都有
     pub products: Vec<AllocItem>,
     pub points: Vec<AllocPoint>,
+    /// 月度拆分表的数据，见 [`AllocMonthRow`]
+    pub monthly: Vec<AllocMonthRow>,
     /// 日度账单明显少于月度账单时给出两边的合计，页面据此提示「日度账单不全」；覆盖正常时为 null
     pub coverage: Option<Coverage>,
     pub stats: Stats,
@@ -604,47 +634,126 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
         ));
     }
 
-    let results = futures_util::future::join_all(sources.iter().map(|(kind, table)| {
+    // 一张表一条查询（见 alloc_detail），按产品、按天、按账期都从它的结果里拆。只有「最近 N 天」
+    // 时按账期那份要另查整月
+    let detail = futures_util::future::join_all(sources.iter().map(|(kind, table)| {
         let q = queries(&state, *kind, table);
-        let by_product = q.alloc_by_product(&filter, amount, alloc, window_days);
-        let by_bucket = q.alloc_by_bucket(&filter, amount, alloc, window_days);
+        let detail = q.alloc_detail(&filter, amount, alloc, window_days);
+        let by_period = window_days.map(|_| q.alloc_by_period(&filter, amount, alloc));
         let client = state.client.clone();
         async move {
-            let (by_product, by_bucket) = tokio::join!(
-                client.rows::<AllocRow>(by_product?),
-                client.rows::<AllocRow>(by_bucket?)
-            );
-            Ok::<_, Error>((by_product?, by_bucket?))
+            let detail = client.rows::<AllocDetailRow>(detail?);
+            let periods = async {
+                match by_period {
+                    Some(q) => Ok::<_, Error>(Some(client.rows::<AllocRow>(q?).await?)),
+                    None => Ok(None),
+                }
+            };
+            let (detail, periods) = tokio::join!(detail, periods);
+            Ok::<_, Error>((detail?, periods?))
         }
-    }))
-    .await;
+    }));
+
+    // 预付费的购买记录。与上面那条、下面的覆盖率检查三者互不依赖，一起发出：串行时三段
+    // 相加（线上约 0.5 + 0.13 + 0.5 秒），并行只等最慢的那段
+    let prepaid_plan = match &alloc.prepaid {
+        Some(prepaid) => {
+            let lookback = PeriodRange {
+                from: shift_period(&filter.range.from, -(prepaid.lookback_months as i32 - 1))?,
+                to: filter.range.to.clone(),
+            };
+            let sources: Vec<(Kind, &BillTable)> = sources
+                .iter()
+                .map(|(kind, table)| match (kind, &tables.alicloud_monthly) {
+                    (Kind::AlicloudDaily, Some(monthly)) => (Kind::AlicloudMonthly, monthly),
+                    _ => (*kind, *table),
+                })
+                .collect();
+            Some((prepaid, lookback, sources))
+        }
+        None => None,
+    };
+    let prepaid_rows = async {
+        let Some((prepaid, lookback, sources)) = &prepaid_plan else { return Vec::new() };
+        futures_util::future::join_all(sources.iter().map(|(kind, table)| {
+            let q = queries(&state, *kind, table)
+                .alloc_prepaid(&filter, amount, alloc, prepaid, lookback);
+            let client = state.client.clone();
+            let provider = kind.provider().as_str();
+            async move {
+                match q? {
+                    Some(q) => {
+                        Ok::<_, Error>(Some((provider, client.rows::<AllocPrepaidRow>(q).await?)))
+                    }
+                    None => Ok(None),
+                }
+            }
+        }))
+        .await
+    };
+    let (results, prepaid_rows, coverage) =
+        tokio::join!(detail, prepaid_rows, coverage(&state, tables, &sources, &filter, amount));
 
     // 后付费。日均**按每张表自己的天数**折算后再相加：两朵云的同步进度常常不一样（阿里云的
     // 日度账单只拉到昨天、火山的已经出到今天，或者日度表压根只补了几天），若把两边的天数取
     // 并集当分母，天数少的那朵云会被摊薄，日均随之偏低
     let mut by_product: BTreeMap<(i32, String), Money> = BTreeMap::new();
     let mut by_bucket: BTreeMap<(i32, String), f64> = BTreeMap::new();
+    // 按「云厂商 + 规则」的后付费日均、按「云厂商 + 规则 + 账期」的摊销：拆分表分段页签的预估用
+    let mut rule_daily: BTreeMap<(&'static str, i32), f64> = BTreeMap::new();
+    let mut rule_amortized: BTreeMap<(&'static str, i32, String), f64> = BTreeMap::new();
     let mut days_by_provider: BTreeMap<&'static str, u32> = BTreeMap::new();
+    // 月度拆分表的原料：（云, 付费方式, 规则, 账期）→ 金额，最后再按规则摊到业务线
+    let mut monthly: BTreeMap<(&'static str, &'static str, i32, String), f64> = BTreeMap::new();
     let mut stats = Vec::new();
     for ((kind, _), r) in sources.iter().zip(results) {
-        let (products, buckets) = r?;
-        stats.push(products.stats);
-        stats.push(buckets.stats);
+        let (detail, periods) = r?;
+        let provider = kind.provider().as_str();
+        stats.push(detail.stats);
+        match periods {
+            Some(periods) => {
+                stats.push(periods.stats);
+                for row in periods.rows {
+                    *monthly.entry((provider, "postpaid", row.rule, row.key)).or_default() +=
+                        row.amount;
+                }
+            }
+            None => {
+                for row in detail.rows.iter().filter(|r| !r.period.is_empty()) {
+                    *monthly
+                        .entry((provider, "postpaid", row.rule, row.period.clone()))
+                        .or_default() += row.amount;
+                }
+            }
+        }
+        // 空的 bucket 是落不进任何一天的那几行：计入金额，但不算一天
         let days = if kind.has_days() {
-            buckets.rows.iter().map(|b| b.key.as_str()).collect::<BTreeSet<_>>().len() as u32
+            detail
+                .rows
+                .iter()
+                .filter(|r| !r.bucket.is_empty())
+                .map(|r| r.bucket.as_str())
+                .collect::<BTreeSet<_>>()
+                .len() as u32
         } else {
             0
         };
         if kind.has_days() {
-            *days_by_provider.entry(kind.provider().as_str()).or_default() += days;
+            *days_by_provider.entry(provider).or_default() += days;
         }
-        for row in products.rows {
-            let daily = if days > 0 { row.amount / f64::from(days) } else { 0.0 };
-            *by_product.entry((row.rule, row.key)).or_default() +=
-                Money { amount: row.amount, daily };
+        let mut products: BTreeMap<(i32, String), f64> = BTreeMap::new();
+        for row in detail.rows {
+            *products.entry((row.rule, row.product)).or_default() += row.amount;
+            if !row.bucket.is_empty() {
+                *by_bucket.entry((row.rule, row.bucket)).or_default() += row.amount;
+            }
         }
-        for row in buckets.rows {
-            *by_bucket.entry((row.rule, row.key)).or_default() += row.amount;
+        for (key, amount) in products {
+            let daily = if days > 0 { amount / f64::from(days) } else { 0.0 };
+            if days > 0 {
+                *rule_daily.entry((provider, key.0)).or_default() += daily;
+            }
+            *by_product.entry(key).or_default() += Money { amount, daily };
         }
     }
     // 有一张表没有日粒度（阿里云只同步了月度账单），整体的日均就无从谈起
@@ -658,48 +767,27 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
     // **摊销固定读月度表**：它按月摊，月度粒度正合适；更要紧的是月度表的历史最全——日度表
     // 往往只补了最近几个月，而三年期的机器要回溯到三年前的购买记录才摊得出本月那一份
     let mut amortized: BTreeMap<(i32, String, String), f64> = BTreeMap::new();
-    if let Some(prepaid) = &alloc.prepaid {
-        let lookback = PeriodRange {
-            from: shift_period(&filter.range.from, -(prepaid.lookback_months as i32 - 1))?,
-            to: filter.range.to.clone(),
-        };
-        let horizon = shift_period(&filter.range.to, AMORTIZE_FORWARD)?;
-        let prepaid_sources: Vec<(Kind, &BillTable)> = sources
-            .iter()
-            .map(|(kind, table)| match (kind, &tables.alicloud_monthly) {
-                (Kind::AlicloudDaily, Some(monthly)) => (Kind::AlicloudMonthly, monthly),
-                _ => (*kind, *table),
-            })
-            .collect();
-        let results =
-            futures_util::future::join_all(prepaid_sources.iter().map(|(kind, table)| {
-                let q = queries(&state, *kind, table)
-                    .alloc_prepaid(&filter, amount, alloc, prepaid, &lookback);
-                let client = state.client.clone();
-                async move {
-                    match q? {
-                        Some(q) => Ok::<_, Error>(Some(client.rows::<AllocPrepaidRow>(q).await?)),
-                        None => Ok(None),
-                    }
+    let horizon = shift_period(&filter.range.to, AMORTIZE_FORWARD)?;
+    for r in prepaid_rows {
+        let Some((provider, rows)) = r? else { continue };
+        stats.push(rows.stats);
+        for row in rows.rows {
+            // 服务期不截断：五年期的机器就摊五年。lookback_months 只管往前找多远
+            let months = row.months.clamp(1, MAX_SERVICE_MONTHS);
+            let per_month = row.amount / f64::from(months);
+            for k in 0..months {
+                let period = shift_period(&row.period, k as i32)?;
+                // 服务期早已跨过本次查询的范围，或还没摊到这里，都不必留
+                if period < filter.range.from || period > horizon {
+                    continue;
                 }
-            }))
-            .await;
-        for r in results {
-            let Some(rows) = r? else { continue };
-            stats.push(rows.stats);
-            for row in rows.rows {
-                // 服务期不截断：五年期的机器就摊五年。lookback_months 只管往前找多远
-                let months = row.months.clamp(1, MAX_SERVICE_MONTHS);
-                let per_month = row.amount / f64::from(months);
-                for k in 0..months {
-                    let period = shift_period(&row.period, k as i32)?;
-                    // 服务期早已跨过本次查询的范围，或还没摊到这里，都不必留
-                    if period < filter.range.from || period > horizon {
-                        continue;
-                    }
-                    *amortized.entry((row.rule, row.product.clone(), period)).or_default() +=
+                if period <= filter.range.to {
+                    *monthly.entry((provider, "prepaid", row.rule, period.clone())).or_default() +=
                         per_month;
                 }
+                *rule_amortized.entry((provider, row.rule, period.clone())).or_default() +=
+                    per_month;
+                *amortized.entry((row.rule, row.product.clone(), period)).or_default() += per_month;
             }
         }
     }
@@ -733,6 +821,8 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
     let mut unmatched: Items = BTreeMap::new();
     let mut unmatched_postpaid = Money::default();
     let mut unmatched_amortized = 0.0;
+    // 未归属的预付费摊到各月多少：页面给「未归属」算月度预估时要用，与业务线同一口径
+    let mut unmatched_by_period: BTreeMap<String, f64> = BTreeMap::new();
     let mut products: Items = BTreeMap::new();
     let rule_of = |rule: i32| usize::try_from(rule).ok().and_then(|i| alloc.rules.get(i));
     let rule_name = |rule: i32| rule_of(rule).map(|r| r.name.clone()).unwrap_or_default();
@@ -754,6 +844,9 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
         *amortized_by_period.entry(period.clone()).or_default() += *value;
         let within = in_range(period);
         let scaled = Money { amount: *value * scale, daily: 0.0 };
+        if rule_of(*rule).is_none() {
+            *unmatched_by_period.entry(period.clone()).or_default() += *value;
+        }
         if within {
             *products.entry((product.clone(), String::new(), true)).or_default() += scaled;
             if rule_of(*rule).is_none() {
@@ -793,13 +886,58 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
         m.into_iter().map(|(k, v)| (k, round(v))).collect()
     };
 
+    // 按云厂商的日均与摊销，同样按规则摊到业务线；未命中规则的那份另记给「未归属」
+    let mut parts: Vec<BTreeMap<&'static str, ProviderPart>> = vec![BTreeMap::new(); n];
+    let mut unmatched_parts: BTreeMap<&'static str, ProviderPart> = BTreeMap::new();
+    for (&(provider, rule), &daily) in &rule_daily {
+        if rule_of(rule).is_none() {
+            *unmatched_parts.entry(provider).or_default().daily.get_or_insert(0.0) += daily;
+        }
+        for (line, part) in spread(alloc, rule, daily) {
+            let Some(line) = line else { continue };
+            *parts[line].entry(provider).or_default().daily.get_or_insert(0.0) += part;
+        }
+    }
+    for ((provider, rule, period), &value) in &rule_amortized {
+        if rule_of(*rule).is_none() {
+            *unmatched_parts
+                .entry(provider)
+                .or_default()
+                .amortized_by_period
+                .entry(period.clone())
+                .or_default() += value;
+        }
+        for (line, part) in spread(alloc, *rule, value) {
+            let Some(line) = line else { continue };
+            *parts[line]
+                .entry(provider)
+                .or_default()
+                .amortized_by_period
+                .entry(period.clone())
+                .or_default() += part;
+        }
+    }
+    let round_parts =
+        |m: BTreeMap<&'static str, ProviderPart>| -> BTreeMap<&'static str, ProviderPart> {
+            m.into_iter()
+                .map(|(k, p)| {
+                    let part = ProviderPart {
+                        daily: p.daily.map(round),
+                        amortized_by_period: round_map(p.amortized_by_period),
+                    };
+                    (k, part)
+                })
+                .collect()
+        };
+
     let mut line_rows: Vec<AllocLine> = alloc
         .lines
         .iter()
         .zip(lines)
         .zip(line_by_period)
+        .zip(parts)
         .enumerate()
-        .map(|(i, ((name, items), by_period))| {
+        .map(|(i, (((name, items), by_period), by_provider))| {
             let sum = line_postpaid[i].amount + line_amortized[i];
             AllocLine {
                 name: name.clone(),
@@ -810,6 +948,7 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
                 share: share_of(sum),
                 amortized_by_period: round_map(by_period),
                 items: items_of(items),
+                by_provider: round_parts(by_provider),
             }
         })
         .collect();
@@ -827,7 +966,32 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
         }
     }
 
-    let coverage = coverage(&state, tables, &sources, &filter, amount, &mut stats).await?;
+    // 月度拆分表：按规则摊到业务线，同一（云, 付费方式, 业务线）合成一行
+    let mut month_rows: BTreeMap<
+        (&'static str, &'static str, Option<usize>),
+        BTreeMap<String, f64>,
+    > = BTreeMap::new();
+    for ((provider, kind, rule, period), value) in monthly {
+        for (line, part) in spread(alloc, rule, value) {
+            *month_rows
+                .entry((provider, kind, line))
+                .or_default()
+                .entry(period.clone())
+                .or_default() += part;
+        }
+    }
+    let monthly: Vec<AllocMonthRow> = month_rows
+        .into_iter()
+        .map(|((provider, kind, line), by_period)| AllocMonthRow {
+            provider,
+            kind,
+            line: line.map(|i| alloc.lines[i].clone()),
+            by_period: round_map(by_period),
+        })
+        .collect();
+
+    let (coverage, coverage_stats) = coverage?;
+    stats.extend(coverage_stats);
     let unmatched_sum = unmatched_postpaid.amount + unmatched_amortized;
 
     Ok(Json(AllocationResponse {
@@ -853,9 +1017,11 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
             amortized: round(unmatched_amortized),
             daily: per_day(unmatched_postpaid),
             share: share_of(unmatched_sum),
-            amortized_by_period: BTreeMap::new(),
+            amortized_by_period: round_map(unmatched_by_period),
             items: items_of(unmatched),
+            by_provider: round_parts(unmatched_parts),
         },
+        unmatched_into: alloc.unmatched.map(|i| alloc.lines[i].clone()),
         products: items_of(products),
         points: points
             .into_iter()
@@ -865,6 +1031,7 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
                 by_line: by_line.into_iter().map(|(k, v)| (k, round(v))).collect(),
             })
             .collect(),
+        monthly,
         coverage,
         stats: merge_stats(&stats),
     }))
@@ -881,30 +1048,29 @@ async fn coverage(
     sources: &[(Kind, &BillTable)],
     filter: &BillFilter,
     amount: Amount,
-    stats: &mut Vec<Stats>,
-) -> Result<Option<Coverage>> {
+) -> Result<(Option<Coverage>, Vec<Stats>)> {
     let (Some(daily), Some(monthly)) = (&tables.alicloud_daily, &tables.alicloud_monthly) else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
     if !sources.iter().any(|(k, _)| *k == Kind::AlicloudDaily) {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     }
     let d = queries(state, Kind::AlicloudDaily, daily).total(filter, amount)?;
     let m = queries(state, Kind::AlicloudMonthly, monthly).total(filter, amount)?;
     let (d, m) = tokio::join!(state.client.rows::<TotalRow>(d), state.client.rows::<TotalRow>(m));
     let (d, m) = (d?, m?);
-    stats.push(d.stats);
-    stats.push(m.stats);
     let daily_total = d.rows.first().and_then(|r| r.amount).unwrap_or(0.0);
     let monthly_total = m.rows.first().and_then(|r| r.amount).unwrap_or(0.0);
+    let stats = vec![d.stats, m.stats];
     if monthly_total <= 0.0 || daily_total >= monthly_total * COVERAGE_WARN {
-        return Ok(None);
+        return Ok((None, stats));
     }
-    Ok(Some(Coverage {
+    let coverage = Coverage {
         provider: Provider::Alicloud.as_str(),
         daily: round(daily_total),
         monthly: round(monthly_total),
-    }))
+    };
+    Ok((Some(coverage), stats))
 }
 
 /// 日度账单不到月度账单的这个比例时告警。留 5% 的余地：月度表当月的那份可能比日度表
@@ -1127,8 +1293,8 @@ const GRANULARITIES: &[&str] = &["monthly", "daily", "both"];
 fn goscan(state: &AppState) -> Result<&Goscan> {
     state.goscan.as_deref().ok_or_else(|| {
         Error::bad_request(
-            "当前部署未配置 --goscan-url（OPDASH_GOSCAN_URL），无法拉取账单：\
-             账单由 goscan 向云厂商拉取，opdash 仅负责转发该指令",
+            "当前部署未配置 --goscan-url（OPDASH_GOSCAN_URL），无法同步账单：\
+             账单由 goscan 向云厂商同步，opdash 仅负责转发该指令",
         )
     })
 }

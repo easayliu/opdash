@@ -268,7 +268,8 @@ export function LogsPage() {
               size="sm"
               active={follow}
               disabled={!range.relative}
-              title={range.relative ? '新日志实时推过来（服务端每秒查一次增量，并回看一分钟兜住晚到的行）' : '只有相对时间范围（最近 N 分钟）才能跟随'}
+              // 只在按钮不可用时说明原因；可用时「跟随」二字已经说清楚
+              title={range.relative ? undefined : '只有相对时间范围（最近 N 分钟）才能跟随'}
               onClick={() => set({ follow: follow ? null : '1', order: null, offset: null })}
             >
               {follow ? <PauseIcon className="size-4" /> : <PlayIcon className="size-4" />}
@@ -279,7 +280,6 @@ export function LogsPage() {
             <Button
               size="sm"
               active={terminal}
-              title="终端模式：新日志正序追加在底部、自动滚到底；往上滚就停住"
               onClick={() => set({ term: terminal ? null : '1' })}
             >
               <TerminalIcon className="size-4" />
@@ -303,25 +303,21 @@ export function LogsPage() {
           )}
           {!follow && !byId && !isMobile && <Pager {...pager} />}
           {/* 导出在手机上没什么用，也省出一行 */}
-          <Hint text={`导出 CSV（最多 ${meta.data?.limits.export_max_rows ?? 50000} 行）`} asChild>
-            <a
-              href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })}
-              className={buttonClass({ size: 'sm' }, 'hidden md:inline-flex')}
-              download
-            >
-              <DownloadIcon className="size-4" />
-              CSV
-            </a>
-          </Hint>
-          <Hint text="导出 JSON Lines" asChild>
-            <a
-              href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })}
-              className={buttonClass({ size: 'sm' }, 'hidden md:inline-flex')}
-              download
-            >
-              JSONL
-            </a>
-          </Hint>
+          <a
+            href={apiUrl('/logs/export', { ...exportParams, format: 'csv' })}
+            className={buttonClass({ size: 'sm' }, 'hidden md:inline-flex')}
+            download
+          >
+            <DownloadIcon className="size-4" />
+            导出 CSV
+          </a>
+          <a
+            href={apiUrl('/logs/export', { ...exportParams, format: 'jsonl' })}
+            className={buttonClass({ size: 'sm' }, 'hidden md:inline-flex')}
+            download
+          >
+            导出 JSONL
+          </a>
         </div>
       </div>
       <div aria-busy={stale || undefined} className={cn('min-h-0 flex-1 overflow-auto bg-card', stale && 'opacity-40 transition-opacity')}>
@@ -420,11 +416,9 @@ function CrossLinks({ service, win, hasMetrics }: { service?: string; win: { fro
       <Link to={tracesHref({ service, sort: 'duration', kinds: 'Server,Consumer' }, win)} className={buttonClass({ size: 'xs' })}>
         最慢的链路
       </Link>
-      <Hint text="这个服务在报哪几种错，按次数排" asChild>
-        <Link to={errorsHref({ service }, win)} className={buttonClass({ size: 'xs' })}>
-          错误分组
-        </Link>
-      </Hint>
+      <Link to={errorsHref({ service }, win)} className={buttonClass({ size: 'xs' })}>
+        错误分组
+      </Link>
       <Link to={tracesHref({ service, errorOnly: true }, win)} className={buttonClass({ size: 'xs' })}>
         出错的链路
       </Link>

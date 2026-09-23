@@ -121,11 +121,9 @@ export function TracesPage() {
           >
             错误日志
           </Link>
-          <Hint text="这个服务在报哪几种错，按次数排" asChild>
-            <Link to={errorsHref({ service: filter.service }, { fromMs: range.fromMs, toMs: range.toMs })} className={buttonClass({ size: 'xs' })}>
-              错误分组
-            </Link>
-          </Hint>
+          <Link to={errorsHref({ service: filter.service }, { fromMs: range.fromMs, toMs: range.toMs })} className={buttonClass({ size: 'xs' })}>
+            错误分组
+          </Link>
           <Link to={serviceHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })} className={buttonClass({ size: 'xs' })}>
             服务概览
           </Link>

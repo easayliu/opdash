@@ -120,11 +120,9 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
               {/* 整行可点是给鼠标的；键盘和读屏走这个按钮（见 LogTable 的 DisclosureToggle） */}
               <DisclosureToggle open={open} controls={detailId} onToggle={() => toggle(key)} className="mt-px shrink-0" />
               <span className="mono shrink-0 text-2xs text-muted-fg tabular-nums">{formatTs(r.ts_ms, { date: false })}</span>
-              <Hint text={r.level}>
-                <span className="mono w-11 shrink-0 text-2xs uppercase" style={{ color: levelColor(r.level) }}>
-                  {(r.level || '-').slice(0, 5)}
-                </span>
-              </Hint>
+              <span className="mono w-11 shrink-0 text-2xs uppercase" style={{ color: levelColor(r.level) }}>
+                {(r.level || '-').slice(0, 5)}
+              </span>
               {cols[0] && (
                 <Hint text={dimValue(r, cols[0])}>
                   <span className="mono w-32 shrink-0 truncate text-2xs text-muted-fg">
@@ -187,7 +185,7 @@ export function LogStream({ rows, dims, highlight, onContext, onPivot, emptyText
       {padBottom > 0 && <div style={{ height: padBottom }} />}
       {!atBottom && (
         <div className="sticky bottom-3 z-[1] flex justify-center">
-          <Button size="sm" onClick={toBottom} title="回到底部，继续跟着新日志滚">
+          <Button size="sm" onClick={toBottom}>
             <ArrowDownIcon className="size-4" />
             回到底部
           </Button>
