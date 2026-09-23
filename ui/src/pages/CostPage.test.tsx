@@ -194,6 +194,25 @@ describe('费用页', () => {
     expect(await screen.findByText('12.34')).toBeInTheDocument()
   })
 
+  it('下拉一律用筛选栏的自绘下拉，不再弹系统原生菜单', async () => {
+    stubApi()
+    const { container } = page()
+    await screen.findByText('2026-09 花费')
+    expect(container.querySelector('select')).toBeNull()
+
+    // 云筛选：第一项是「全部云」，选中某一朵云后触发器描成强调色，表示筛选生效
+    await userEvent.click(screen.getByRole('button', { name: '按云筛选' }))
+    const options = screen.getAllByRole('option').map((o) => o.textContent)
+    expect(options).toEqual(['全部云', '火山引擎', '阿里云'])
+    await userEvent.click(screen.getByRole('option', { name: '阿里云' }))
+    const trigger = screen.getByRole('button', { name: '按云筛选' })
+    expect(trigger).toHaveTextContent('阿里云')
+    expect(trigger.className).toContain('border-accent')
+
+    // 账期这类永远有值的下拉不亮：它不是「正在生效的筛选」
+    expect(screen.getByRole('button', { name: '起始账期' }).className).not.toContain('border-accent')
+  })
+
   it('点排行里的一项就把它加成筛选条件', async () => {
     stubApi()
     page()

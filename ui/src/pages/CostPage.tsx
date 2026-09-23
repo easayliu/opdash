@@ -6,7 +6,7 @@ import { CostAnalysis } from '@/components/CostAnalysis'
 import type { BillAmount, BillPoint, BillProvider } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
 import { StackedBars } from '@/components/charts/StackedBars'
-import { Badge, Card, EmptyState, ErrorBox, Hint, Input, Select, Spinner, buttonClass } from '@/components/ui'
+import { Badge, Card, Combobox, EmptyState, ErrorBox, Hint, Input, Spinner, buttonClass } from '@/components/ui'
 import {
   AMOUNTS,
   DIMENSIONS,
@@ -176,19 +176,17 @@ export function CostPage() {
             </Hint>
           )}
         {(bills?.providers.length ?? 0) > 1 && (
-            <Select
+            <Combobox
               value={provider}
-              onChange={(e) => set({ provider: e.target.value || null, page: null })}
-              className="h-8 text-xs"
-              aria-label="按云筛选"
-            >
-              <option value="">全部云</option>
-              {bills?.providers.map((p) => (
-                <option key={p} value={p}>
-                  {PROVIDER_LABELS[p]}
-                </option>
-              ))}
-            </Select>
+              onChange={(v) => set({ provider: v || null, page: null })}
+              options={(bills?.providers ?? []).map((p) => ({ value: p, label: PROVIDER_LABELS[p] }))}
+              placeholder="全部云"
+              searchPlaceholder="筛云…"
+              emptyText="没有匹配的云"
+              title="按云筛选"
+              size="sm"
+              className="w-28"
+            />
           )}
           <span className="relative">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
@@ -308,13 +306,17 @@ export function CostPage() {
             <Card
               title={`按${DIMENSIONS.find((d) => d.value === by)?.label}排行`}
               extra={
-                <Select value={by} onChange={(e) => set({ by: e.target.value === 'product' ? null : e.target.value })} className="h-8 text-xs" aria-label="排行维度">
-                  {DIMENSIONS.map((d) => (
-                    <option key={d.value} value={d.value}>
-                      {d.label}
-                    </option>
-                  ))}
-                </Select>
+                <Combobox
+                  value={by}
+                  onChange={(v) => set({ by: v === 'product' ? null : v })}
+                  options={DIMENSIONS}
+                  clearable={false}
+                  searchPlaceholder="筛维度…"
+                  emptyText="没有匹配的维度"
+                  title="排行维度"
+                  size="sm"
+                  className="w-32"
+                />
               }
             >
               {breakdown.isError && <ErrorBox error={breakdown.error} onRetry={() => breakdown.refetch()} />}
@@ -340,15 +342,19 @@ export function CostPage() {
                     </span>
                   )}
                   {bills?.alicloud_daily && bills.alicloud_monthly && (!provider || provider === 'alicloud') && (
-                    <Select
+                    <Combobox
                       value={params.get('gran') ?? 'monthly'}
-                      onChange={(e) => set({ gran: e.target.value === 'monthly' ? null : e.target.value, page: null })}
-                      className="h-8 text-xs"
-                      aria-label="阿里云明细粒度"
-                    >
-                      <option value="monthly">月度</option>
-                      <option value="daily">日度</option>
-                    </Select>
+                      onChange={(v) => set({ gran: v === 'monthly' ? null : v, page: null })}
+                      options={[
+                        { value: 'monthly', label: '月度' },
+                        { value: 'daily', label: '日度' },
+                      ]}
+                      clearable={false}
+                      searchPlaceholder="筛粒度…"
+                      title="阿里云明细粒度"
+                      size="sm"
+                      className="w-24"
+                    />
                   )}
                   <Hint text="导出当前筛选条件下的明细 CSV" asChild>
                     <a href={apiUrl('/bills/export', { ...base, granularity: params.get('gran') || undefined, format: 'csv' })} className={buttonClass({ size: 'sm' })} download>
@@ -652,33 +658,33 @@ function PeriodPicker({
 }) {
   // 库中尚无账期（还未同步）时给一个空壳，避免选择器无故消失
   const options = known.length ? known : [to].filter(Boolean)
+  // 最近的账期排在最前：要改的多半是最近几个月，不用滚到底
+  const periodOptions = [...options].reverse().map((p) => ({ value: p }))
   return (
     <span className="flex items-center gap-1 text-xs text-muted-fg">
-      <Select
+      <Combobox
         value={from}
-        onChange={(e) => onChange({ from_period: e.target.value, to_period: e.target.value > to ? e.target.value : to })}
-        className="h-8 text-xs"
-        aria-label="起始账期"
-      >
-        {options.map((p) => (
-          <option key={p} value={p}>
-            {p}
-          </option>
-        ))}
-      </Select>
+        onChange={(v) => onChange({ from_period: v, to_period: v > to ? v : to })}
+        options={periodOptions}
+        clearable={false}
+        searchPlaceholder="筛账期…"
+        emptyText="没有匹配的账期"
+        title="起始账期"
+        size="sm"
+        className="w-28"
+      />
       <span>至</span>
-      <Select
+      <Combobox
         value={to}
-        onChange={(e) => onChange({ from_period: e.target.value < from ? e.target.value : from, to_period: e.target.value })}
-        className="h-8 text-xs"
-        aria-label="结束账期"
-      >
-        {options.map((p) => (
-          <option key={p} value={p}>
-            {p}
-          </option>
-        ))}
-      </Select>
+        onChange={(v) => onChange({ from_period: v < from ? v : from, to_period: v })}
+        options={periodOptions}
+        clearable={false}
+        searchPlaceholder="筛账期…"
+        emptyText="没有匹配的账期"
+        title="结束账期"
+        size="sm"
+        className="w-28"
+      />
     </span>
   )
 }

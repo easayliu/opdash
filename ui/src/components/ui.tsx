@@ -502,6 +502,12 @@ export interface ComboOption {
 /**
  * 带搜索的下拉。选项上百的地方（服务、pod、接口、指标名）用它，原生 `<select>` 只能靠首字母跳，
  * 找一个名字要滚半天。选项只有几个的（排序、步长、对比区间）继续用 `Select`。
+ *
+ * 费用页整页都用它：那一页的下拉与筛选栏挨在一起，一半是系统弹出的原生菜单、一半是这种卡片式
+ * 菜单，看上去像两个产品。
+ *
+ * `clearable`（默认开）：第一项是「全部」，选中别的值时触发器描成强调色，表示这个筛选正在生效。
+ * 关掉它就是一个普通的「选一个」——账期、排行维度这类永远有值，不该一直亮着。
  */
 export function Combobox({
   value,
@@ -518,6 +524,8 @@ export function Combobox({
   clearable = true,
   variant = 'default',
   trigger,
+  size = 'md',
+  floating = false,
 }: {
   value: string
   options: ComboOption[]
@@ -540,14 +548,22 @@ export function Combobox({
   variant?: 'default' | 'inline'
   /** inline 时触发器上的图标（默认漏斗） */
   trigger?: ReactNode
+  /** `sm`：与 `h-8 text-xs` 的工具栏控件对齐（费用页顶栏） */
+  size?: 'md' | 'sm'
+  /**
+   * 菜单按触发器在屏幕上的位置 fixed 定位（`inline` 本来就是这样），不受外层 `overflow` 裁切。
+   * 放在对话框这类 `overflow-hidden` 的容器里时要开：默认的绝对定位会被容器切掉下半截
+   */
+  floating?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [cursor, setCursor] = useState(0)
   const [alignRight, setAlignRight] = useState(false)
   // inline 变体的菜单锚点：触发器的屏幕坐标（打开那一刻量的）
-  const [anchor, setAnchor] = useState<{ top: number; left: number; right: number } | null>(null)
+  const [anchor, setAnchor] = useState<{ top: number; left: number; right: number; width: number } | null>(null)
   const inline = variant === 'inline'
+  const fixed = inline || floating
   const box = useRef<HTMLDivElement>(null)
   const listBox = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -598,7 +614,7 @@ export function Combobox({
     const rect = box.current?.getBoundingClientRect()
     // 靠右的下拉（页头那几个）往左展开，不然超出屏幕
     setAlignRight(!!rect && rect.left + COMBO_MENU_W > window.innerWidth)
-    setAnchor(rect ? { top: rect.bottom, left: rect.left, right: window.innerWidth - rect.right } : null)
+    setAnchor(rect ? { top: rect.bottom, left: rect.left, right: window.innerWidth - rect.right, width: rect.width } : null)
     setQ('')
     // 清了搜索词，高亮直接按未筛选的列表算（clearable 的话前面还多一行「全部」）
     const idx = options.findIndex((o) => o.value === value) + (clearable ? 1 : 0)
@@ -667,8 +683,12 @@ export function Combobox({
         className={cn(
           inline
             ? 'flex min-w-0 max-w-full items-center gap-0.5 rounded hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25 disabled:cursor-not-allowed disabled:opacity-50'
-            : 'flex h-9 w-full items-center gap-1.5 rounded-md border border-input bg-card px-2.5 text-left text-sm text-fg focus:border-brand focus:ring-2 focus:ring-brand/25 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
-          value && (inline ? 'text-accent hover:text-accent' : 'border-accent text-accent'),
+            : cn(
+                'flex w-full items-center gap-1.5 rounded-md border border-input bg-card px-2.5 text-left text-fg focus:border-brand focus:ring-2 focus:ring-brand/25 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+                size === 'sm' ? 'h-8 text-xs' : 'h-9 text-sm',
+              ),
+          // 只有「可清空的筛选」选了值才亮：它表示这一项正在收窄结果
+          value && clearable && (inline ? 'text-accent hover:text-accent' : 'border-accent text-accent'),
         )}
       >
         {inline ? (
@@ -700,12 +720,14 @@ export function Combobox({
         <div
           className={cn(
             'z-30 w-max rounded-md border border-border bg-card text-fg shadow-lg',
-            inline ? 'fixed min-w-56 text-xs' : 'absolute top-full mt-1 min-w-full',
-            !inline && (alignRight ? 'right-0' : 'left-0'),
+            inline ? 'fixed min-w-56 text-xs' : fixed ? 'fixed' : 'absolute top-full mt-1 min-w-full',
+            !fixed && (alignRight ? 'right-0' : 'left-0'),
           )}
           style={{
             maxWidth: `min(90vw, ${COMBO_MENU_W}px)`,
-            ...(inline && anchor ? { top: anchor.top + 4, ...(alignRight ? { right: anchor.right } : { left: anchor.left }) } : {}),
+            ...(fixed && anchor ? { top: anchor.top + 4, ...(alignRight ? { right: anchor.right } : { left: anchor.left }) } : {}),
+            // floating 保持「至少和触发器一样宽」，与默认的 min-w-full 一致
+            ...(floating && !inline && anchor ? { minWidth: anchor.width } : {}),
           }}
         >
           <div className="border-b border-border p-1.5">

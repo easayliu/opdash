@@ -4,7 +4,7 @@ import { CloudDownloadIcon, XIcon } from 'lucide-react'
 import { ApiError, apiDelete, apiGet, apiPost } from '@/api/client'
 import { useBillSyncProgress } from '@/api/sync'
 import type { BillProvider, BillSyncProgress, BillSyncRunning, BillSyncStarted, BillSyncTask } from '@/api/types'
-import { Button, Hint, ModalPanel, Select, Spinner } from '@/components/ui'
+import { Button, Combobox, Hint, ModalPanel, Spinner } from '@/components/ui'
 import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
 
 /**
@@ -230,16 +230,23 @@ export function BillSyncDialog({
         </header>
 
         <form onSubmit={submit} className="flex flex-col gap-3 px-4 py-3 text-xs">
-          <label className="flex items-center gap-2">
-            <span className="w-16 shrink-0 text-muted-fg">云</span>
-            <Select value={provider} onChange={(e) => setProvider(e.target.value as BillProvider)} className="h-8 flex-1 text-xs" disabled={!!started}>
-              {providers.map((p) => (
-                <option key={p} value={p}>
-                  {PROVIDER_LABELS[p]}
-                </option>
-              ))}
-            </Select>
-          </label>
+          <div className="flex items-center gap-2">
+            <span className="w-16 shrink-0 text-muted-fg" aria-hidden="true">
+              云
+            </span>
+            <Combobox
+              value={provider}
+              onChange={(v) => setProvider(v as BillProvider)}
+              options={providers.map((p) => ({ value: p, label: PROVIDER_LABELS[p] }))}
+              clearable={false}
+              searchPlaceholder="筛云…"
+              title="云"
+              disabled={!!started}
+              size="sm"
+              floating
+              className="flex-1"
+            />
+          </div>
           <label className="flex items-center gap-2">
             <span className="w-16 shrink-0 text-muted-fg">账期</span>
             <input
@@ -264,16 +271,23 @@ export function BillSyncDialog({
             </span>
           </label>
           {provider === 'alicloud' && (
-            <label className="flex items-center gap-2">
-              <span className="w-16 shrink-0 text-muted-fg">粒度</span>
-              <Select value={granularity} onChange={(e) => setGranularity(e.target.value)} className="h-8 flex-1 text-xs" disabled={!!started}>
-                {GRANULARITIES.map((g) => (
-                  <option key={g.value} value={g.value}>
-                    {g.label}
-                  </option>
-                ))}
-              </Select>
-            </label>
+            <div className="flex items-center gap-2">
+              <span className="w-16 shrink-0 text-muted-fg" aria-hidden="true">
+                粒度
+              </span>
+              <Combobox
+                value={granularity}
+                onChange={setGranularity}
+                options={GRANULARITIES}
+                clearable={false}
+                searchPlaceholder="筛粒度…"
+                title="粒度"
+                disabled={!!started}
+                size="sm"
+                floating
+                className="flex-1"
+              />
+            </div>
           )}
           <Hint text="不勾选时，goscan 遇到已有数据的账期会跳过；补数据或云厂商调整过账单时请勾选">
             <label className="flex items-center gap-2">

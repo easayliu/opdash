@@ -16,14 +16,14 @@ import { useMemo, useState } from 'react'
 import { ChevronRightIcon } from 'lucide-react'
 import { useBillAllocation } from '@/api/queries'
 import type { BillAllocItem, BillAllocLine, BillAllocPoint, BillsMeta } from '@/api/types'
-import { Card, EmptyState, ErrorBox, Hint, Select, Spinner } from '@/components/ui'
+import { Card, Combobox, EmptyState, ErrorBox, Hint, Spinner } from '@/components/ui'
 import { PROVIDER_LABELS, daysInMonth, dayTick, formatMoney, formatMoneyShort, periodTick, shiftPeriod } from '@/lib/bills'
 import { seriesVar } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 
-/** 日均按多长的窗口算。空串 = 所选账期全部 */
+/** 日均按多长的窗口算。`all` = 所选账期全部（URL 上不写 `days`） */
 const WINDOWS = [
-  { value: '', label: '所选账期' },
+  { value: 'all', label: '所选账期' },
   { value: '7', label: '最近 7 天' },
   { value: '14', label: '最近 14 天' },
   { value: '30', label: '最近 30 天' },
@@ -88,18 +88,16 @@ export function CostAnalysis({
         <Hint text="日均 = 该区间的花费 ÷ 有账单的天数。取「最近 7 天」可避开月初扩容等早期波动，更贴近当前水位">
           <span className="text-xs text-muted-fg">日均口径</span>
         </Hint>
-        <Select
-          value={days}
-          onChange={(e) => onChange({ days: e.target.value || null })}
-          className="h-8 text-xs"
-          aria-label="日均按多长的窗口计算"
-        >
-          {WINDOWS.map((w) => (
-            <option key={w.value} value={w.value}>
-              {w.label}
-            </option>
-          ))}
-        </Select>
+        <Combobox
+          value={days || 'all'}
+          onChange={(v) => onChange({ days: v === 'all' ? null : v })}
+          options={WINDOWS}
+          clearable={false}
+          searchPlaceholder="筛口径…"
+          title="日均按多长的窗口计算"
+          size="sm"
+          className="w-28"
+        />
         <Hint
           text={
             prepaid
@@ -109,18 +107,18 @@ export function CostAnalysis({
         >
           <span className="ml-2 text-xs text-muted-fg">预估</span>
         </Hint>
-        <Select
+        <Combobox
           value={estimate}
-          onChange={(e) => onChange({ est: e.target.value })}
-          className="h-8 text-xs"
-          aria-label="预估哪个月"
-        >
-          {[base.to ?? '', shiftPeriod(base.to ?? '', 1)].filter(Boolean).map((p) => (
-            <option key={p} value={p}>
-              {p}（{daysInMonth(p)} 天）
-            </option>
-          ))}
-        </Select>
+          onChange={(v) => onChange({ est: v })}
+          options={[base.to ?? '', shiftPeriod(base.to ?? '', 1)]
+            .filter(Boolean)
+            .map((p) => ({ value: p, label: `${p}（${daysInMonth(p)} 天）` }))}
+          clearable={false}
+          searchPlaceholder="筛月份…"
+          title="预估哪个月"
+          size="sm"
+          className="w-36"
+        />
         {alloc.isFetching && <Spinner className="size-4" />}
       </div>
 

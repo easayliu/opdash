@@ -77,12 +77,14 @@ describe('拉取账单对话框', () => {
     expect(await screen.findByText('共 6 个账期、12 趟')).toBeInTheDocument()
 
     // 只要一种粒度就是一个账期一趟，这时候再报趟数是噪声
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: '粒度' }), 'monthly')
+    await userEvent.click(screen.getByRole('button', { name: '粒度' }))
+    await userEvent.click(screen.getByRole('option', { name: '只要月度' }))
     expect(screen.getByText('共 6 个账期')).toBeInTheDocument()
 
     // 火山只有一张表，粒度这一项根本不出现
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: '云' }), 'volcengine')
-    expect(screen.queryByRole('combobox', { name: '粒度' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '云' }))
+    await userEvent.click(screen.getByRole('option', { name: '火山引擎' }))
+    expect(screen.queryByRole('button', { name: '粒度' })).not.toBeInTheDocument()
     expect(screen.getByText('共 6 个账期')).toBeInTheDocument()
   })
 
