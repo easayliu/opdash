@@ -70,9 +70,17 @@ Element.prototype.scrollIntoView = () => {}
 /**
  * 观察者一挂上就回一次结果，jsdom 里没有任何东西会自己触发。同步回一次给挂载那一轮用，
  * 再异步回一次触发重渲染——虚拟列表是在第二轮才把行画出来的。
+ *
+ * **断开之后不能再回调**，和真的 ResizeObserver 一样。原来 disconnect 是空的：气泡（floating-ui）
+ * 卸载时断开观察，那次延后的回调却照样触发；恰逢测试文件的最后一个用例，它就落在 jsdom 拆掉之后，
+ * `getComputedStyle` 已不存在，CI 上报成「未处理的错误」，整轮判失败
  */
 class Observer {
-  constructor(private cb: (entries: unknown[], obs: unknown) => void) {}
+  private timers = new Set<ReturnType<typeof setTimeout>>()
+  private watching = new Set<Element>()
+  constructor(private cb: (entries: unknown[], obs: unknown) => void) {
+    live.add(this)
+  }
   observe(el: Element) {
     const { width, height } = sizeOf(el)
     const entry = {
@@ -81,14 +89,34 @@ class Observer {
       contentRect: { width, height, top: 0, left: 0, x: 0, y: 0 },
       borderBoxSize: [{ inlineSize: width, blockSize: height }],
     }
+    this.watching.add(el)
     this.cb([entry], this)
-    setTimeout(() => this.cb([entry], this), 0)
+    const timer = setTimeout(() => {
+      this.timers.delete(timer)
+      if (this.watching.has(el)) this.cb([entry], this)
+    }, 0)
+    this.timers.add(timer)
   }
-  unobserve() {}
-  disconnect() {}
+  unobserve(el: Element) {
+    this.watching.delete(el)
+  }
+  disconnect() {
+    this.watching.clear()
+    for (const t of this.timers) clearTimeout(t)
+    this.timers.clear()
+    live.delete(this)
+  }
   takeRecords() {
     return []
   }
 }
+/**
+ * 每个用例结束都把还挂着的观察者全部断开：组件没被卸载干净时，它们的延后回调也不会漏到用例之外。
+ * 这类错误只在慢机器上、时序凑巧时才冒出来（本地复现不了，CI 上碰到过），所以不指望时序，直接清场
+ */
+const live = new Set<Observer>()
+afterEach(() => {
+  for (const o of [...live]) o.disconnect()
+})
 vi.stubGlobal('ResizeObserver', Observer)
 vi.stubGlobal('IntersectionObserver', Observer)
