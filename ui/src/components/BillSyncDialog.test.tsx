@@ -31,6 +31,10 @@ function dialog() {
 
 describe('拉取账单对话框', () => {
   it('goscan 报了进度就画确定进度条，并说明这一趟写哪张表', async () => {
+    // 把「此刻」钉住：已用时是渲染时现算的，CI 的机器慢，打桩到断言之间走过的一两秒
+    // 会让「1 分 15 秒」变成「1 分 17 秒」
+    const NOW = Date.parse('2026-09-23T08:00:00Z')
+    const now = vi.spyOn(Date, 'now').mockReturnValue(NOW)
     stubApi({
       id: 't-1',
       status: 'running',
@@ -40,7 +44,7 @@ describe('拉取账单对话框', () => {
       records: 0,
       fetched: 0,
       message: '',
-      started_at: new Date(Date.now() - 75_000).toISOString(),
+      started_at: new Date(NOW - 75_000).toISOString(),
       progress: { period: '2026-06', granularity: 'daily', periods_done: 2, periods_total: 6 },
     })
     dialog()
@@ -52,6 +56,7 @@ describe('拉取账单对话框', () => {
     expect(await screen.findByText(/2 \/ 6 趟 · 正在拉 2026-06 日度/)).toBeInTheDocument()
     // 已用时按服务端给的开始时间算
     expect(await screen.findByText(/已用 1 分 15 秒/)).toBeInTheDocument()
+    now.mockRestore()
   })
 
   it('goscan 不报进度时退回不确定进度条，不编百分比', async () => {
