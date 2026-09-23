@@ -41,6 +41,23 @@ const OPTIONS = [
 ]
 
 describe('Combobox', () => {
+  // 拉取账单对话框里出过的事：打开菜单时 scrollIntoView / focus 顺带滚动了对话框本身，
+  // 对话框是 overflow-hidden，整块内容被推出可视区，只剩一片空白
+  it('打开菜单、上下移动高亮时只滚菜单自己的列表，不去滚动外面的容器', async () => {
+    const user = userEvent.setup()
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView')
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    render(<Combobox value="" options={OPTIONS} onChange={() => {}} placeholder="全部服务" floating />)
+    await user.click(screen.getByRole('button'))
+    await user.keyboard('{ArrowDown}{ArrowDown}{End}')
+    expect(scrolled).not.toHaveBeenCalled()
+    // 聚焦搜索框时不许顺带滚动祖先
+    const input = screen.getByRole('combobox')
+    expect(focus.mock.contexts.some((el, i) => el === input && (focus.mock.calls[i][0] as FocusOptions | undefined)?.preventScroll)).toBe(true)
+    scrolled.mockRestore()
+    focus.mockRestore()
+  })
+
   it('End 跳到最后一项，Home 跳回第一项', async () => {
     const user = userEvent.setup()
     render(<Combobox value="" options={OPTIONS} onChange={() => {}} placeholder="全部服务" />)

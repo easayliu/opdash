@@ -212,7 +212,7 @@ export function BillSyncDialog({
         open
         onOpenChange={(next) => !next && onClose()}
         labelledBy="bill-sync-title"
-        className="fixed inset-x-3 top-24 z-50 mx-auto flex max-h-[calc(100dvh-8rem)] max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl md:inset-x-auto md:left-1/2 md:w-[32rem] md:-translate-x-1/2"
+        className="fixed inset-x-3 top-24 z-50 mx-auto flex max-h-[calc(100dvh-8rem)] max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl md:inset-x-0 md:w-[32rem]"
       >
         <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3">
           <CloudDownloadIcon className="mt-0.5 size-4 shrink-0 text-muted-fg" />

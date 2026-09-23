@@ -552,7 +552,10 @@ export function Combobox({
   size?: 'md' | 'sm'
   /**
    * 菜单按触发器在屏幕上的位置 fixed 定位（`inline` 本来就是这样），不受外层 `overflow` 裁切。
-   * 放在对话框这类 `overflow-hidden` 的容器里时要开：默认的绝对定位会被容器切掉下半截
+   * 放在对话框这类 `overflow-hidden` 的容器里时要开：默认的绝对定位会被容器切掉下半截。
+   *
+   * **前提是祖先里没有 `transform`**：带 transform 的祖先会成为 fixed 的定位基准，菜单于是相对
+   * 它定位、照样被它裁掉。对话框的水平居中因此用 `mx-auto`，不用 `-translate-x-1/2`
    */
   floating?: boolean
 }) {
@@ -587,7 +590,9 @@ export function Combobox({
 
   useEffect(() => {
     if (!open) return
-    input.current?.focus()
+    // preventScroll：聚焦默认会把输入框滚进视野，顺带滚动它所有的祖先——在对话框这类
+    // overflow-hidden 的容器里，整块内容会被推出可视区，只剩一片空白
+    input.current?.focus({ preventScroll: true })
     // 点外面关：人已经把焦点送到别处了，别再抢回触发器
     const onClick = (e: MouseEvent) => {
       if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
@@ -595,18 +600,29 @@ export function Combobox({
     document.addEventListener('mousedown', onClick)
     // fixed 定位的菜单跟不上外层滚动，滚了就收起来
     const onScroll = (e: Event) => {
-      if (inline && !listBox.current?.contains(e.target as Node)) setOpen(false)
+      if (fixed && !listBox.current?.contains(e.target as Node)) setOpen(false)
     }
     document.addEventListener('scroll', onScroll, true)
     return () => {
       document.removeEventListener('mousedown', onClick)
       document.removeEventListener('scroll', onScroll, true)
     }
-  }, [open, inline])
+  }, [open, fixed])
 
-  // 键盘上下移动时把高亮那行带进视口；刚打开时也要滚到当前选中那行
+  /**
+   * 键盘上下移动时把高亮那行带进视口；刚打开时也要滚到当前选中那行。
+   *
+   * **只滚菜单自己的列表**，不用 `scrollIntoView`：它会滚动所有可滚动的祖先，对话框虽是
+   * overflow-hidden 也照样能被程序滚动，整块内容被推出可视区（拉取账单对话框里出过这事）。
+   */
   useEffect(() => {
-    if (open) listBox.current?.children[cursor]?.scrollIntoView({ block: 'nearest' })
+    const list = listBox.current
+    const row = list?.children[cursor] as HTMLElement | undefined
+    if (!open || !list || !row) return
+    if (row.offsetTop < list.scrollTop) list.scrollTop = row.offsetTop
+    else if (row.offsetTop + row.offsetHeight > list.scrollTop + list.clientHeight) {
+      list.scrollTop = row.offsetTop + row.offsetHeight - list.clientHeight
+    }
   }, [cursor, open])
 
   const openMenu = () => {
