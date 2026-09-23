@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BillSyncDialog } from './BillSyncDialog'
+import { BillSyncDialog, Elapsed } from './BillSyncDialog'
 
 const STARTED = { task_id: 't-1', provider: 'alicloud', from: '2026-04', to: '2026-09', message: 'Sync triggered' }
 
@@ -107,5 +107,19 @@ describe('拉取账单对话框', () => {
     expect(await screen.findByText(/写入 1,200 条/)).toBeInTheDocument()
     const bar = await screen.findByRole('progressbar', { name: '账单拉取进度' })
     expect(bar).toHaveAttribute('aria-valuenow', '6')
+  })
+
+  it('已用时每秒自己走，不等轮询；任务结束后停表', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.parse('2026-09-23T08:00:00Z'))
+    const { rerender } = render(<Elapsed startedAt="2026-09-23T08:00:00Z" />)
+    expect(screen.getByText('已用 0 秒')).toBeInTheDocument()
+    act(() => vi.advanceTimersByTime(3000))
+    expect(screen.getByText('已用 3 秒')).toBeInTheDocument()
+    // 结束之后显示服务端给的定值，钟也不再走
+    rerender(<Elapsed startedAt="2026-09-23T08:00:00Z" endedAt="2026-09-23T08:01:05Z" />)
+    act(() => vi.advanceTimersByTime(5000))
+    expect(screen.getByText('已用 1 分 5 秒')).toBeInTheDocument()
+    vi.useRealTimers()
   })
 })

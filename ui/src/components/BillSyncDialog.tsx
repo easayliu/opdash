@@ -22,13 +22,30 @@ import { PROVIDER_LABELS, periodsBetween } from '@/lib/bills'
  * 账期内翻了几页拿不到——那是各家 SDK 包装里的事，只进了日志。所以拉一个月的月度账单看到的是
  * 「0 / 1 → 1 / 1」，拉半年的月度加日度才有细腻的刻度；goscan 版本旧到不报进度时退回不确定进度条。
  */
-/** 已用时：`1 分 12 秒`。任务在服务端跑，这里按它的开始时间算，轮询一次刷新一次 */
+/** 已用时：`1 分 12 秒`。任务在服务端跑，这里按它的开始时间算 */
 function elapsed(startedAt: string | undefined, endedAt: string | undefined): string {
   if (!startedAt) return ''
   const from = new Date(startedAt).getTime()
   const to = endedAt ? new Date(endedAt).getTime() : Date.now()
   const seconds = Math.max(0, Math.round((to - from) / 1000))
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+}
+
+/**
+ * 已用时，任务未结束时每秒走一次。
+ *
+ * 不能指望轮询带动刷新：轮询回来的状态若与上次相同（进度还停在同一趟），react-query 会沿用
+ * 旧对象、组件不重新渲染，已用时就一直停在「0 秒」。所以自己起一个一秒的钟，任务结束即停表，
+ * 此后按服务端给的结束时间显示定值。
+ */
+export function Elapsed({ startedAt, endedAt }: { startedAt: string; endedAt?: string }) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    if (endedAt) return
+    const timer = setInterval(() => tick((n) => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [endedAt])
+  return <span className="tabular-nums">已用 {elapsed(startedAt, endedAt)}</span>
 }
 
 /**
@@ -235,7 +252,7 @@ export function BillSyncDialog({
                     {pulling(task.data.progress) && ` · 正在拉 ${pulling(task.data.progress)}`}
                   </span>
                 )}
-                {task.data?.started_at && <span className="tabular-nums">已用 {elapsed(task.data.started_at, task.data.ended_at)}</span>}
+                {task.data?.started_at && <Elapsed startedAt={task.data.started_at} endedAt={task.data.ended_at} />}
               </p>
               {task.data?.done && task.data.ok && (
                 <p className="mt-1 text-2xs text-muted-fg">
