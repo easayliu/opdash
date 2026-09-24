@@ -270,7 +270,21 @@ impl Mysql {
         tracing::debug!(source = %src.name, sql = %sql::one_line(&stmt), "数据源查询");
         let table = self
             .with_session(src, opts.database.as_deref(), opts.limit, async |s| {
-                s.fetch_text(&stmt, opts.limit).await.map_err(|e| self.err(src, e))
+                match s.fetch_text(&stmt, opts.limit).await {
+                    Ok(t) => Ok(t),
+                    // 超时了就在同一个会话里补一次 EXPLAIN（只生成计划、不执行，毫秒级），把
+                    // 「没走索引、扫了多少行」直接交给模型。否则它只知道超时，得自己再猜一轮：
+                    // 线上就有过字符串列拿数字比较、索引失效扫全表，改成带引号后 15 秒变 19 毫秒
+                    Err(mysql_async::Error::Server(se)) if se.code == 3024 || se.code == 1969 => {
+                        let plan = explain_hint(s, &stmt).await;
+                        let mut e = self.err(src, mysql_async::Error::Server(se));
+                        if let (Some(plan), Error::Source { message, .. }) = (plan, &mut e) {
+                            message.push_str(&plan);
+                        }
+                        Err(e)
+                    }
+                    Err(e) => Err(self.err(src, e)),
+                }
             })
             .await?;
         Ok(json!({ "columns": table.columns, "rows": table.rows, "truncated": table.truncated }))
@@ -414,6 +428,58 @@ impl Mysql {
 
 struct Session {
     conn: Conn,
+}
+
+/// 超时语句的执行计划摘要，拼在错误信息后面。只对 SELECT / WITH 做（EXPLAIN 本身超时、
+/// SHOW 没有计划）；EXPLAIN 也失败就什么都不给，不能让补充信息盖掉原来的错误。
+async fn explain_hint(s: &mut Session, stmt: &str) -> Option<String> {
+    let head = stmt.trim_start().get(..6)?.to_ascii_uppercase();
+    if !(head.starts_with("SELECT") || head.starts_with("WITH")) {
+        return None;
+    }
+    let plan = s.fetch_text(&format!("EXPLAIN {stmt}"), 20).await.ok()?;
+    let col = |row: &[Value], name: &str| -> String {
+        match plan.col(name).and_then(|i| row.get(i)) {
+            Some(Value::Null) | None => String::new(),
+            Some(Value::String(v)) => v.clone(),
+            Some(v) => v.to_string(),
+        }
+    };
+    let mut lines = Vec::new();
+    // 整表扫描：type=ALL 是扫全表，type=index 是把整棵索引从头扫到尾（覆盖索引时常见），
+    // 行数一样多。线上那次字符串主键拿数字比较，计划就是 type=index、rows≈400 万，而且
+    // MySQL 把 possible_keys 置空了——类型不一致时它认为索引根本用不上，所以不能靠
+    // 「有可用索引却没用」来认
+    let mut full_scan = false;
+    for row in &plan.rows {
+        let (table, ty, key) = (col(row, "table"), col(row, "type"), col(row, "key"));
+        if ty == "ALL" || ty == "index" {
+            full_scan = true;
+        }
+        lines.push(format!(
+            "{table}：type={ty}，key={}，rows≈{}{}",
+            if key.is_empty() { "无" } else { &key },
+            col(row, "rows"),
+            match col(row, "Extra") {
+                x if x.is_empty() => String::new(),
+                x => format!("，{x}"),
+            }
+        ));
+    }
+    let total = lines.len();
+    lines.truncate(8);
+    let mut out = format!("\n执行计划（EXPLAIN）：{}", lines.join("；"));
+    if total > 8 {
+        out.push_str(&format!("；……共 {total} 步"));
+    }
+    if full_scan {
+        out.push_str(
+            "\ntype=ALL / index 是整表扫描。常见原因：没有命中索引的条件；比较值与列类型不一致\
+             （字符串列拿数字比较，如 varchar 的 id 写成 IN (123) 而不是 IN ('123')）；对索引列套了函数。\
+             先 db_describe 看列类型",
+        );
+    }
+    Some(out)
 }
 
 impl Session {
