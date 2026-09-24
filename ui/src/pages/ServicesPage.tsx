@@ -418,10 +418,13 @@ export function ServicesPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
-        <h1 className="text-base font-semibold">服务</h1>
+        {/* 手机上标题让位：底下的页签已经写着「服务」，省下的一行留给卡片。转圈也一并收起，
+            加载中卡片会变淡、接口明细没回来时分区标题上有字，不缺这个提示 */}
+        <h1 className="text-base font-semibold max-md:sr-only">服务</h1>
         <span className="hidden text-xs text-muted-fg xl:inline">按入口 span（Server / Consumer）算</span>
-        {(q.isFetching || opsPending) && <Spinner className="size-4" />}
-        <span className="ml-auto flex flex-wrap items-center gap-2">
+        {(q.isFetching || opsPending) && <Spinner className="size-4 max-md:hidden" />}
+        {/* 手机上两列对齐排满，桌面上靠右一行排开 */}
+        <span className="grid w-full grid-cols-2 gap-2 md:ml-auto md:flex md:w-auto md:flex-wrap md:items-center">
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <Button size="sm" active={onlyBad} onClick={() => set({ bad: onlyBad ? null : '1' })} disabled={!badCount && !onlyBad}>
             <AlertTriangleIcon className="size-3.5" />
@@ -429,10 +432,10 @@ export function ServicesPage() {
           </Button>
           <span className="relative">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
-            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="搜服务" className="h-8 w-36 pl-8 text-xs" aria-label="搜服务" />
+            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="搜服务" className="h-8 w-full pl-8 text-xs md:w-36" aria-label="搜服务" />
           </span>
           <Hint text="所有变化和哪一段时间比" asChild>
-            <Select value={compare} onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })} className="h-8 text-xs">
+            <Select value={compare} onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })} className="h-8 w-full text-xs md:w-auto">
               {COMPARE.map((c) => (
                 <option key={c.value} value={c.value}>
                   {c.label}
@@ -442,7 +445,7 @@ export function ServicesPage() {
           </Hint>
           {view === 'cards' && (
             <Hint text="卡片顺序" asChild>
-              <Select value={order} onChange={(e) => set({ sort: e.target.value === 'health' ? null : e.target.value })} className="h-8 text-xs">
+              <Select value={order} onChange={(e) => set({ sort: e.target.value === 'health' ? null : e.target.value })} className="h-8 w-full text-xs md:w-auto">
                 {ORDERS.map((o) => (
                   <option key={o.value} value={o.value}>
                     {o.label}
@@ -502,7 +505,9 @@ export function ServicesPage() {
                     )}
                   </AnimatePresence>
                 </h2>
-                <div className={cn('grid gap-3 sm:grid-cols-2 xl:grid-cols-3', q.isFetching && 'opacity-70')}>
+                {/* 单列时也要显式写 `grid-cols-1`（= minmax(0, 1fr)）：不写的话隐式列按内容的最小宽度撑，
+                    卡里那几行 truncate 的长接口名会把整列撑到比屏幕还宽，右边一截被裁掉 */}
+                <div className={cn('grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3', q.isFetching && 'opacity-70')}>
                   {/* 接口明细晚一步回来，卡是一张张冒出来的；搜索、切对比窗口又会让它们成片消失。
                       AnimatePresence 管进出场。**这里不开 `layout`**：网格是二维的，一次冒出好几张卡时
                       每张都从旧格子 FLIP 到新格子，第二行会横着穿插、互相压在一起（实测很难看）。

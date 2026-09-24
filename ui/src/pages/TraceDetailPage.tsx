@@ -8,6 +8,7 @@ import { Badge, Button, Combobox, CopyButton, EmptyState, ErrorBox, Hint, InfoHi
 import { AnimatePresence } from 'motion/react'
 import { SpanPanel, Waterfall, buildTree, rootCauseSpan } from '@/components/Waterfall'
 import { ColorAssigner } from '@/lib/colors'
+import { isMobileNow } from '@/lib/media'
 import { WINDOW_AROUND_MS, around, logsHref, metricsHref, serviceHref } from '@/lib/links'
 import { formatDuration, formatTs, formatTsMicro } from '@/lib/time'
 import { useFromState, useUrlState } from '@/lib/url-state'
@@ -59,7 +60,9 @@ export function TraceDetailPage() {
   if (pinned.current?.trace !== traceId) pinned.current = { trace: traceId, span: selected }
   const detail = useTraceDetail(traceId, params.get('at'), pinned.current.span)
   const logsOnlySpan = params.get('span_logs') === '1'
-  const [showLogs, setShowLogs] = useState(params.get('tab') !== 'none')
+  // 手机上关联日志默认收起：展开时它固定占 40% 的高度，加上顶部的概要，瀑布图只剩三百来像素。
+  // 点「只看这个 span 的日志」或手动展开时照常打开
+  const [showLogs, setShowLogs] = useState(() => params.get('tab') !== 'none' && !isMobileNow())
 
   const spans = detail.data?.spans ?? []
   const tree = useMemo(() => buildTree(spans), [spans])
@@ -311,7 +314,8 @@ export function TraceDetailPage() {
             </Link>
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg md:ml-auto md:gap-x-4">
+        {/* 手机上服务图例排成一行横向滑，五六个服务折成两三行太占地方 */}
+        <div className="-mx-3 flex w-[calc(100%+1.5rem)] items-center gap-x-3 gap-y-1 overflow-x-auto px-3 text-2xs whitespace-nowrap text-muted-fg [scrollbar-width:none] md:mx-0 md:ml-auto md:w-auto md:flex-wrap md:gap-x-4 md:overflow-visible md:px-0 md:whitespace-normal">
           {colors.entries().map(([name, color]) => (
             <Hint text={serviceFilter === name ? '取消只看这个服务的日志' : `只看 ${name} 的日志`} asChild>
               <button

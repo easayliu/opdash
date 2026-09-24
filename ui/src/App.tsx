@@ -221,7 +221,8 @@ export default function App() {
             <span className="flex size-7 items-center justify-center rounded-md bg-brand text-white">
               <ActivityIcon className="size-4" />
             </span>
-            <span className="text-base font-semibold tracking-tight">opdash</span>
+            {/* 极窄屏（< 360px）只留图标，右边那组按钮才不会被挤到第二行 */}
+            <span className="text-base font-semibold tracking-tight max-[359px]:sr-only">opdash</span>
           </NavLink>
           <nav className="order-last -mx-3 flex h-10 w-[calc(100%+1.5rem)] items-stretch border-t border-border md:order-none md:mx-0 md:h-auto md:w-auto md:gap-1 md:border-t-0">
             {nav.map(({ to, label, icon: Icon }) => (
@@ -230,14 +231,16 @@ export default function App() {
                 to={to}
                 className={({ isActive }) =>
                   cn(
-                    'cf-tab flex flex-1 items-center justify-center gap-1.5 px-3 text-sm font-medium text-muted-fg hover:text-fg md:flex-none',
+                    // 手机上六个页签平分一行，每格只有 60px 出头：内边距收到最小、不许折行，
+                    // 否则「服务」会被挤成上下两个字；再窄（< 360px）连图标一起让掉
+                    'cf-tab flex flex-1 items-center justify-center gap-1 px-1 text-sm font-medium whitespace-nowrap text-muted-fg hover:text-fg md:flex-none md:gap-1.5 md:px-3',
                     isActive && 'text-fg',
                   )
                 }
               >
                 {({ isActive }) => (
-                  <span className="cf-tab flex h-full items-center gap-1.5" data-active={isActive ? 'true' : undefined}>
-                    <Icon className="size-4" />
+                  <span className="cf-tab flex h-full items-center gap-1 md:gap-1.5" data-active={isActive ? 'true' : undefined}>
+                    <Icon className="size-4 shrink-0 max-[359px]:hidden" />
                     {label}
                   </span>
                 )}
@@ -253,7 +256,7 @@ export default function App() {
           </div>
         </div>
       </header>
-      <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col overflow-auto">
+      <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col overflow-auto outline-none">
         <AppRoutes />
       </main>
       <footer className="hidden h-8 shrink-0 items-center justify-end gap-3 border-t border-border px-4 text-2xs text-muted-fg md:flex">

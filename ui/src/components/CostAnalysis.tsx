@@ -15,7 +15,7 @@
  * 页尾的「产品费用对比」补上日均看不到的一面：某一天（或近几天）各产品比之前多花或少花了多少。
  */
 import { Fragment, useMemo, useRef, useState } from 'react'
-import { ArrowUpRightIcon, CalendarDaysIcon, ChevronRightIcon, CircleAlertIcon, DownloadIcon, TrendingUpIcon, WalletIcon, XIcon, type LucideIcon } from 'lucide-react'
+import { ArrowUpRightIcon, CalendarDaysIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, DownloadIcon, TrendingUpIcon, WalletIcon, XIcon, type LucideIcon } from 'lucide-react'
 import { useBillAllocation, useBillAllocationDay, useBillProductDays } from '@/api/queries'
 import type { BillAllocDayItem, BillAllocItem, BillAllocLine, BillAllocPoint, BillAllocationResponse, BillProductDaysResponse, BillProvider, BillsMeta } from '@/api/types'
 import { Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Spinner, buttonClass } from '@/components/ui'
@@ -26,6 +26,7 @@ import { AMOUNTS, PROVIDER_LABELS, changeRatio, daysInMonth, dayTick, formatChan
 import { allocSection, allocSections, allocSummary, currentLabel, thisPeriod, type SectionKey } from '@/lib/allocTable'
 import { seriesVar } from '@/lib/colors'
 import { COMPARE_MODES, compare, defaultEnd, endOptions, trend, type CompareMode, type Comparison, type ProductDiff, type Range } from '@/lib/productDays'
+import { useIsMobile } from '@/lib/media'
 import { cn } from '@/lib/utils'
 
 /**
@@ -45,6 +46,13 @@ const lineColor = (order: string[], name: string) => seriesVar(Math.max(0, order
 /** 「按产品」默认列出的项数 */
 const PRODUCT_TOP = 15
 
+/**
+ * 日均窗口与预估账期这两项口径，直接挂在「日均」「预估」两张卡的标签上：点标签里带下划线的
+ * 那段就能换。以前放在页头与共用筛选排成一排，但它们只管这两个数（以及拆分表里跟着走的日均、
+ * 预估两列），和账期、云厂商那种「整页看哪些账单」的条件不是一类；手机上还凭空多占两行。
+ */
+const PARAM_CLASS = 'text-fg underline decoration-dotted decoration-muted-fg/60 underline-offset-2 hover:decoration-fg'
+
 /** 日均按多长的窗口算。`all` = 所选账期全部（URL 上不写 `days`） */
 const WINDOWS = [
   { value: 'all', label: '所选账期' },
@@ -61,6 +69,7 @@ export function CostAnalysis({
   estimate,
   onFilter,
   onDrill,
+  onParams,
 }: {
   /** 与「账单」视图共用的查询条件：账期、金额口径、云、搜索、维度筛选 */
   base: Record<string, string | undefined>
@@ -68,8 +77,10 @@ export function CostAnalysis({
   bills: BillsMeta
   /** 日均的窗口（`days` 参数），空串表示所选账期全部 */
   days: string
-  /** 预估哪个月，`YYYY-MM`。两项口径的选择器在页头，见 `AnalysisControls` */
+  /** 预估哪个月，`YYYY-MM` */
   estimate: string
+  /** 改日均窗口（`days`）或预估账期（`est`），写到 URL 上 */
+  onParams: (next: Record<string, string | null>) => void
   /** 设置某个维度筛选的一组值，空数组为清除（写到 URL 上，与账单视图同一套条件）；「按产品」的表头筛选用 */
   onFilter: (dim: string, values: string[]) => void
   /** 从按天钻取跳到账单视图的明细：那一天、那朵云、那个产品 */
@@ -123,7 +134,13 @@ export function CostAnalysis({
         <Stat
           icon={WalletIcon}
           iconTone="brand"
-          label={data?.window_days ? `最近 ${data.window_days} 天合计` : `${periodSpan(data?.from ?? base.from ?? '', data?.to ?? base.to ?? '')} 个账期合计`}
+          label={
+            <span className="flex items-center gap-1.5">
+              {data?.window_days ? `最近 ${data.window_days} 天合计` : `${periodSpan(data?.from ?? base.from ?? '', data?.to ?? base.to ?? '')} 个账期合计`}
+              {/* 分析视图的查询都在这一条上，顶栏的转圈管不到它 */}
+              {alloc.isFetching && <Spinner className="size-3" />}
+            </span>
+          }
           value={formatMoney(data?.total ?? 0)}
           extra={
             prepaid ? (
@@ -136,13 +153,53 @@ export function CostAnalysis({
         <Stat
           icon={CalendarDaysIcon}
           iconTone="accent"
-          label="日均"
+          label={
+            <span className="flex flex-wrap items-center gap-x-1">
+              日均<span aria-hidden>·</span>
+              <Combobox
+                variant="inline"
+                triggerEnd
+                trigger={<ChevronDownIcon className="size-3 shrink-0" aria-hidden />}
+                value={days || 'all'}
+                onChange={(v) => onParams({ days: v === 'all' ? null : v })}
+                options={WINDOWS}
+                clearable={false}
+                searchPlaceholder="筛口径…"
+                title="日均的统计窗口"
+                className={PARAM_CLASS}
+              />
+              <InfoHint text="日均 = 统计窗口内的费用 ÷ 有账单的天数。选择「最近 7 天」可排除月初扩容等早期波动，更接近当前水平。下方按月拆分与按产品的日均、预估列同样按此窗口计算" />
+            </span>
+          }
           value={data?.daily === null || data?.daily === undefined ? '—' : formatMoney(data.daily)}
         />
         <Stat
           icon={TrendingUpIcon}
           iconTone="accent"
-          label={`${estimate} 预估`}
+          label={
+            <span className="flex flex-wrap items-center gap-x-1">
+              <Combobox
+                variant="inline"
+                triggerEnd
+                trigger={<ChevronDownIcon className="size-3 shrink-0" aria-hidden />}
+                value={estimate}
+                onChange={(v) => onParams({ est: v })}
+                options={[base.to ?? '', shiftPeriod(base.to ?? '', 1)].filter(Boolean).map((p) => ({ value: p, note: `${daysInMonth(p)} 天` }))}
+                clearable={false}
+                searchPlaceholder="筛账期…"
+                title="预估账期"
+                className={PARAM_CLASS}
+              />
+              预估
+              <InfoHint
+                text={
+                  prepaid
+                    ? '月度预估 = 后付费日均 × 该账期的自然天数 + 该账期的预付费摊销。前者以用量不变为前提，不计入扩容与活动；后者来自已发生的购买，属确定金额'
+                    : '月度预估 = 日均 × 该账期的自然天数。以用量不变为前提，不计入扩容、活动与预付费（包年包月）的一次性支出'
+                }
+              />
+            </span>
+          }
           value={
             project(data?.daily ?? null, data?.amortized_by_period) === null
               ? '—'
@@ -302,75 +359,6 @@ export function CostAnalysis({
   )
 }
 
-/**
- * 分析视图独有的两项口径：日均按多长的窗口算、预估哪个月。放在页头与共用筛选排在一起，
- * 而不在正文里另起一行——它们与账期、金额口径一样是「怎么算」的条件，不是某一块内容的附属。
- *
- * 与 `CostAnalysis` 使用同一组查询参数，react-query 按键去重，不会多发一次请求。
- */
-export function AnalysisControls({
-  base,
-  ready,
-  days,
-  estimate,
-  onChange,
-}: {
-  base: Record<string, string | undefined>
-  ready: boolean
-  days: string
-  estimate: string
-  onChange: (next: Record<string, string | null>) => void
-}) {
-  const params = useMemo(() => ({ ...base, days: days || undefined }), [base, days])
-  const alloc = useBillAllocation(params, ready)
-  const prepaid = alloc.data?.prepaid ?? false
-  return (
-    <span className="flex flex-wrap items-center gap-2">
-      {/* 标签与下拉成组：窄屏换行时不把「预估」和它的下拉拆到两行 */}
-      <span className="flex items-center gap-2">
-        <InfoHint text="日均 = 统计窗口内的费用 ÷ 有账单的天数。选择「最近 7 天」可排除月初扩容等早期波动，更接近当前水平" className="text-xs text-muted-fg">
-          日均口径
-        </InfoHint>
-        <Combobox
-          value={days || 'all'}
-          onChange={(v) => onChange({ days: v === 'all' ? null : v })}
-          options={WINDOWS}
-          clearable={false}
-          searchPlaceholder="筛口径…"
-          title="日均的统计窗口"
-          size="sm"
-          className="w-28"
-        />
-      </span>
-      <span className="flex items-center gap-2">
-        <InfoHint
-          text={
-            prepaid
-              ? '月度预估 = 后付费日均 × 该账期的自然天数 + 该账期的预付费摊销。前者以用量不变为前提，不计入扩容与活动；后者来自已发生的购买，属确定金额'
-              : '月度预估 = 日均 × 该账期的自然天数。以用量不变为前提，不计入扩容、活动与预付费（包年包月）的一次性支出'
-          }
-          className="text-xs text-muted-fg"
-        >
-          预估
-        </InfoHint>
-        <Combobox
-          value={estimate}
-          onChange={(v) => onChange({ est: v })}
-          options={[base.to ?? '', shiftPeriod(base.to ?? '', 1)]
-            .filter(Boolean)
-            .map((p) => ({ value: p, label: `${p}（${daysInMonth(p)} 天）` }))}
-          clearable={false}
-          searchPlaceholder="筛账期…"
-          title="预估账期"
-          size="sm"
-          className="w-40"
-        />
-      </span>
-      {alloc.isFetching && <Spinner className="size-4" />}
-    </span>
-  )
-}
-
 /** 统计卡片左上角图标的底色：品牌色标「花了多少」，强调色标「按天、往后」，警示色只给占比偏高的未归属 */
 const STAT_TONES = {
   brand: 'bg-[color-mix(in_srgb,var(--brand)_14%,transparent)] text-brand',
@@ -387,7 +375,7 @@ function Stat({
   tone = 'plain',
   extra,
 }: {
-  label: string
+  label: React.ReactNode
   value: string
   icon: LucideIcon
   iconTone: keyof typeof STAT_TONES
@@ -395,13 +383,14 @@ function Stat({
   extra?: React.ReactNode
 }) {
   return (
-    <div className="flex gap-3 rounded-lg border border-border bg-card px-4 py-3">
-      <span aria-hidden className={cn('flex size-9 shrink-0 items-center justify-center rounded-md', STAT_TONES[iconTone])}>
+    // 手机上两张一行，每张只有 170px 上下：图标让掉、字号降一档，「1,270,807.65」才放得进去
+    <div className="flex gap-3 rounded-lg border border-border bg-card px-3 py-3 sm:px-4">
+      <span aria-hidden className={cn('flex size-9 shrink-0 items-center justify-center rounded-md max-sm:hidden', STAT_TONES[iconTone])}>
         <Icon className="size-[18px]" />
       </span>
       <div className="min-w-0">
         <div className="text-xs text-muted-fg">{label}</div>
-        <div className={cn('mt-0.5 text-xl font-semibold tabular-nums', tone === 'warn' && 'text-danger')}>{value}</div>
+        <div className={cn('mt-0.5 text-lg font-semibold tabular-nums sm:text-xl', tone === 'warn' && 'text-danger')}>{value}</div>
         {extra}
       </div>
     </div>
@@ -493,10 +482,11 @@ function MonthlySplit({
     <Card
       title="按月拆分"
       extra={
-        <span className="flex items-center gap-2">
+        <span className="flex max-w-full min-w-0 flex-wrap items-center justify-end gap-2">
           <span className="hidden text-2xs text-muted-fg lg:inline">{rules} 条归属规则</span>
+          {/* 四五个页签在手机上一行放不下：这一组自己横向滑，不撑宽卡片 */}
           {sections.length > 1 && (
-            <span role="group" aria-label="拆分口径" className="flex h-7 items-center rounded-md border border-input p-0.5">
+            <span role="group" aria-label="拆分口径" className="flex h-7 max-w-full items-center overflow-x-auto rounded-md border border-input p-0.5 [scrollbar-width:none]">
               {sections.map((x) => (
                 <button
                   key={x.key}
@@ -645,7 +635,7 @@ function MonthlySplit({
           格子底色越深，金额越高；深浅按本表各格中的最大值折算。
         </li>
         <li>后付费计入出账所在的账期；预付费（包年包月）按服务期摊入各账期，未配置预付费规则时同样计入出账所在的账期。</li>
-        <li>本表按整月统计，不受「日均口径」影响。分段页签中，后付费的预估为该云厂商的日均 × 天数，预付费摊销的预估为摊入该账期的金额。</li>
+        <li>本表的月份金额按整月统计，不受「日均」卡片上所选统计窗口的影响；日均与预估两列随之变化。分段页签中，后付费的预估为该云厂商的日均 × 天数，预付费摊销的预估为摊入该账期的金额。</li>
         {data.unmatched_into && data.unmatched.amount > 0 && (
           <li>
             未命中任何归属规则的 <span className="tabular-nums text-fg">{formatMoney(data.unmatched.amount)}</span> 已按配置计入「
@@ -906,6 +896,17 @@ const formatDelta = (delta: number) => (Math.abs(delta) < 0.005 ? '—' : `${del
 const withoutPeriod = (base: Record<string, string | undefined>) =>
   Object.fromEntries(Object.entries(base).filter(([k]) => k !== 'from' && k !== 'to'))
 
+/** 手机上比法下拉显示的短名；展开的菜单里用灰字写出完整说法 */
+const MODE_SHORT: Record<CompareMode, string> = { '1': '前一日', week: '上周同日', '7': '近 7 天', '14': '近 14 天', '30': '近 30 天' }
+
+/** 对比表各列的排法，都写成「大的在前」；从小到大时整体取反。并列时按本段金额、再按产品名 */
+const COMPARE_ORDER: Record<string, (a: ProductDiff, b: ProductDiff) => number> = {
+  product: (a, b) => b.product.localeCompare(a.product),
+  previous: (a, b) => b.previous - a.previous || b.current - a.current || a.product.localeCompare(b.product),
+  current: (a, b) => b.current - a.current || b.previous - a.previous || a.product.localeCompare(b.product),
+  delta: (a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.current - a.current || a.product.localeCompare(b.product),
+}
+
 /**
  * 产品费用对比：两段等长的日期里各产品花了多少，多了还是少了。
  *
@@ -921,67 +922,49 @@ function ProductCompare({ base, ready, prepaid }: { base: Record<string, string 
   const q = useBillProductDays(params, ready)
   const data = q.data
   const [mode, setMode] = useState<CompareMode>('1')
+  const isMobile = useIsMobile()
   const [picked, setPicked] = useState<string | null>(null)
-  const [order, setOrder] = useState<'amount' | 'delta'>('amount')
+  // 点表头排序，同「按产品」表。默认按本段金额从大到小；「变动额」按变动的绝对值排——
+  // 省下来的一组「按金额 / 按变动」按钮，是手机上右上角两个下拉能排进一行的前提
+  const [sort, setSort] = useState<LogSort>({ key: 'current', dir: 'desc' })
+  const onSort = (key: string) => setSort((s) => (s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: key === 'product' ? 'asc' : 'desc' }))
   const [all, setAll] = useState(false)
   const options = data ? endOptions(data, mode) : []
   // 换了比法或筛选之后，原先选的那天可能已不可选，退回默认
   const end = picked && options.includes(picked) ? picked : data ? defaultEnd(data, mode) : null
   const cmp = data && end ? compare(data, mode, end) : null
   const multiCloud = new Set(data?.rows.map((r) => r.provider)).size > 1
-  const rows = cmp
-    ? [...cmp.rows].sort((a, b) =>
-        order === 'delta'
-          ? Math.abs(b.delta) - Math.abs(a.delta) || b.current - a.current
-          : b.current - a.current || b.previous - a.previous || a.product.localeCompare(b.product),
-      )
-    : []
+  const rows = cmp ? [...cmp.rows].sort((a, b) => (sort.dir === 'asc' ? -1 : 1) * (COMPARE_ORDER[sort.key] ?? COMPARE_ORDER.current)(a, b)) : []
   const shown = all ? rows : rows.slice(0, PRODUCT_TOP)
 
   return (
     <Card
       title="产品费用对比"
       extra={
-        <span className="flex flex-wrap items-center justify-end gap-2">
-          {q.isFetching && <Spinner className="size-4" />}
-          <span role="group" aria-label="排序" className="flex h-7 items-center rounded-md border border-input p-0.5">
-            {(
-              [
-                ['amount', '按金额'],
-                ['delta', '按变动'],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                aria-pressed={order === key}
-                onClick={() => setOrder(key)}
-                className={cn('h-full rounded-sm px-2 text-xs whitespace-nowrap text-muted-fg hover:text-fg', order === key && 'bg-accent-soft text-accent')}
-              >
-                {label}
-              </button>
-            ))}
-          </span>
+        // 不许折行。手机上要和标题排在同一行：两个下拉按文字宽度收缩、写短名（见 MODE_SHORT），
+        // 截止日不写「截至」；转圈让掉（加载时表格本身会变淡），免得它一出现整组被挤到下一行
+        <span className="flex min-w-0 items-center justify-end gap-2">
+          {q.isFetching && <Spinner className="size-4 shrink-0 max-md:hidden" />}
           <Combobox
             value={mode}
             onChange={(v) => setMode(v as CompareMode)}
-            options={COMPARE_MODES}
+            options={isMobile ? COMPARE_MODES.map((m) => ({ value: m.value, label: MODE_SHORT[m.value], note: m.label })) : COMPARE_MODES}
             clearable={false}
             searchPlaceholder="筛比法…"
             title="比法"
             size="sm"
-            className="w-40"
+            className="w-40 min-w-0 max-md:w-auto"
           />
           {cmp && (
             <Combobox
               value={cmp.current.to}
               onChange={setPicked}
-              options={options.map((d) => ({ value: d, label: `截至 ${dayLabel(d)}` }))}
+              options={options.map((d) => ({ value: d, label: isMobile ? dayLabel(d) : `截至 ${dayLabel(d)}` }))}
               clearable={false}
               searchPlaceholder="筛日期…"
               title="截止日"
               size="sm"
-              className="w-36"
+              className="w-36 min-w-0 max-md:w-auto"
             />
           )}
         </span>
@@ -1003,7 +986,7 @@ function ProductCompare({ base, ready, prepaid }: { base: Record<string, string 
         <div className={cn(q.isFetching && 'opacity-60 transition-opacity')}>
           <CompareSummary cmp={cmp} prepaid={prepaid} />
           <CompareNotes cmp={cmp} data={data} />
-          <CompareTable data={data} cmp={cmp} rows={shown} multiCloud={multiCloud} />
+          <CompareTable data={data} cmp={cmp} rows={shown} multiCloud={multiCloud} sort={sort} onSort={onSort} />
           {rows.length > PRODUCT_TOP && (
             <button
               type="button"
@@ -1023,24 +1006,38 @@ function ProductCompare({ base, ready, prepaid }: { base: Record<string, string 
 function CompareSummary({ cmp, prepaid }: { cmp: Comparison; prepaid: boolean }) {
   const noun = cmp.basis === 'daily' ? '日均' : '合计'
   const delta = cmp.currentTotal - cmp.previousTotal
+  const isMobile = useIsMobile()
+  /*
+   * 写成一句：宽屏上「9/23 周三 合计 X，较 9/22 周二 Y　±Z（±%）」；手机上只剩「合计 X，较对比段
+   * ±Z（±%）」——日期已经写在截止日下拉与表头里，对比段的合计等于 X 减去变动，都不必再写，这一句
+   * 才放得进 360px 宽的屏幕。「仅含后付费」收进「合计」旁的 ⓘ，不再单占一格。每段不许折，真放
+   * 不下时从段与段之间断开（逗号后、空格处），不会断在数字中间。用普通的行内排版而不是 flex：
+   * flex 的间距会叠在全角逗号自带的留白上，逗号后面空出一大截
+   */
   return (
-    <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 border-b border-border px-4 py-2.5 text-xs">
-      <span>
+    <div className="border-b border-border px-3 py-2.5 text-xs leading-5 md:px-4">
+      <span className="whitespace-nowrap">
         <span className="text-muted-fg">
-          {rangeLabel(cmp.current)} {noun}{' '}
+          {!isMobile && `${rangeLabel(cmp.current)} `}
+          {prepaid ? <InfoHint text="仅含后付费：预付费（包年包月）在购买当天一次性出账，逐日比较只会冒出一根尖刺">{noun}</InfoHint> : noun}{' '}
         </span>
         <span className="font-semibold tabular-nums">{formatMoney(cmp.currentTotal)}</span>
+        <span className="text-muted-fg">，</span>
       </span>
-      <span>
-        <span className="text-muted-fg">
-          {rangeLabel(cmp.previous)} {noun}{' '}
-        </span>
-        <span className="tabular-nums">{formatMoney(cmp.previousTotal)}</span>
+      <span className="whitespace-nowrap">
+        {isMobile ? (
+          <span className="text-muted-fg">较对比段</span>
+        ) : (
+          <>
+            <span className="text-muted-fg">较 {rangeLabel(cmp.previous)} </span>
+            <span className="tabular-nums">{formatMoney(cmp.previousTotal)}</span>
+          </>
+        )}
       </span>
-      <span className={cn('tabular-nums', changeTone(delta))}>
+      {' '}
+      <span className={cn('whitespace-nowrap tabular-nums', !isMobile && 'ml-1.5', changeTone(delta))}>
         {formatDelta(delta)}（{formatChange(changeRatio(cmp.currentTotal, cmp.previousTotal))}）
       </span>
-      {prepaid && <span className="ml-auto text-2xs text-muted-fg">仅含后付费</span>}
     </div>
   )
 }
@@ -1091,31 +1088,56 @@ function DeltaBar({ delta, max }: { delta: number; max: number }) {
   )
 }
 
-function CompareTable({ data, cmp, rows, multiCloud }: { data: BillProductDaysResponse; cmp: Comparison; rows: ProductDiff[]; multiCloud: boolean }) {
+function CompareTable({
+  data,
+  cmp,
+  rows,
+  multiCloud,
+  sort,
+  onSort,
+}: {
+  data: BillProductDaysResponse
+  cmp: Comparison
+  rows: ProductDiff[]
+  multiCloud: boolean
+  sort: LogSort
+  onSort: (key: string) => void
+}) {
   const [open, setOpen] = useState<string | null>(null)
+  const isMobile = useIsMobile()
   if (!rows.length) return <div className="px-4 py-6 text-center text-xs text-muted-fg">两段均无后付费账单</div>
   const suffix = cmp.basis === 'daily' ? ' 日均' : ''
   // 按全部产品取最大值，不只取显示出来的这几行：展开其余项时条长不该跟着变
   const max = Math.max(0, ...cmp.rows.map((r) => Math.abs(r.delta)))
-  const colSpan = multiCloud ? 7 : 6
+  const colSpan = isMobile ? 4 : 6 + (multiCloud ? 1 : 0)
+  /*
+   * 手机上只留「产品、对比段、本段、变动」四列，两段的金额与变动一屏看得到：云厂商一列让掉（同名
+   * 产品两朵云都有的，在产品名后面标一下是哪朵云），变动率并进变动额那一格的第二行，单元格内边距
+   * 收窄一档，产品名截短，宽度让给数字
+   */
+  const showCloud = multiCloud && !isMobile
+  const names = new Map<string, number>()
+  for (const r of cmp.rows) names.set(r.product, (names.get(r.product) ?? 0) + 1)
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs tabular-nums">
         <thead className="text-2xs text-muted-fg">
           <tr className="border-b border-border">
-            <th className="px-3 py-2 text-left font-medium">产品</th>
-            {multiCloud && <th className="px-3 py-2 text-left font-medium">云厂商</th>}
-            <th className="px-3 py-2 text-right font-medium whitespace-nowrap">
-              {rangeLabel(cmp.previous)}
-              {suffix}
+            <th aria-sort={ariaSort('product', sort, onSort)} className="py-2 pr-1.5 pl-3 text-left font-medium sm:px-3">
+              <SortHeader label="产品" col="product" sort={sort} onSort={onSort} />
             </th>
-            <th className="px-3 py-2 text-right font-medium whitespace-nowrap">
-              {rangeLabel(cmp.current)}
-              {suffix}
+            {showCloud && <th className="px-1.5 py-2 text-left font-medium sm:px-3">云厂商</th>}
+            <th aria-sort={ariaSort('previous', sort, onSort)} className="px-1.5 py-2 text-right font-medium whitespace-nowrap sm:px-3">
+              <SortHeader label={`${rangeLabel(cmp.previous)}${suffix}`} col="previous" sort={sort} onSort={onSort} />
             </th>
-            <th className="hidden w-32 px-3 py-2 text-center font-medium sm:table-cell">变动</th>
-            <th className="px-3 py-2 text-right font-medium">变动额</th>
-            <th className="px-3 py-2 text-right font-medium">变动率</th>
+            <th aria-sort={ariaSort('current', sort, onSort)} className="px-1.5 py-2 sm:px-3 text-right font-medium whitespace-nowrap">
+              <SortHeader label={`${rangeLabel(cmp.current)}${suffix}`} col="current" sort={sort} onSort={onSort} />
+            </th>
+            <th className="hidden w-32 px-1.5 py-2 sm:px-3 text-center font-medium sm:table-cell">变动</th>
+            <th aria-sort={ariaSort('delta', sort, onSort)} className="px-1.5 py-2 sm:px-3 text-right font-medium whitespace-nowrap">
+              <SortHeader label="变动额" col="delta" sort={sort} onSort={onSort} />
+            </th>
+            {!isMobile && <th className="px-1.5 py-2 text-right font-medium sm:px-3">变动率</th>}
           </tr>
         </thead>
         <tbody>
@@ -1123,36 +1145,41 @@ function CompareTable({ data, cmp, rows, multiCloud }: { data: BillProductDaysRe
             const key = `${r.provider}-${r.product}`
             const isOpen = open === key
             const ratio = changeRatio(r.current, r.previous)
+            // 对比段分文未花的，环比无从谈起，标为新增
+            const ratioText = ratio === null ? (r.current > 0 ? '新增' : '—') : formatChange(ratio)
             const amounts = data.rows.find((x) => x.provider === r.provider && x.product === r.product)?.amounts
             return (
               <Fragment key={key}>
                 {/* 整行都能点开；产品名那个按钮留给键盘与读屏，它的点击冒泡到行上，不另绑一次 */}
                 <tr onClick={() => setOpen(isOpen ? null : key)} className="row-hover cursor-pointer border-b border-border/60 last:border-b-0">
-                  <td className="max-w-64 px-3 py-1.5">
+                  {/* 手机上产品列只占剩下的宽度（`w-full` + `max-w-0`，表格的老办法）：只写 max-w 的话，
+                      截断的长名字仍按全长算最小宽度，把数字列挤出屏幕 */}
+                  <td className="py-1.5 pr-1.5 pl-3 max-md:w-full max-md:max-w-0 sm:px-3 md:max-w-64">
                     <button type="button" aria-expanded={isOpen} className="flex max-w-full items-center gap-1.5 text-left">
                       <ChevronRightIcon className={cn('size-3.5 shrink-0 text-muted-fg transition-transform', isOpen && 'rotate-90')} />
                       <span className="truncate">{r.product}</span>
+                      {multiCloud && isMobile && (names.get(r.product) ?? 0) > 1 && <span className="shrink-0 text-2xs text-muted-fg">{PROVIDER_LABELS[r.provider]}</span>}
                     </button>
                   </td>
-                  {multiCloud && <td className="px-3 py-1.5 whitespace-nowrap text-muted-fg">{PROVIDER_LABELS[r.provider]}</td>}
-                  <td className="px-3 py-1.5 text-right whitespace-nowrap text-muted-fg">
+                  {showCloud && <td className="px-1.5 py-1.5 whitespace-nowrap text-muted-fg sm:px-3">{PROVIDER_LABELS[r.provider]}</td>}
+                  <td className="px-1.5 py-1.5 text-right whitespace-nowrap text-muted-fg sm:px-3">
                     <Money value={r.previous} />
                   </td>
-                  <td className="px-3 py-1.5 text-right font-medium whitespace-nowrap">
+                  <td className="px-1.5 py-1.5 sm:px-3 text-right font-medium whitespace-nowrap">
                     <Money value={r.current} />
                   </td>
-                  <td className="hidden px-3 py-1.5 sm:table-cell">
+                  <td className="hidden px-1.5 py-1.5 sm:px-3 sm:table-cell">
                     <DeltaBar delta={r.delta} max={max} />
                   </td>
-                  <td className={cn('px-3 py-1.5 text-right whitespace-nowrap', changeTone(r.delta))}>{formatDelta(r.delta)}</td>
-                  <td className={cn('px-3 py-1.5 text-right whitespace-nowrap', changeTone(r.delta))}>
-                    {/* 对比段分文未花的，环比无从谈起，标为新增 */}
-                    {ratio === null ? (r.current > 0 ? '新增' : '—') : formatChange(ratio)}
+                  <td className={cn('px-1.5 py-1.5 text-right whitespace-nowrap sm:px-3', changeTone(r.delta))}>
+                    {formatDelta(r.delta)}
+                    {isMobile && <span className="block text-2xs">{ratioText}</span>}
                   </td>
+                  {!isMobile && <td className={cn('px-1.5 py-1.5 text-right whitespace-nowrap sm:px-3', changeTone(r.delta))}>{ratioText}</td>}
                 </tr>
                 {isOpen && amounts && (
                   <tr className="border-b border-border/60 bg-muted/20">
-                    <td colSpan={colSpan} className="px-3 py-2">
+                    <td colSpan={colSpan} className="px-1.5 py-2 sm:px-3">
                       <ProductTrend data={data} cmp={cmp} product={r.product} amounts={amounts} />
                     </td>
                   </tr>

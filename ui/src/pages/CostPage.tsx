@@ -1,12 +1,12 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
-import { CloudDownloadIcon, DownloadIcon, SearchIcon } from 'lucide-react'
+import { CloudDownloadIcon, DownloadIcon, FilterIcon, SearchIcon } from 'lucide-react'
 import { apiUrl } from '@/api/client'
 import { useBillBreakdown, useBillDaily, useBillDetail, useBillFacets, useBillPeriods, useBillSummary, useMeta } from '@/api/queries'
-import { AnalysisControls, CostAnalysis } from '@/components/CostAnalysis'
+import { CostAnalysis } from '@/components/CostAnalysis'
 import type { BillAmount, BillPoint, BillProvider } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
 import { StackedBars } from '@/components/charts/StackedBars'
-import { Badge, Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Input, Spinner, buttonClass } from '@/components/ui'
+import { Badge, Button, Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Input, Spinner, buttonClass } from '@/components/ui'
 import {
   AMOUNTS,
   DIMENSIONS,
@@ -77,6 +77,12 @@ export function CostPage() {
   const days = params.get('days') ?? ''
   const estimate = params.get('est') || (to ? shiftPeriod(to, 1) : '')
   const [syncing, setSyncing] = useState(false)
+  // 手机上顶栏只露账期，其余条件收进「筛选」按钮（同日志页的做法）。按钮上的数字是偏离默认值的
+  // 条件有几项：金额口径换了、选了云厂商、搜了关键字——收起时看不见它们，得有个提示说「现在的
+  // 数字不是默认口径」。分析视图的日均窗口与预估账期不在这里，挂在对应的统计卡上（见 CostAnalysis）
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const panelCount = (amount !== 'payable' ? 1 : 0) + (provider ? 1 : 0) + (q ? 1 : 0)
+  const inPanel = !filtersOpen && 'max-md:hidden'
   // 从分析视图钻取过来时，切到账单视图后把明细卷到眼前：它在页面最底下，不卷过去像是什么都没发生
   const detailRef = useRef<HTMLElement>(null)
   const scrollToDetail = useRef(false)
@@ -175,13 +181,28 @@ export function CostPage() {
             </button>
           ))}
         </nav>
-        {/* 筛选在前、动作在后：两个视图共用的条件一组，分析视图独有的口径一组，「同步账单」放在最末 */}
-        <span className="flex flex-wrap items-center gap-2 py-2 md:ml-auto">
-          {(summary.isFetching || periods.isFetching) && <Spinner className="size-4" />}
+        {/* 筛选在前、动作在后：两个视图共用的条件，「同步账单」放在最末 */}
+        {/* 手机上第一行是账期、「筛选」与「同步账单」，其余条件在「筛选」展开的面板里：金额口径与
+            云厂商一行、搜索一行（靠 `max-md:order-*` 调顺序、一个整行宽的空元素断行）。桌面上照
+            原顺序一行排开，没有「筛选」按钮 */}
+        <span className="flex w-full flex-wrap items-center gap-2 py-2 md:ml-auto md:w-auto">
+          {(summary.isFetching || periods.isFetching) && <Spinner className="size-4 shrink-0 max-md:order-1" />}
           <StatsLine stats={summary.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           {/* 换了账期，原先选的日期多半已不在范围里，一并清掉 */}
           <PeriodPicker known={known} from={from} to={to} onChange={(next) => set({ ...next, page: null, day_from: null, day_to: null })} />
-          <span className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            active={filtersOpen || panelCount > 0}
+            onClick={() => setFiltersOpen((v) => !v)}
+            className="shrink-0 px-2.5 max-md:order-3 md:hidden"
+            title="金额口径 / 云厂商 / 搜索等筛选"
+            aria-expanded={filtersOpen}
+          >
+            <FilterIcon className="size-4" />
+            {panelCount > 0 && panelCount}
+          </Button>
+          {filtersOpen && <span aria-hidden className="h-0 basis-full max-md:order-4 md:hidden" />}
+          <span className={cn('flex items-center gap-1.5 max-md:order-5', inPanel)}>
             <span role="group" aria-label="金额口径" className="flex h-8 items-center rounded-md border border-input p-0.5">
               {AMOUNTS.map((a) => (
                 <button
@@ -217,10 +238,10 @@ export function CostPage() {
               emptyText="没有匹配的云厂商"
               title="按云厂商筛选"
               size="sm"
-              className="w-32"
+              className={cn('w-32 max-md:order-6 max-md:w-auto max-md:min-w-0 max-md:flex-1', inPanel)}
             />
           )}
-          <span className="relative">
+          <span className={cn('relative max-md:order-7 max-md:min-w-0 max-md:basis-full', inPanel)}>
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
             <Input
               defaultValue={q}
@@ -229,20 +250,15 @@ export function CostPage() {
               }}
               onBlur={(e) => set({ q: e.target.value || null, page: null })}
               placeholder="搜索产品 / 实例"
-              className="h-8 w-36 pl-8 text-xs"
+              className="h-8 w-full pl-8 text-xs md:w-36"
               aria-label="搜索产品 / 计费项 / 实例名"
             />
           </span>
-          {ready && view === 'analysis' && (
-            <>
-              <span aria-hidden className="mx-1 hidden h-5 w-px bg-border md:block" />
-              <AnalysisControls base={base} ready={ready} days={days} estimate={estimate} onChange={set} />
-            </>
-          )}
           {bills?.sync && (
-            <button type="button" onClick={() => setSyncing(true)} className={buttonClass({ size: 'sm' })}>
+            // 手机上只留图标、排在第一行：它是动作不是筛选，不该收进「筛选」里
+            <button type="button" onClick={() => setSyncing(true)} className={buttonClass({ size: 'sm' }, 'shrink-0 max-md:order-3 max-md:px-2.5')} title="同步账单">
               <CloudDownloadIcon className="size-4" />
-              同步账单
+              <span className="max-md:sr-only">同步账单</span>
             </button>
           )}
         </span>
@@ -289,7 +305,7 @@ export function CostPage() {
         )}
 
         {ready && bills && known.length > 0 && view === 'analysis' && (
-          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} onFilter={setDim}
+          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} onParams={set} onFilter={setDim}
             onDrill={(t) => {
               // 跳到账单视图的明细：那一天、那朵云、那个产品。那一天不在所选账期里时，账期换成那个月
               const month = t.day.slice(0, 7)
@@ -402,9 +418,10 @@ export function CostPage() {
               ref={detailRef}
               title="明细"
               extra={
-                <span className="flex items-center gap-2">
+                // 手机上放不下一行时换行；那行说明不许折，否则会被控件挤成一字一行
+                <span className="flex flex-wrap items-center justify-end gap-2">
                   {detail.data && (
-                    <span className="text-2xs text-muted-fg">
+                    <span className="text-2xs whitespace-nowrap text-muted-fg">
                       {PROVIDER_LABELS[detail.data.provider]}
                       {detail.data.granularity === 'daily' ? ' · 日度' : ' · 月度'}
                       {detail.data.total !== null && ` · ${detail.data.total.toLocaleString('zh-CN')} 行`}
@@ -691,7 +708,7 @@ function PeriodPicker({
   // 最近的账期排在最前：要改的多半是最近几个月，不用滚到底
   const periodOptions = [...options].reverse().map((p) => ({ value: p }))
   return (
-    <span className="flex items-center gap-1 text-xs text-muted-fg">
+    <span className="flex items-center gap-1 text-xs text-muted-fg max-md:order-2 max-md:min-w-0 max-md:flex-[2]">
       <Combobox
         value={from}
         onChange={(v) => onChange({ from_period: v, to_period: v > to ? v : to })}
@@ -701,7 +718,7 @@ function PeriodPicker({
         emptyText="没有匹配的账期"
         title="起始账期"
         size="sm"
-        className="w-28"
+        className="w-28 max-md:w-auto max-md:min-w-0 max-md:flex-1"
       />
       <span>至</span>
       <Combobox
@@ -713,7 +730,7 @@ function PeriodPicker({
         emptyText="没有匹配的账期"
         title="结束账期"
         size="sm"
-        className="w-28"
+        className="w-28 max-md:w-auto max-md:min-w-0 max-md:flex-1"
       />
     </span>
   )

@@ -400,8 +400,9 @@ describe('费用页', () => {
     // 日均那张卡片与甲线那一行都是 400.00，此处只确认它确实出现
     expect((await screen.findAllByText('400.00')).length).toBeGreaterThan(0)
     // 10 月 31 天：后付费 400 × 31，再加该月摊过来的预付费 200
-    // 统计卡片与按月拆分表的表头各一处
-    expect((await screen.findAllByText('2026-10 预估')).length).toBe(2)
+    // 统计卡片的标签上是预估账期的下拉（默认下个月），按月拆分表的表头写成一句
+    expect(await screen.findByRole('button', { name: '预估账期' })).toHaveTextContent('2026-10')
+    expect(await screen.findByText('2026-10 预估')).toBeInTheDocument()
     // 卡片与拆分表合计行的预估列各一处
     expect((await screen.findAllByText('12,600.00')).length).toBe(2)
     // 合计分两段列出，预付费摊销单独标明
@@ -452,8 +453,8 @@ describe('费用页', () => {
     // 前一天没花钱的产品标为新增，而不是 ∞
     expect(within(card).getByText('新增')).toBeInTheDocument()
     expect(within(card).getByText('-37.5%')).toBeInTheDocument()
-    // 按变动排：对象存储 +100 排到 ECS -150 之后
-    await userEvent.click(within(card).getByRole('button', { name: '按变动' }))
+    // 点「变动额」列头按变动排（看绝对值）：对象存储 +100 排到 ECS -150 之后
+    await userEvent.click(within(card).getByRole('button', { name: '变动额' }))
     const products = within(card).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]?.textContent)
     expect(products).toEqual(['云服务器 ECS', '对象存储'])
     // 点开一个产品看逐日走势：写明是哪几天、共几天，并标出比较的那两天

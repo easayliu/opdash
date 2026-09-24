@@ -12,3 +12,8 @@ function subscribe(cb: () => void): () => void {
 export function useIsMobile(): boolean {
   return useSyncExternalStore(subscribe, () => window.matchMedia(MOBILE_QUERY).matches, () => false)
 }
+
+/** 渲染之外（比如 `useState` 的初始值）读一次当前是不是手机宽度，不订阅变化。 */
+export function isMobileNow(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia(MOBILE_QUERY).matches
+}

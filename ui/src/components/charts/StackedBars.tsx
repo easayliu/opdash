@@ -2,7 +2,7 @@ import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
 import { MAX_SPOKEN_SERIES, andMore, chartSummary } from './describe'
 import { useWidth } from './useWidth'
-import { bucketDomain, formatCompact, niceMax, niceTicks, timeTicks } from './axis'
+import { bucketDomain, formatCompact, niceMax, niceTicks, placeTicks, tickBudget, tickUnit, timeTicks } from './axis'
 import { formatTick, formatTs } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
@@ -134,7 +134,8 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
     setBrush(null)
   }
 
-  const ticks = useMemo(() => timeTicks(x0, x1), [x0, x1])
+  const ticks = useMemo(() => timeTicks(x0, x1, tickBudget(W, widthMs)), [x0, x1, W, widthMs])
+  const unit = tickUnit(widthMs, ticks)
   const fmtValue = valueFormat ?? format
   const yTicks = niceTicks(yMax)
 
@@ -182,9 +183,9 @@ export function StackedBars({ fromMs, toMs, widthMs, buckets, series, height = 1
                   {t.label}
                 </text>
               ))
-            : ticks.map((t) => (
-                <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
-                  {formatTick(t, widthMs)}
+            : placeTicks(ticks.map((t) => ({ t, x: xOf(t), text: formatTick(t, unit) })), width).map((k) => (
+                <text key={k.t} x={k.x} y={height - 6} textAnchor={k.anchor} fontSize={11} fill="var(--muted-fg)">
+                  {k.text}
                 </text>
               ))}
           {ghost &&

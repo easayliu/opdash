@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketDomain, niceRange } from '@/components/charts/axis'
+import { bucketDomain, niceRange, placeTicks, tickBudget, tickUnit, timeTicks } from '@/components/charts/axis'
 
 const W = 60_000
 
@@ -51,5 +51,67 @@ describe('niceRange', () => {
 
   it('全部相等时退回从 0 起', () => {
     expect(niceRange(100, 100).lo).toBe(0)
+  })
+})
+
+describe('timeTicks / tickBudget', () => {
+  const from = Date.UTC(2026, 8, 24, 3, 50)
+  const hour = from + 3_600_000
+
+  it('宽屏照旧最多 8 个刻度', () => {
+    expect(tickBudget(900, 10_000)).toBe(8)
+    expect(timeTicks(from, hour, tickBudget(900, 10_000)).length).toBeLessThanOrEqual(8)
+  })
+
+  it('手机上的窄图少放几个，免得叠在一起', () => {
+    // 390px 的屏幕扣掉边距，画布约 270px：「12:15」这种短刻度放 4 个
+    expect(timeTicks(from, hour, tickBudget(270, 60_000))).toHaveLength(4)
+    // 「09-24 12:00」这种长刻度放得更少
+    expect(tickBudget(270, 3_600_000)).toBeLessThan(tickBudget(270, 60_000))
+  })
+
+  it('再窄也至少留两个刻度', () => {
+    expect(tickBudget(40, 60_000)).toBe(2)
+  })
+
+  it('半年按天画在手机上，刻度拉到八周一个', () => {
+    const start = Date.UTC(2026, 3, 1)
+    const ticks = timeTicks(start, start + 176 * 86_400_000, tickBudget(290, 86_400_000))
+    expect(ticks.length).toBeLessThanOrEqual(5)
+  })
+})
+
+describe('tickUnit', () => {
+  it('刻度落在整分钟上时不写秒', () => {
+    expect(tickUnit(10_000, [0, 600_000, 1_200_000])).toBe(60_000)
+  })
+
+  it('刻度本身就是秒级时保留秒', () => {
+    expect(tickUnit(1_000, [0, 30_000, 60_000])).toBe(1_000)
+  })
+
+  it('桶宽已经是分钟以上时按桶宽', () => {
+    expect(tickUnit(3_600_000, [0, 21_600_000])).toBe(3_600_000)
+  })
+})
+
+describe('placeTicks', () => {
+  const at = (...xs: number[]) => xs.map((x, i) => ({ t: i, x, text: '09-21' }))
+
+  it('中间的刻度居中', () => {
+    expect(placeTicks(at(150), 300)[0].anchor).toBe('middle')
+  })
+
+  it('贴右边的刻度朝左对齐，不被裁掉半截', () => {
+    expect(placeTicks(at(295), 300)[0].anchor).toBe('end')
+  })
+
+  it('贴左边的刻度朝右对齐', () => {
+    expect(placeTicks(at(5), 300)[0].anchor).toBe('start')
+  })
+
+  it('朝里挪了之后撞上前一个的就不写', () => {
+    // 末一个朝左对齐后会压到 270 那个上
+    expect(placeTicks(at(100, 270, 298), 300).map((k) => k.x)).toEqual([100, 270])
   })
 })

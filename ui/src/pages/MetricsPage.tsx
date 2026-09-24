@@ -188,10 +188,11 @@ export function MetricsPage() {
             </button>
           ))}
         </nav>
-        <span className="flex items-center gap-2 py-2 md:ml-auto">
+        {/* 手机上步长与服务排满一行，服务下拉占剩下的宽度 */}
+        <span className="flex w-full items-center gap-2 py-2 md:ml-auto md:w-auto">
           {view === 'board' && (
             <Hint text="每个点多长时间" asChild>
-              <Select value={params.get('step') ?? ''} onChange={(e) => set({ step: e.target.value || null })}>
+              <Select value={params.get('step') ?? ''} onChange={(e) => set({ step: e.target.value || null })} className="shrink-0">
                 {STEPS.map((s) => (
                   <option key={s.value} value={s.value}>
                     {s.label}
@@ -207,7 +208,7 @@ export function MetricsPage() {
             placeholder={view === 'board' ? '选择服务' : '全部服务'}
             searchPlaceholder="筛服务名…"
             emptyText="没有匹配的服务"
-            className="w-44"
+            className="w-44 max-md:w-auto max-md:min-w-0 max-md:flex-1"
             title="看哪个服务的指标"
           />
           {catalog.isFetching && <Spinner className="size-3.5" />}
@@ -430,11 +431,14 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
         图上<b className="font-semibold text-fg">点一个点</b>能带着那一格的时间和那条线的标签跳过去；
         横向拖一段是缩小时间范围。整段跳：
       </span>
-      {links.map((l) => (
-        <Link key={l.label} to={l.to} className={buttonClass({ size: 'xs' })}>
-          {l.label}
-        </Link>
-      ))}
+      {/* 手机上五个按钮排成一行横向滑，不折成两行 */}
+      <span className="-mx-3 flex w-[calc(100%+1.5rem)] items-center gap-2 overflow-x-auto px-3 [scrollbar-width:none] md:contents [&>*]:shrink-0">
+        {links.map((l) => (
+          <Link key={l.label} to={l.to} className={buttonClass({ size: 'xs' })}>
+            {l.label}
+          </Link>
+        ))}
+      </span>
     </div>
   )
 }

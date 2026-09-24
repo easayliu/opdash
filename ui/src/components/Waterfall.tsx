@@ -164,10 +164,13 @@ const ROW_H = 30
 /** 时间轴表头，sticky 在列表顶上 */
 const HEADER_H = 32
 const LEFT_W = 400
-/** 手机上左栏只留服务 / 操作名，时间轴至少给 260px，超出横滚 */
+/**
+ * 手机上左栏只留服务 / 操作名，时间轴至少给 200px，再窄才横滚。以前是 260px，170 + 260 比
+ * 390px 宽的屏幕还多出 40px——为了这 40px 整张图都得左右拖；现在 375px 往上的手机一屏放得下
+ */
 const LEFT_W_MOBILE = 170
 const AXIS_MIN_W = 400
-const AXIS_MIN_W_MOBILE = 260
+const AXIS_MIN_W_MOBILE = 200
 /** 条至少画这么宽，不然 1ms 的 span 在 30s 的轴上根本看不见 */
 const MIN_BAR_PCT = 0.15
 
@@ -792,9 +795,12 @@ export function SpanPanel({
           <span className="tabular-nums">{formatTsMicro(span.start_us)}</span>
           <span className="text-muted-fg">（+{formatDuration((span.start_us - traceStartUs) * 1000)}）</span>
         </div>
-        <div className="mono mt-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
-          span {span.span_id}
-          <CopyButton text={span.span_id} title="复制 span id" size="xs" />
+        {/* 放不下时两个跳转换到下一行（手机上整屏面板只有 390px 宽，挤在一行会被裁掉） */}
+        <div className="mono mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-2xs text-muted-fg">
+          <span className="flex items-center gap-1.5 whitespace-nowrap">
+            span {span.span_id}
+            <CopyButton text={span.span_id} title="复制 span id" size="xs" />
+          </span>
           <span className="ml-auto flex items-center gap-1">
             {metricsLink && (
               <Link to={metricsLink} className={buttonClass({ size: 'xs', variant: 'ghost' })}>

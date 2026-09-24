@@ -529,12 +529,14 @@ export function Card({
   const titleId = useId()
   return (
     <section ref={ref} aria-labelledby={title ? titleId : undefined} className={cn('rounded-lg border border-border bg-card', className)}>
+      {/* 放得下时一行，标题靠左、右侧控件靠右；放不下（手机上，或右侧控件多）时控件换到
+          下一行，别把标题挤成一字一行——以前是定高 h-11 不许换行，窄屏上两边互相压 */}
       {(title || extra) && (
-        <header className="flex h-11 items-center justify-between gap-2 border-b border-border px-4">
+        <header className="flex min-h-11 flex-wrap items-center justify-between gap-x-2 gap-y-1.5 border-b border-border px-4 py-1.5">
           <h2 id={titleId} className="min-w-0 text-sm font-semibold text-fg">
             {title}
           </h2>
-          <div className="flex items-center gap-2">{extra}</div>
+          <div className="ml-auto flex min-w-0 items-center gap-2">{extra}</div>
         </header>
       )}
       {children}
@@ -577,6 +579,8 @@ export type ComboboxProps = ComboValue & {
   variant?: 'default' | 'inline'
   /** inline 时触发器上的图标（默认漏斗） */
   trigger?: ReactNode
+  /** inline 时把图标放在当前值后面：写在一句话里的下拉（「日均 · 所选账期 ▾」）读起来才顺 */
+  triggerEnd?: boolean
   /** `sm`：与 `h-8 text-xs` 的工具栏控件对齐（费用页顶栏） */
   size?: 'md' | 'sm'
   /**
@@ -622,6 +626,7 @@ export function Combobox(props: ComboboxProps) {
     allowCustom = false,
     variant = 'default',
     trigger,
+    triggerEnd = false,
     size = 'md',
     floating = false,
     onOpenChange,
@@ -641,6 +646,8 @@ export function Combobox(props: ComboboxProps) {
     notify.current?.(open)
   }, [open])
   const [alignRight, setAlignRight] = useState(false)
+  // 菜单最宽能有多宽：朝哪边展开，就是那一边到屏幕边缘的距离（留 8px）
+  const [menuMaxW, setMenuMaxW] = useState(COMBO_MENU_W)
   // inline 变体的菜单锚点：触发器的屏幕坐标（打开那一刻量的）
   const [anchor, setAnchor] = useState<{ top: number; left: number; right: number; width: number } | null>(null)
   const inline = variant === 'inline'
@@ -715,8 +722,13 @@ export function Combobox(props: ComboboxProps) {
   const openMenu = () => {
     if (disabled) return
     const rect = box.current?.getBoundingClientRect()
-    // 靠右的下拉（页头那几个）往左展开，不然超出屏幕
-    setAlignRight(!!rect && rect.left + COMBO_MENU_W > window.innerWidth)
+    // 靠右的下拉（页头那几个）往左展开，不然超出屏幕。但只在左边地方更大时才往左：手机上两边
+    // 都放不下 420px，靠左的下拉（费用页的起始账期）一律往左展开的话，菜单整个出了屏幕
+    const spaceRight = rect ? window.innerWidth - rect.left : COMBO_MENU_W
+    const spaceLeft = rect ? rect.right : 0
+    const toLeft = spaceRight < COMBO_MENU_W && spaceLeft > spaceRight
+    setAlignRight(toLeft)
+    setMenuMaxW(Math.max(160, Math.min(COMBO_MENU_W, (toLeft ? spaceLeft : spaceRight) - 8)))
     setAnchor(rect ? { top: rect.bottom, left: rect.left, right: window.innerWidth - rect.right, width: rect.width } : null)
     setQ('')
     // 清了搜索词，高亮直接按未筛选的列表算（clearable 的话前面还多一行「全部」）
@@ -805,9 +817,10 @@ export function Combobox(props: ComboboxProps) {
       >
         {inline ? (
           <>
-            {trigger ?? <FilterIcon className="size-3 shrink-0" aria-hidden />}
+            {!triggerEnd && (trigger ?? <FilterIcon className="size-3 shrink-0" aria-hidden />)}
             {picked.length > 0 && <span className={cn('min-w-0 truncate font-medium', mono && 'mono')}>{labelOf(picked[0])}</span>}
             {picked.length > 1 && <span className="shrink-0 text-2xs font-medium">+{picked.length - 1}</span>}
+            {triggerEnd && (trigger ?? <FilterIcon className="size-3 shrink-0" aria-hidden />)}
           </>
         ) : (
           <>
@@ -838,7 +851,7 @@ export function Combobox(props: ComboboxProps) {
             !fixed && (alignRight ? 'right-0' : 'left-0'),
           )}
           style={{
-            maxWidth: `min(90vw, ${COMBO_MENU_W}px)`,
+            maxWidth: menuMaxW,
             ...(fixed && anchor ? { top: anchor.top + 4, ...(alignRight ? { right: anchor.right } : { left: anchor.left }) } : {}),
             // floating 保持「至少和触发器一样宽」，与默认的 min-w-full 一致
             ...(floating && !inline && anchor ? { minWidth: anchor.width } : {}),

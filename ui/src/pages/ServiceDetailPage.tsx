@@ -147,7 +147,8 @@ export function ServiceDetailPage() {
             </Hint>
           </span>
         )}
-        <span className="flex w-full flex-wrap items-center gap-2 md:ml-auto md:w-auto">
+        {/* 手机上六个入口排成一行横向滑，不折成两行——顶栏每多一行，底下的图就少一截 */}
+        <span className="-mx-3 flex w-[calc(100%+1.5rem)] items-center gap-2 overflow-x-auto px-3 [scrollbar-width:none] md:mx-0 md:ml-auto md:w-auto md:flex-wrap md:overflow-visible md:px-0 [&>*]:shrink-0">
           <Hint text="图和表上的变化都和这一段比" asChild>
             <Select
               value={compare}
@@ -235,9 +236,13 @@ export function ServiceDetailPage() {
           <Card
             className="mt-3 overflow-hidden md:mt-4"
             title={
-              <span className="flex items-baseline gap-2">
+              <span className="flex flex-wrap items-baseline gap-x-2">
                 和{cmpShort}比，变了的{kind === 'entry' ? '接口' : '下游调用'}
-                {movers.length > 0 && <span className="text-2xs font-normal text-muted-fg">{movers.length} 个 · 按影响面排，不按百分比</span>}
+                {movers.length > 0 && (
+                  <span className="text-2xs font-normal text-muted-fg">
+                    {movers.length} 个<span className="hidden sm:inline"> · 按影响面排，不按百分比</span>
+                  </span>
+                )}
               </span>
             }
             extra={

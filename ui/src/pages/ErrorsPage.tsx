@@ -81,7 +81,8 @@ export function ErrorsPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-3 py-2.5 md:px-4 md:py-3">
-        <h1 className="text-base font-semibold">错误</h1>
+        {/* 手机上标题让位（页签上已经写着「错误」），筛选排成两行；转圈也收起，列表加载时会变淡 */}
+        <h1 className="text-base font-semibold max-md:sr-only">错误</h1>
         {spanName ? (
           <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
             <span className="truncate">{spanName}</span>
@@ -94,8 +95,8 @@ export function ErrorsPage() {
         ) : (
           <span className="hidden text-xs text-muted-fg xl:inline">同一种报错归一组，按次数排</span>
         )}
-        {q.isFetching && <Spinner className="size-4" />}
-        <span className="ml-auto flex flex-wrap items-center gap-2">
+        {q.isFetching && <Spinner className="size-4 max-md:hidden" />}
+        <span className="flex w-full flex-wrap items-center gap-2 md:ml-auto md:w-auto">
           <StatsLine stats={q.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
           <span role="group" aria-label="统计哪一层的错误" className="flex h-8 items-center rounded-md border border-input p-0.5">
             {KINDS.map((k) => (
@@ -122,6 +123,7 @@ export function ErrorsPage() {
               </span>
             }
           />
+          <span aria-hidden className="h-0 basis-full md:hidden" />
           <Combobox
             value={service}
             onChange={(v) => set({ service: v || null, span_name: null, g: null })}
@@ -130,12 +132,12 @@ export function ErrorsPage() {
             searchPlaceholder="筛服务名…"
             emptyText="没有匹配的服务"
             loading={services.isPending}
-            className="w-52"
+            className="w-52 max-md:w-auto max-md:min-w-0 max-md:flex-1"
             title="只看这个服务的错误"
           />
-          <span className="relative">
+          <span className="relative max-md:min-w-0 max-md:flex-1">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
-            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="筛报错" className="h-8 w-36 pl-8 text-xs" aria-label="筛报错" />
+            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="筛报错" className="h-8 w-full pl-8 text-xs md:w-36" aria-label="筛报错" />
           </span>
         </span>
       </header>

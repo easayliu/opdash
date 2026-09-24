@@ -2,7 +2,7 @@ import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
 import { chartSummary } from './describe'
 import { useWidth } from './useWidth'
-import { bucketDomain, timeTicks } from './axis'
+import { bucketDomain, placeTicks, tickBudget, timeTicks } from './axis'
 import { formatDurationMs, formatNumber, formatTick, formatTs } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
@@ -175,7 +175,7 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
     setBrush(null)
   }
 
-  const ticks = useMemo(() => timeTicks(x0, x1), [x0, x1])
+  const ticks = useMemo(() => timeTicks(x0, x1, tickBudget(W, span / 8)), [x0, x1, W, span])
   // 每个数量级一条刻度；高度不够时隔档抽稀
   const decades: number[] = []
   for (let lvl = lvlLo; lvl <= lvlHi; lvl += bins) decades.push(lvl)
@@ -230,9 +230,9 @@ export function Heatmap({ fromMs, toMs, widthMs, binsPerDecade, cells, height = 
             )
           })}
           <line x1={M.left} x2={M.left + W} y1={M.top + H} y2={M.top + H} stroke="var(--axis)" strokeWidth={1} />
-          {ticks.map((t) => (
-            <text key={t} x={xOf(t)} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
-              {formatTick(t, span / 8)}
+          {placeTicks(ticks.map((t) => ({ t, x: xOf(t), text: formatTick(t, span / 8) })), width).map((k) => (
+            <text key={k.t} x={k.x} y={height - 6} textAnchor={k.anchor} fontSize={11} fill="var(--muted-fg)">
+              {k.text}
             </text>
           ))}
           {brush && Math.abs(brush.x1 - brush.x0) > 4 && (

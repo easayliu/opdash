@@ -48,16 +48,78 @@ export function formatCompact(n: number): string {
   return n.toFixed(abs < 10 ? 2 : 1)
 }
 
-/** 时间轴刻度：挑一个整齐的间隔，让刻度数在 4~8 个。 */
-export function timeTicks(fromMs: number, toMs: number): number[] {
+/** 11px 字号下数字和连字符大约 6.5px 一个字：估刻度文字宽度用。 */
+const CHAR_PX = 6.5
+
+/**
+ * 横轴放得下几个刻度。刻度数原先固定 4~8 个，桌面上正好；手机上画布只剩 300px 上下，
+ * 7 个「12:10:00」排在一起就叠成了一串。
+ *
+ * 按刻度文字的长度估：`formatTick` 按桶宽决定写法——天级「09-24」、小时级「09-24 12:00」、
+ * 其余「12:10」——每个刻度留「字宽 + 20px」。秒级桶也按「12:10」估：刻度一旦落到整分钟上
+ * 就不写秒（见 `tickUnit`），按带秒的长度估只会白白少放一两个；真到几分钟的跨度、刻度写到
+ * 秒了，挤不下的由 `placeTicks` 省掉。宽屏照旧封顶 8 个。
+ */
+export function tickBudget(plotWidth: number, widthMs: number): number {
+  const chars = widthMs >= 3_600_000 && widthMs < 86_400_000 ? 11 : 5
+  return Math.min(8, Math.max(2, Math.floor(plotWidth / (chars * CHAR_PX + 20))))
+}
+
+/**
+ * 时间刻度该写到哪一级：按桶宽写，但刻度本身落在整分钟上时不写秒。
+ *
+ * 近一小时的桶是 10 秒一格，只按桶宽的话刻度会写成「12:10:00」——末尾的 `:00` 永远是零，
+ * 白占一截宽度，窄屏上正是它让相邻刻度挤到一起。
+ */
+export function tickUnit(widthMs: number, ticks: number[]): number {
+  const step = ticks.length > 1 ? ticks[1] - ticks[0] : 0
+  return widthMs < 60_000 && step >= 60_000 ? 60_000 : widthMs
+}
+
+export interface PlacedTick {
+  t: number
+  x: number
+  text: string
+  anchor: 'start' | 'middle' | 'end'
+}
+
+/**
+ * 摆刻度文字：默认居中；贴着画布边缘的朝里对齐，免得半截字被裁掉（费用页按天看半年，
+ * 最后一个「09-24」只剩「09-2」）；朝里挪了之后跟前一个撞上的，干脆不写——刻度只是读数
+ * 的参照，少一个不丢信息，叠成一团才是真的读不出来。
+ */
+export function placeTicks(ticks: { t: number; x: number; text: string }[], svgWidth: number): PlacedTick[] {
+  const out: PlacedTick[] = []
+  let prevRight = -Infinity
+  for (const { t, x, text } of ticks) {
+    const w = text.length * CHAR_PX
+    let anchor: PlacedTick['anchor'] = 'middle'
+    let left = x - w / 2
+    if (x + w / 2 > svgWidth) {
+      anchor = 'end'
+      left = x - w
+    } else if (left < 0) {
+      anchor = 'start'
+      left = x
+    }
+    if (left < prevRight + 6) continue
+    out.push({ t, x, text, anchor })
+    prevRight = anchor === 'end' ? x : anchor === 'start' ? x + w : x + w / 2
+  }
+  return out
+}
+
+/** 时间轴刻度：挑一个整齐的间隔，让刻度数不超过 `maxCount`（默认 8 个，窄图见 `tickBudget`）。 */
+export function timeTicks(fromMs: number, toMs: number, maxCount = 8): number[] {
   const span = Math.max(1, toMs - fromMs)
   const steps = [
     1_000, 5_000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000, 900_000, 1_800_000, 3_600_000, 7_200_000,
     10_800_000, 21_600_000, 43_200_000, 86_400_000, 172_800_000, 604_800_000,
-    // 两周、四周：只有费用页按天看半年账单时用得上，否则 176 天会排出 25 个刻度挤成一团
-    1_209_600_000, 2_419_200_000,
+    // 两周、四周、八周：只有费用页按天看半年账单时用得上，否则 176 天会排出 25 个刻度挤成一团；
+    // 八周是给手机的，那里半年只放得下四五个刻度
+    1_209_600_000, 2_419_200_000, 4_838_400_000,
   ]
-  const step = steps.find((s) => span / s <= 8) ?? steps[steps.length - 1]
+  const step = steps.find((s) => span / s <= maxCount) ?? steps[steps.length - 1]
   // 天级别的刻度对齐到本地零点，其余按 UTC 秒数取整（整点 / 整分在两种时区下一致）
   const offset = step >= 86_400_000 ? new Date(fromMs).getTimezoneOffset() * 60_000 : 0
   const first = Math.ceil((fromMs - offset) / step) * step + offset

@@ -2,7 +2,7 @@ import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
 import { MAX_SPOKEN_SERIES, andMore, chartSummary } from './describe'
 import { useWidth } from './useWidth'
-import { bucketDomain, niceMax, niceRange, niceTicks, timeTicks } from './axis'
+import { bucketDomain, niceMax, niceRange, niceTicks, placeTicks, tickBudget, tickUnit, timeTicks } from './axis'
 import { formatTick, formatTs } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
@@ -116,7 +116,8 @@ export function LineChart({
     return { lo: 0, hi: niceMax(max), ticks: niceTicks(niceMax(max)) }
   }, [points, series, fitY])
   const yOf = (v: number) => M.top + H - (y.hi > y.lo ? ((v - y.lo) / (y.hi - y.lo)) * H : 0)
-  const ticks = useMemo(() => timeTicks(x0, x1), [x0, x1])
+  const ticks = useMemo(() => timeTicks(x0, x1, tickBudget(W, widthMs)), [x0, x1, W, widthMs])
+  const unit = tickUnit(widthMs, ticks)
 
   /**
    * 读屏念的那句话：什么图、哪一段时间、每条线最新多少、最高多少（见 ./describe）。
@@ -226,9 +227,9 @@ export function LineChart({
             </g>
           ))}
           <line x1={M.left} x2={M.left + W} y1={M.top + H} y2={M.top + H} stroke="var(--axis)" strokeWidth={1} />
-          {ticks.map((t) => (
-            <text key={t} x={M.left + ((t - fromMs) / span) * W} y={height - 6} textAnchor="middle" fontSize={11} fill="var(--muted-fg)">
-              {formatTick(t, widthMs)}
+          {placeTicks(ticks.map((t) => ({ t, x: M.left + ((t - fromMs) / span) * W, text: formatTick(t, unit) })), width).map((k) => (
+            <text key={k.t} x={k.x} y={height - 6} textAnchor={k.anchor} fontSize={11} fill="var(--muted-fg)">
+              {k.text}
             </text>
           ))}
           {series.map((s) => {

@@ -21,6 +21,7 @@ import { HeaderFilter, SortHeader, ariaSort, type ColFilter, type LogSort } from
 import { Combobox, Hint, Input, PopoverPanel, Spinner, buttonClass } from '@/components/ui'
 import { PROVIDER_LABELS, formatMoney, formatMoneyShort } from '@/lib/bills'
 import { fieldDoc } from '@/lib/billFields'
+import { useIsMobile } from '@/lib/media'
 import { cn } from '@/lib/utils'
 
 export interface DetailColumn {
@@ -407,7 +408,12 @@ export function BillDetailTable({
   /** 金额口径（应付 / 现金 / 原价），写进金额列的表头 */
   amountLabel: string
 }) {
-  const cols = columns.filter((c) => shown.has(c.key))
+  const isMobile = useIsMobile()
+  const picked = columns.filter((c) => shown.has(c.key))
+  // 手机上一屏只放得下两三列，按原顺序金额排在最末，要横滑到头才看得到。把「产品 + 金额」
+  // 提到最前，其余照旧往右排；表头的排序与筛选都还在，不换成卡片丢掉它们
+  const lead = isMobile ? picked.filter((c) => c.key === 'product' || c.key === 'amount') : []
+  const cols = lead.length ? [...lead, ...picked.filter((c) => !lead.includes(c))] : picked
   if (pending) {
     return (
       <div className="flex justify-center py-10">
@@ -454,7 +460,7 @@ export function BillDetailTable({
                     key={c.key}
                     className={cn(
                       'px-3 py-1.5',
-                      c.numeric ? 'text-right whitespace-nowrap tabular-nums' : 'max-w-48 truncate',
+                      c.numeric ? 'text-right whitespace-nowrap tabular-nums' : 'max-w-36 truncate md:max-w-48',
                       c.key === 'amount' && 'font-medium',
                       c.key !== 'amount' && c.key !== 'product' && c.key !== 'instance' && c.key !== 'day' && 'text-muted-fg',
                     )}
