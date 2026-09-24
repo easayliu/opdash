@@ -325,6 +325,9 @@ describe('费用页', () => {
     expect(await screen.findByText('ECS 其余部分')).toBeInTheDocument()
     // 预付费摊来的那一行标着「摊销」，且不给日均
     expect(await screen.findByText('预付费摊销')).toBeInTheDocument()
+    // 点这一行的其他位置（小计那一格）同样能收起
+    await userEvent.click(within(split).getAllByText('600.00')[0])
+    expect(screen.queryByText('甲线专用机器')).not.toBeInTheDocument()
   })
 
   it('产品费用对比默认比各云都已出账的最后一天与前一天，可按变动排序', async () => {

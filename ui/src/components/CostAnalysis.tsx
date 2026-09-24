@@ -494,12 +494,17 @@ function MonthlySplit({
               const name = k ?? '未归属'
               const { line, projected, daily } = row
               const isOpen = canExpand && open === name
+              const expandable = canExpand && !!line && line.items.length > 0
               return (
                 <Fragment key={name}>
-                  <tr className="row-hover border-b border-border/60">
+                  {/* 整行都能点开；业务线名那个按钮留给键盘与读屏，它的点击冒泡到行上，不另绑一次 */}
+                  <tr
+                    onClick={expandable ? () => setOpen(isOpen ? null : name) : undefined}
+                    className={cn('row-hover border-b border-border/60', expandable && 'cursor-pointer')}
+                  >
                     <th scope="row" className="sticky left-0 z-10 bg-card px-3 py-2 text-left font-normal">
-                      {canExpand && line && line.items.length > 0 ? (
-                        <button type="button" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : name)} className="flex items-center gap-1.5 text-left">
+                      {expandable ? (
+                        <button type="button" aria-expanded={isOpen} className="flex items-center gap-1.5 text-left">
                           <ChevronRightIcon className={cn('size-3.5 shrink-0 text-muted-fg transition-transform', isOpen && 'rotate-90')} />
                           <Swatch color={k === null ? UNMATCHED_COLOR : lineColor(order, k)} />
                           <span className={cn('font-medium', k === null && 'text-muted-fg')}>{name}</span>
