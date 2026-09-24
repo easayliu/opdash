@@ -556,29 +556,27 @@ function Breakdown({
   if (!rows.length) return <div className="px-4 py-8 text-center text-xs text-muted-fg">所选账期内没有账单</div>
   return (
     <div className={cn(stale && 'opacity-60 transition-opacity')}>
-      <ul>
-        {rows.map((r) => (
-          <li key={r.key}>
+      {/* 一项一行、宽屏分两栏：原先一项占两行，十五项就撑出半屏 */}
+      <ul className="grid lg:grid-flow-col lg:grid-cols-2 lg:gap-x-4" style={{ gridTemplateRows: `repeat(${Math.ceil(rows.length / 2)}, auto)` }}>
+        {rows.map((r, i) => (
+          <li key={r.key} className="min-w-0">
             <button
               type="button"
               onClick={() => onPick(r.key)}
               aria-pressed={selected === r.key}
-              className={cn('row-hover flex w-full items-center gap-3 px-3 py-1.5 text-left', selected === r.key && 'bg-accent-soft/50')}
+              className={cn('row-hover flex w-full items-center gap-3 px-3 py-1 text-left text-xs', selected === r.key && 'bg-accent-soft/50')}
             >
-              <span className="min-w-0 flex-1">
-                <span className="flex items-baseline gap-2">
-                  <span className="truncate text-xs">{r.key}</span>
-                  {Object.keys(r.by_provider).length > 1 && <Badge tone="muted">两云均有</Badge>}
-                </span>
-                {/* 占比条：长度为占总额的比例，一眼可见哪几项占去大半 */}
-                <span className="mt-1 block h-1.5 w-full rounded-full bg-muted">
-                  <span className="block h-full rounded-full bg-brand" style={{ width: `${Math.min(100, r.share * 100)}%` }} />
-                </span>
+              <span className="w-5 shrink-0 text-right text-2xs text-muted-fg tabular-nums">{i + 1}</span>
+              <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                <span className="truncate">{r.key}</span>
+                {Object.keys(r.by_provider).length > 1 && <Badge tone="muted">两云均有</Badge>}
               </span>
-              <span className="shrink-0 text-right">
-                <span className="block text-xs font-semibold tabular-nums">{formatMoney(r.amount)}</span>
-                <span className="block text-2xs text-muted-fg tabular-nums">{(r.share * 100).toFixed(1)}%</span>
+              {/* 占比条：长度为占总额的比例，一眼可见哪几项占去大半 */}
+              <span aria-hidden className="hidden h-1.5 w-20 shrink-0 rounded-full bg-muted sm:block">
+                <span className="block h-full rounded-full bg-brand" style={{ width: `${Math.min(100, r.share * 100)}%` }} />
               </span>
+              <span className="w-12 shrink-0 text-right text-2xs text-muted-fg tabular-nums">{(r.share * 100).toFixed(1)}%</span>
+              <span className="w-24 shrink-0 text-right font-semibold tabular-nums">{formatMoney(r.amount)}</span>
             </button>
           </li>
         ))}
