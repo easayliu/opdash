@@ -14,11 +14,12 @@
  *
  * 页尾的「产品费用对比」补上日均看不到的一面：某一天（或近几天）各产品比之前多花或少花了多少。
  */
-import { Fragment, useMemo, useState } from 'react'
-import { CalendarDaysIcon, ChevronRightIcon, CircleAlertIcon, DownloadIcon, TrendingUpIcon, WalletIcon, type LucideIcon } from 'lucide-react'
-import { useBillAllocation, useBillProductDays } from '@/api/queries'
-import type { BillAllocItem, BillAllocLine, BillAllocPoint, BillAllocationResponse, BillProductDaysResponse, BillsMeta } from '@/api/types'
+import { Fragment, useMemo, useRef, useState } from 'react'
+import { ArrowUpRightIcon, CalendarDaysIcon, ChevronRightIcon, CircleAlertIcon, DownloadIcon, TrendingUpIcon, WalletIcon, XIcon, type LucideIcon } from 'lucide-react'
+import { useBillAllocation, useBillAllocationDay, useBillProductDays } from '@/api/queries'
+import type { BillAllocDayItem, BillAllocItem, BillAllocLine, BillAllocPoint, BillAllocationResponse, BillProductDaysResponse, BillProvider, BillsMeta } from '@/api/types'
 import { Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Spinner, buttonClass } from '@/components/ui'
+import { HeaderFilter, SortHeader, ariaSort, type ColFilter, type LogSort } from '@/components/LogTable'
 import { LineChart, Legend, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
 import { AMOUNTS, PROVIDER_LABELS, changeRatio, daysInMonth, dayTick, formatChange, formatMoney, formatMoneyShort, formatMoneyTick, periodSlots, periodSpan, periodTick, shiftPeriod } from '@/lib/bills'
@@ -58,6 +59,8 @@ export function CostAnalysis({
   bills,
   days,
   estimate,
+  onFilter,
+  onDrill,
 }: {
   /** 与「账单」视图共用的查询条件：账期、金额口径、云、搜索、维度筛选 */
   base: Record<string, string | undefined>
@@ -67,6 +70,10 @@ export function CostAnalysis({
   days: string
   /** 预估哪个月，`YYYY-MM`。两项口径的选择器在页头，见 `AnalysisControls` */
   estimate: string
+  /** 设置或清除某个维度的筛选（写到 URL 上，与账单视图同一套条件）；「按产品」的表头筛选用 */
+  onFilter: (dim: string, value: string | null) => void
+  /** 从按天钻取跳到账单视图的明细：那一天、那朵云、那个产品 */
+  onDrill: (target: DrillTarget) => void
 }) {
   const params = useMemo(() => ({ ...base, days: days || undefined }), [base, days])
   const alloc = useBillAllocation(params, ready)
@@ -74,6 +81,10 @@ export function CostAnalysis({
   // 构成图里单独查看的那条业务线；与列表的展开各管各的，互不牵动
   const [focus, setFocus] = useState<string | null>(null)
   const [allProducts, setAllProducts] = useState(false)
+  const [productSort, setProductSort] = useState<LogSort>({ key: 'amount', dir: 'desc' })
+  // 构成图里点选钻取的那一天。换了账期或筛选、那一天不在图上了，就收起
+  const [pickedDay, setPickedDay] = useState<string | null>(null)
+  const drillDay = pickedDay && data?.granularity === 'daily' && data.points.some((p) => p.t === pickedDay) ? pickedDay : null
   const products = data?.products ?? []
 
   const nights = daysInMonth(estimate)
@@ -202,9 +213,25 @@ export function CostAnalysis({
         <Card
           title={data?.granularity === 'daily' ? '按天的业务线构成' : '按账期的业务线构成'}
           extra={
-            <span className="text-2xs text-muted-fg">
-              {data?.points.length} {data?.granularity === 'daily' ? '天' : '个账期'}
-              {prepaid && ' · 仅含后付费'}
+            <span className="flex items-center gap-2">
+              <span className="hidden text-2xs text-muted-fg sm:inline">
+                {data?.points.length} {data?.granularity === 'daily' ? '天' : '个账期'}
+                {prepaid && ' · 仅含后付费'}
+                {data?.granularity === 'daily' && ' · 点击柱体查看当日构成'}
+              </span>
+              {/* 与点柱子同一个效果；图只能用鼠标点，这个下拉键盘也够得着 */}
+              {data?.granularity === 'daily' && (
+                <Combobox
+                  value={drillDay ?? ''}
+                  onChange={(v) => setPickedDay(v || null)}
+                  options={[...(data?.points ?? [])].reverse().map((p) => ({ value: p.t, label: dayLabel(p.t) }))}
+                  placeholder="当日构成"
+                  searchPlaceholder="筛日期…"
+                  title="查看某一天的构成"
+                  size="sm"
+                  className="w-32"
+                />
+              )}
             </span>
           }
         >
@@ -220,9 +247,24 @@ export function CostAnalysis({
             estimate={estimate}
             focus={focus === UNMATCHED || lines.some((l) => l.name === focus) ? focus : null}
             onFocus={setFocus}
+            day={drillDay}
+            onDay={data?.granularity === 'daily' ? setPickedDay : undefined}
             stale={alloc.isFetching}
           />
         </Card>
+      )}
+
+      {drillDay && (
+        <DayDrill
+          base={base}
+          ready={ready}
+          day={drillDay}
+          configured={!!bills.allocation}
+          order={bills.allocation?.lines ?? []}
+          focusLine={focus && focus !== UNMATCHED ? focus : null}
+          onClose={() => setPickedDay(null)}
+          onDrill={onDrill}
+        />
       )}
 
       <Card title="按产品" extra={<span className="text-2xs text-muted-fg">不区分业务线，与账单口径一致</span>}>
@@ -232,8 +274,16 @@ export function CostAnalysis({
           </div>
         ) : (
           <>
-            {/* 七十来个产品一口气铺开，要找的那几个反被淹没；默认只列金额最大的一批 */}
-            <ItemTable items={allProducts ? products : products.slice(0, PRODUCT_TOP)} nights={nights} max={Math.max(0, ...products.map((p) => p.amount))} />
+            {/* 七十来个产品一口气铺开，要找的那几个反被淹没；默认只列排在前面的一批（先排序、后截取） */}
+            <ProductTable
+              products={products}
+              limit={allProducts ? undefined : PRODUCT_TOP}
+              nights={nights}
+              sort={productSort}
+              onSort={setProductSort}
+              selected={base.product}
+              onFilter={(v) => onFilter('product', v)}
+            />
             {products.length > PRODUCT_TOP && (
               <button
                 type="button"
@@ -667,21 +717,123 @@ function MonthlySummary({ data, stale }: { data: BillAllocationResponse; stale?:
   )
 }
 
-/** 产品明细：金额、日均、月度预估 */
-function ItemTable({ items, nights, compact, max = Math.max(0, ...items.map((i) => i.amount)) }: { items: BillAllocItem[]; nights: number; compact?: boolean; max?: number }) {
-  if (!items.length) return <div className="px-4 py-6 text-center text-xs text-muted-fg">暂无数据</div>
+/** 「按产品」能排的列：与账单明细一样，数字先看大的、文字先看 A–Z */
+const PRODUCT_SORTS: Record<string, (i: BillAllocItem, nights: number) => number | string> = {
+  product: (i) => i.product,
+  amount: (i) => i.amount,
+  share: (i) => i.share,
+  daily: (i) => i.daily ?? -Infinity,
+  projected: (i, n) => (i.daily === null ? -Infinity : i.daily * n),
+}
+
+/**
+ * 分析视图的「按产品」：与账单视图的明细同一套交互——点列头排序，产品列的表头下拉筛选。
+ *
+ * 产品不过七十来项、已全部取回，排序就在页面上做，不必像账单明细那样回库。筛选则写进 URL 上的
+ * `product`，与账单视图共用：选中一个产品，统计卡片、按月拆分、构成图都只剩它。下拉的候选项
+ * 记的是**未按产品筛选时**的那份列表，筛过之后列表只剩一项，从中换不了别的产品
+ */
+function ProductTable({
+  products,
+  limit,
+  nights,
+  sort,
+  onSort,
+  selected,
+  onFilter,
+}: {
+  products: BillAllocItem[]
+  /** 只列前几项；不给就全列 */
+  limit?: number
+  nights: number
+  sort: LogSort
+  onSort: (sort: LogSort) => void
+  selected?: string
+  onFilter: (value: string | null) => void
+}) {
+  const names = useRef<string[]>([])
+  if (!selected && products.length) names.current = [...new Set(products.map((p) => p.product))].sort((a, b) => a.localeCompare(b))
+  const by = PRODUCT_SORTS[sort.key] ?? PRODUCT_SORTS.amount
+  const sorted = [...products].sort((a, b) => {
+    const x = by(a, nights)
+    const y = by(b, nights)
+    const c = typeof x === 'string' ? x.localeCompare(String(y)) : x - (y as number)
+    return (sort.dir === 'asc' ? c : -c) || b.amount - a.amount
+  })
+  const filter: ColFilter = {
+    value: selected ?? '',
+    options: (names.current.length ? names.current : [...new Set(products.map((p) => p.product))]).map((v) => ({ value: v })),
+    onChange: (v) => onFilter(v || null),
+  }
+  return (
+    <ItemTable
+      items={limit ? sorted.slice(0, limit) : sorted}
+      nights={nights}
+      max={Math.max(0, ...products.map((p) => p.amount))}
+      sort={sort}
+      onSort={(key) => onSort({ key, dir: sort.key === key ? (sort.dir === 'desc' ? 'asc' : 'desc') : key === 'product' ? 'asc' : 'desc' })}
+      productFilter={filter}
+      showShare
+    />
+  )
+}
+
+/**
+ * 产品明细：金额、日均、月度预估。给了 `sort` / `onSort` 就是可点的表头，给了 `productFilter`
+ * 产品列带下拉筛选；业务线展开后的那张小表不给，维持原样
+ */
+function ItemTable({
+  items,
+  nights,
+  compact,
+  max = Math.max(0, ...items.map((i) => i.amount)),
+  sort,
+  onSort,
+  productFilter,
+  showShare,
+}: {
+  items: BillAllocItem[]
+  nights: number
+  compact?: boolean
+  max?: number
+  sort?: LogSort
+  onSort?: (key: string) => void
+  productFilter?: ColFilter
+  /** 多一列「占比」（占本次统计总额） */
+  showShare?: boolean
+}) {
+  const head = (key: string, label: string, align: 'left' | 'right') => (
+    <th aria-sort={ariaSort(key, sort, onSort)} className={cn('px-3 py-2 font-medium whitespace-nowrap', align === 'left' ? 'text-left' : 'text-right')}>
+      <SortHeader label={label} col={key} sort={sort} onSort={onSort} />
+    </th>
+  )
+  // 筛出来一项都没有时仍画表头：要从产品下拉里取消筛选，表头得在
+  if (!items.length && !productFilter) return <div className="px-4 py-6 text-center text-xs text-muted-fg">暂无数据</div>
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead className={cn('text-2xs text-muted-fg', !compact && 'sticky top-0 bg-card')}>
           <tr className="border-b border-border">
-            <th className="px-3 py-2 text-left font-medium">产品</th>
-            <th className="px-3 py-2 text-right font-medium">金额</th>
-            <th className="px-3 py-2 text-right font-medium">日均</th>
-            <th className="px-3 py-2 text-right font-medium">月度预估</th>
+            <th aria-sort={ariaSort('product', sort, onSort)} className={cn('px-3 py-2 text-left font-medium', productFilter && 'min-w-44')}>
+              <span className="inline-flex max-w-full items-center gap-1.5">
+                <SortHeader label="产品" col="product" sort={sort} onSort={onSort} />
+                {productFilter && <HeaderFilter col="product" label="产品" filter={productFilter} />}
+              </span>
+            </th>
+            {head('amount', '金额', 'right')}
+            {showShare && head('share', '占比', 'right')}
+            {head('daily', '日均', 'right')}
+            {head('projected', '月度预估', 'right')}
           </tr>
         </thead>
         <tbody>
+          {!items.length && (
+            <tr>
+              <td colSpan={showShare ? 5 : 4} className="px-4 py-6 text-center text-xs text-muted-fg">
+                暂无数据
+              </td>
+            </tr>
+          )}
           {items.map((item) => (
             // 同一产品常有后付费与「预付费摊销」两行，产品名、规则都一样，key 里不带 prepaid 就重复——
             // 重复的 key 会让 React 在列表变短（筛选、排序）时留下对不上的旧行
@@ -697,16 +849,30 @@ function ItemTable({ items, nights, compact, max = Math.max(0, ...items.map((i) 
                 )}
               </td>
               <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums">
-                <span className="inline-flex items-center justify-end gap-2">
-                  {/* 金额的比例条：按本表最大的一项折算，扫一眼就知道钱集中在哪几项 */}
-                  {!compact && (
+                {/* 有占比列时比例条画在那一列；没有时画在金额前，金额定宽，条的起点才对得齐 */}
+                {!compact && !showShare ? (
+                  <span className="inline-flex items-center justify-end gap-2">
                     <span aria-hidden className="hidden h-1.5 w-24 overflow-hidden rounded-full bg-muted md:block">
                       <span className="block h-full rounded-full bg-accent/70" style={{ width: `${max > 0 ? Math.max(0, (item.amount / max) * 100) : 0}%` }} />
                     </span>
-                  )}
-                  {formatMoney(item.amount)}
-                </span>
+                    <span className="min-w-24 text-right">{formatMoney(item.amount)}</span>
+                  </span>
+                ) : (
+                  formatMoney(item.amount)
+                )}
               </td>
+              {showShare && (
+                <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums text-muted-fg">
+                  {/* 与「按月拆分」的占比列同一个画法：条按占比折算，扫一眼就知道钱集中在哪几项 */}
+                  <span className="inline-flex items-center justify-end gap-2">
+                    <span aria-hidden className="hidden h-1.5 w-20 overflow-hidden rounded-full bg-muted sm:block">
+                      <span className="block h-full rounded-full bg-accent/70" style={{ width: `${Math.min(100, Math.max(0, item.share * 100))}%` }} />
+                    </span>
+                    {/* 百分比定宽：「9.5%」比「34.1%」窄，不定宽的话右对齐会把左边的条推得参差不齐 */}
+                    <span className="w-12 text-right">{(item.share * 100).toFixed(1)}%</span>
+                  </span>
+                </td>
+              )}
               <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums text-muted-fg">
                 {item.daily === null ? '—' : formatMoney(item.daily)}
               </td>
@@ -1054,6 +1220,254 @@ function ProductTrend({ data, cmp, product, amounts }: { data: BillProductDaysRe
   )
 }
 
+/** 从钻取跳到账单明细时带过去的条件 */
+export interface DrillTarget {
+  provider: BillProvider
+  product: string
+  day: string
+}
+
+/** 钻取表里的一行：一条业务线（可展开），或一个产品 */
+interface DrillRow {
+  key: string
+  label: string
+  color?: string
+  current: number
+  previous: number
+  /** 产品行才有：跳到账单明细用 */
+  item?: BillAllocDayItem
+  children?: BillAllocDayItem[]
+}
+
+/**
+ * 按天钻取：构成图里点某一天，这里列出那一天各业务线由哪些产品构成，并与前一天对比；
+ * 每个产品可一键跳到账单视图的明细（那一天、那朵云、那个产品）。
+ *
+ * 数据单独查（`/api/bills/allocation/day`）：分析接口只给到「每天 × 业务线」，拆不到产品。
+ * 口径与构成图一致，只含后付费。构成图上单独查看着哪条线，这里默认展开它
+ */
+function DayDrill({
+  base,
+  ready,
+  day,
+  configured,
+  order,
+  focusLine,
+  onClose,
+  onDrill,
+}: {
+  base: Record<string, string | undefined>
+  ready: boolean
+  day: string
+  configured: boolean
+  order: string[]
+  focusLine: string | null
+  onClose: () => void
+  onDrill: (target: DrillTarget) => void
+}) {
+  const params = useMemo(() => ({ ...withoutPeriod(base), day }), [base, day])
+  const q = useBillAllocationDay(params, ready)
+  const data = q.data
+  const [mode, setMode] = useState<'line' | 'product'>(configured ? 'line' : 'product')
+  // 手动展开 / 收起过就听手动的；换了一天，退回「跟着构成图上单独查看的那条线」
+  const [manual, setManual] = useState<{ day: string; line: string | null } | null>(null)
+  const expanded = manual?.day === day ? manual.line : focusLine
+  const byLine = configured && mode === 'line'
+  const rows: DrillRow[] = !data
+    ? []
+    : byLine
+      ? [
+          ...data.lines.map((l) => ({ key: l.name, label: l.name, color: lineColor(order, l.name), current: l.current, previous: l.previous, children: l.items })),
+          // 已按配置并入某条线的，那条线里已经有它，不另列
+          ...(!data.unmatched_into && data.unmatched.items.length
+            ? [{ key: UNMATCHED, label: '未归属', color: UNMATCHED_COLOR, current: data.unmatched.current, previous: data.unmatched.previous, children: data.unmatched.items }]
+            : []),
+        ]
+      : data.products.map((i) => ({ key: `${i.provider}-${i.product}`, label: i.product, current: i.current, previous: i.previous, item: i }))
+  const multiCloud = new Set(data?.products.map((p) => p.provider)).size > 1
+  const delta = data ? data.current - data.previous : 0
+
+  return (
+    <Card
+      title={`${dayLabel(day)} 当日构成`}
+      extra={
+        <span className="flex items-center gap-2">
+          {q.isFetching && <Spinner className="size-4" />}
+          {configured && (
+            <span role="group" aria-label="钻取口径" className="flex h-7 items-center rounded-md border border-input p-0.5">
+              {(
+                [
+                  ['line', '按业务线'],
+                  ['product', '按产品'],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={mode === key}
+                  onClick={() => setMode(key)}
+                  className={cn('h-full rounded-sm px-2 text-xs whitespace-nowrap text-muted-fg hover:text-fg', mode === key && 'bg-accent-soft text-accent')}
+                >
+                  {label}
+                </button>
+              ))}
+            </span>
+          )}
+          <button type="button" onClick={onClose} aria-label="关闭当日构成" className={buttonClass({ variant: 'ghost', size: 'xs' })}>
+            <XIcon className="size-3.5" />
+          </button>
+        </span>
+      }
+    >
+      {q.isError ? (
+        <ErrorBox error={q.error} onRetry={() => q.refetch()} />
+      ) : !data ? (
+        <div className="flex justify-center py-10">
+          <Spinner />
+        </div>
+      ) : (
+        <div className={cn(q.isFetching && 'opacity-60 transition-opacity')}>
+          <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 border-b border-border px-4 py-2.5 text-xs">
+            <span>
+              <span className="text-muted-fg">{dayLabel(data.day)} 合计 </span>
+              <span className="font-semibold tabular-nums">{formatMoney(data.current)}</span>
+            </span>
+            <span>
+              <span className="text-muted-fg">{dayLabel(data.previous_day)} 合计 </span>
+              <span className="tabular-nums">{formatMoney(data.previous)}</span>
+            </span>
+            <span className={cn('tabular-nums', changeTone(delta))}>
+              {formatDelta(delta)}（{formatChange(changeRatio(data.current, data.previous))}）
+            </span>
+            <span className="ml-auto text-2xs text-muted-fg">仅含后付费 · 点「明细」查看该产品当天的逐行账单</span>
+          </div>
+          {data.unmatched_into && data.unmatched.current + data.unmatched.previous > 0 && byLine && (
+            <p className="border-b border-border px-4 py-2 text-2xs text-muted-fg">
+              未命中归属规则的费用已按配置计入「{data.unmatched_into}」，当天 {formatMoney(data.unmatched.current)}。
+            </p>
+          )}
+          <DrillTable rows={rows} day={data.day} previousDay={data.previous_day} multiCloud={multiCloud} expanded={expanded} onExpand={(line) => setManual({ day, line })} onDrill={onDrill} />
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function DrillTable({
+  rows,
+  day,
+  previousDay,
+  multiCloud,
+  expanded,
+  onExpand,
+  onDrill,
+}: {
+  rows: DrillRow[]
+  day: string
+  previousDay: string
+  multiCloud: boolean
+  expanded: string | null
+  onExpand: (key: string | null) => void
+  onDrill: (target: DrillTarget) => void
+}) {
+  if (!rows.length) return <div className="px-4 py-6 text-center text-xs text-muted-fg">这两天均无后付费账单</div>
+  const max = Math.max(0, ...rows.map((r) => Math.abs(r.current - r.previous)))
+  const drillButton = (i: BillAllocDayItem) => (
+    <button
+      type="button"
+      onClick={(e) => {
+        // 行本身点了是展开 / 收起，这个按钮别让它再冒上去
+        e.stopPropagation()
+        onDrill({ provider: i.provider, product: i.product, day })
+      }}
+      className="inline-flex items-center gap-0.5 text-2xs text-accent hover:underline"
+      aria-label={`查看 ${i.product} 在 ${day} 的账单明细`}
+    >
+      明细
+      <ArrowUpRightIcon className="size-3" />
+    </button>
+  )
+  const cells = (current: number, previous: number, barMax: number) => {
+    const d = current - previous
+    const ratio = changeRatio(current, previous)
+    return (
+      <>
+        <td className="px-3 py-1.5 text-right whitespace-nowrap text-muted-fg">
+          <Money value={previous} />
+        </td>
+        <td className="px-3 py-1.5 text-right font-medium whitespace-nowrap">
+          <Money value={current} />
+        </td>
+        <td className="hidden px-3 py-1.5 sm:table-cell">
+          <DeltaBar delta={d} max={barMax} />
+        </td>
+        <td className={cn('px-3 py-1.5 text-right whitespace-nowrap', changeTone(d))}>{formatDelta(d)}</td>
+        <td className={cn('px-3 py-1.5 text-right whitespace-nowrap', changeTone(d))}>{ratio === null ? (current > 0 ? '新增' : '—') : formatChange(ratio)}</td>
+      </>
+    )
+  }
+  const product = (i: BillAllocDayItem) => (
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="truncate">{i.product}</span>
+      {multiCloud && <span className="shrink-0 text-2xs text-muted-fg">{PROVIDER_LABELS[i.provider]}</span>}
+      {i.rule && <span className="shrink-0 text-2xs text-muted-fg">{i.rule}</span>}
+    </span>
+  )
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs tabular-nums">
+        <thead className="text-2xs text-muted-fg">
+          <tr className="border-b border-border">
+            <th className="px-3 py-2 text-left font-medium">{rows.some((r) => r.children) ? '业务线 / 产品' : '产品'}</th>
+            <th className="px-3 py-2 text-right font-medium whitespace-nowrap">{dayLabel(previousDay)}</th>
+            <th className="px-3 py-2 text-right font-medium whitespace-nowrap">{dayLabel(day)}</th>
+            <th className="hidden w-32 px-3 py-2 text-center font-medium sm:table-cell">变动</th>
+            <th className="px-3 py-2 text-right font-medium">变动额</th>
+            <th className="px-3 py-2 text-right font-medium">变动率</th>
+            <th className="w-14 px-3 py-2" />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const isOpen = !!r.children && expanded === r.key
+            const childMax = Math.max(0, ...(r.children ?? []).map((i) => Math.abs(i.current - i.previous)))
+            return (
+              <Fragment key={r.key}>
+                <tr
+                  onClick={r.children ? () => onExpand(isOpen ? null : r.key) : undefined}
+                  className={cn('row-hover border-b border-border/60 last:border-b-0', r.children && 'cursor-pointer')}
+                >
+                  <td className="max-w-72 px-3 py-1.5">
+                    {r.children ? (
+                      <button type="button" aria-expanded={isOpen} className="flex max-w-full items-center gap-1.5 text-left">
+                        <ChevronRightIcon className={cn('size-3.5 shrink-0 text-muted-fg transition-transform', isOpen && 'rotate-90')} />
+                        {r.color && <Swatch color={r.color} />}
+                        <span className="truncate font-medium">{r.label}</span>
+                      </button>
+                    ) : (
+                      r.item && product(r.item)
+                    )}
+                  </td>
+                  {cells(r.current, r.previous, max)}
+                  <td className="px-3 py-1.5 text-right">{r.item && drillButton(r.item)}</td>
+                </tr>
+                {isOpen &&
+                  r.children?.map((i) => (
+                    <tr key={`${i.provider}-${i.product}-${i.rule ?? ''}`} className="border-b border-border/60 bg-muted/20">
+                      <td className="max-w-72 py-1.5 pr-3 pl-10">{product(i)}</td>
+                      {cells(i.current, i.previous, childMax)}
+                      <td className="px-3 py-1.5 text-right">{drillButton(i)}</td>
+                    </tr>
+                  ))}
+              </Fragment>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 /**
  * 业务线构成的堆叠柱状图。
  *
@@ -1073,6 +1487,8 @@ function LineBars({
   estimate,
   focus,
   onFocus,
+  day,
+  onDay,
   order,
   stale,
 }: {
@@ -1087,6 +1503,10 @@ function LineBars({
   estimate: string
   focus: string | null
   onFocus: (line: string | null) => void
+  /** 钻取中的那一天：图上画一条竖线标出 */
+  day?: string | null
+  /** 点某一天的柱子时调用（只有按天的图才给），打开那一天的钻取 */
+  onDay?: (day: string) => void
   /** 配置里业务线的顺序，决定颜色（见 lineColor） */
   order: string[]
   stale?: boolean
@@ -1178,8 +1598,13 @@ function LineBars({
         valueFormat={formatMoney}
         xTicks={axis.xTicks}
         bucketTitle={(t) => points[axis.index(t)]?.t ?? ''}
-        // 点在哪一段就单独查看哪条线；已在单独查看时再点即复原
-        onPointClick={({ seriesKey }) => onFocus(seriesKey && seriesKey !== focus ? seriesKey : null)}
+        // 点在哪一段就单独查看哪条线；已在单独查看时再点即复原。按天的图同时打开那一天的钻取
+        onPointClick={({ tMs, seriesKey }) => {
+          onFocus(seriesKey && seriesKey !== focus ? seriesKey : null)
+          const t = points[axis.index(tMs)]?.t
+          if (t && onDay) onDay(t)
+        }}
+        events={day ? [{ t_ms: new Date(`${day}T00:00:00`).getTime(), label: `钻取：${day}` }] : undefined}
         stale={stale}
         label={`按业务线的费用（${unit === '天' ? '按天' : '按账期'}）`}
         height={200}

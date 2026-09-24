@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router'
@@ -18,7 +18,14 @@ const META = {
   bills: {
     providers: ['volcengine', 'alicloud'],
     daily_providers: ['volcengine'],
-    volcengine: { table: 'volcengine_bill', columns: [], dimensions: [] },
+    volcengine: {
+      table: 'volcengine_bill',
+      columns: [
+        { name: 'ExpenseDate', type: 'String', kind: 'string' },
+        { name: 'Count', type: 'Decimal(20, 8)', kind: 'float' },
+      ],
+      dimensions: [],
+    },
     alicloud_monthly: { table: 'alicloud_bill_monthly', columns: [], dimensions: [] },
     alicloud_daily: null,
     dedupe: 'group',
@@ -109,6 +116,38 @@ const PRODUCT_DAYS = {
   stats: STATS,
 }
 
+/** 按天钻取：21 日与 20 日 */
+const ALLOC_DAY = {
+  day: '2026-09-21',
+  previous_day: '2026-09-20',
+  amount: 'payable',
+  configured: true,
+  current: 250,
+  previous: 550,
+  lines: [
+    {
+      name: '甲线',
+      current: 150,
+      previous: 250,
+      items: [
+        { provider: 'alicloud', product: '云服务器 ECS', rule: '甲线专用机器', current: 150, previous: 150 },
+        { provider: 'alicloud', product: '云服务器 ECS', rule: 'ECS 其余部分', current: 0, previous: 100 },
+      ],
+    },
+    { name: '乙线', current: 0, previous: 300, items: [{ provider: 'alicloud', product: '云服务器 ECS', rule: 'ECS 其余部分', current: 0, previous: 300 }] },
+  ],
+  unmatched: { name: '未归属', current: 100, previous: 0, items: [{ provider: 'volcengine', product: '对象存储', rule: null, current: 100, previous: 0 }] },
+  unmatched_into: null,
+  products: [
+    { provider: 'alicloud', product: '云服务器 ECS', rule: null, current: 150, previous: 550 },
+    { provider: 'volcengine', product: '对象存储', rule: null, current: 100, previous: 0 },
+  ],
+  stats: { read_rows: 1, read_bytes: 2, result_rows: 1, elapsed_ms: 3 },
+}
+
+/** 页面发出去的请求，按先后记下，断言「带没带某个参数」用 */
+const seen: URL[] = []
+
 /** 一份「两朵云、三个账期」的假账单。没有后端，这里验的是页面画不画得出来 */
 function stubApi(overrides: Record<string, unknown> = {}) {
   const bodies: Record<string, unknown> = {
@@ -138,6 +177,8 @@ function stubApi(overrides: Record<string, unknown> = {}) {
       stats: STATS,
     },
     '/api/bills/product-days': PRODUCT_DAYS,
+    '/api/bills/allocation/day': ALLOC_DAY,
+    '/api/bills/facets': { facets: { product: ['云服务器', '对象存储'], region: ['华北2'] }, stats: STATS },
     '/api/bills/breakdown': {
       by: 'product',
       label: '产品',
@@ -174,6 +215,7 @@ function stubApi(overrides: Record<string, unknown> = {}) {
           amount: 12.34,
           original: 20,
           paid: 12.34,
+          extra: { ExpenseDate: '2026-09-01T08:00' },
         },
       ],
       total: 1,
@@ -185,7 +227,10 @@ function stubApi(overrides: Record<string, unknown> = {}) {
   }
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://localhost')
-    const body = bodies[url.pathname] ?? {}
+    seen.push(url)
+    const hit = bodies[url.pathname] ?? {}
+    // 给函数的按请求参数现算，模拟「带了筛选条件，接口回的就变少」
+    const body = typeof hit === 'function' ? (hit as (u: URL) => unknown)(url) : hit
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
   })
 }
@@ -230,6 +275,52 @@ describe('费用页', () => {
     // 明细
     expect(await screen.findByText('web-1')).toBeInTheDocument()
     expect(await screen.findByText('12.34')).toBeInTheDocument()
+  })
+
+  it('明细可按列排序、在表头筛选，并能自选显示哪些列', async () => {
+    localStorage.clear()
+    seen.length = 0
+    stubApi()
+    page()
+    await screen.findByText('web-1')
+    const detailCalls = () => seen.filter((u) => u.pathname === '/api/bills/detail')
+    // 排序交给服务端：文字列先按 A–Z，再点一次换方向
+    await userEvent.click(screen.getByRole('button', { name: '地域' }))
+    expect(detailCalls().at(-1)?.searchParams.get('sort')).toBe('region')
+    expect(detailCalls().at(-1)?.searchParams.get('order')).toBe('asc')
+    await userEvent.click(screen.getByRole('button', { name: '地域' }))
+    expect(detailCalls().at(-1)?.searchParams.get('order')).toBe('desc')
+    // 导出的顺序与页面一致
+    expect(screen.getByRole('link', { name: /导出 CSV/ }).getAttribute('href')).toContain('sort=region')
+
+    // 候选值点开下拉才查
+    expect(seen.some((u) => u.pathname === '/api/bills/facets')).toBe(false)
+    await userEvent.click(screen.getByRole('button', { name: '按产品筛选' }))
+    await userEvent.click(await screen.findByRole('option', { name: '对象存储' }))
+    expect(seen.find((u) => u.pathname === '/api/bills/facets')?.searchParams.get('dims')).toContain('product')
+    // 表头筛选与点排行是同一套条件，顶上的筛选条同样列出
+    const chips = (await screen.findByText('筛选')).parentElement!
+    expect(within(chips).getByText('对象存储')).toBeInTheDocument()
+    expect(detailCalls().at(-1)?.searchParams.get('product')).toBe('对象存储')
+
+    // 账号默认不显示，勾上即出现，并记在浏览器里
+    expect(screen.queryByRole('columnheader', { name: /账号/ })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: '显示列' }))
+    await userEvent.click(await screen.findByRole('checkbox', { name: '账号' }))
+    expect(await screen.findByRole('columnheader', { name: /账号/ })).toBeInTheDocument()
+    expect(screen.getByText('主账号')).toBeInTheDocument()
+    expect(localStorage.getItem('opdash.bills.detail-columns.v2')).toContain('account')
+
+    // 原始字段：列出这张账单表的全部列，以中文说明作列名，按字段名也搜得到；勾了才向接口要，且能按它排序
+    await userEvent.type(screen.getByRole('textbox', { name: '搜索字段' }), 'expense')
+    expect(screen.queryByRole('checkbox', { name: /Count/ })).toBeNull()
+    await userEvent.click(screen.getByRole('checkbox', { name: /消费日期/ }))
+    expect(await screen.findByText('2026-09-01T08:00')).toBeInTheDocument()
+    expect(detailCalls().at(-1)?.searchParams.get('cols')).toBe('ExpenseDate')
+    await userEvent.keyboard('{Escape}')
+    await userEvent.click(screen.getByRole('button', { name: '消费日期' }))
+    expect(detailCalls().at(-1)?.searchParams.get('sort')).toBe('raw:ExpenseDate')
+    localStorage.clear()
   })
 
   it('下拉一律用筛选栏的自绘下拉，不再弹系统原生菜单', async () => {
@@ -351,6 +442,100 @@ describe('费用页', () => {
     // 点这一行的其他位置同样能收起
     await userEvent.click(within(card).getByText('-37.5%'))
     expect(within(card).queryByText('9/19–9/21，共 3 天')).not.toBeInTheDocument()
+  })
+
+  it('分析视图的按产品与账单明细一致：点列头排序、在产品表头筛选', async () => {
+    seen.length = 0
+    const products = [
+      ...ALLOCATION.products,
+      { product: '对象存储', rule: null, amount: 100, daily: 50, share: 0.1, prepaid: false },
+    ]
+    stubApi({ '/api/bills/allocation': { ...ALLOCATION, products } })
+    page('/cost?view=analysis&est=2026-10')
+    const card = await screen.findByRole('region', { name: '按产品' })
+    const names = () => within(card).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]?.textContent)
+    expect(await within(card).findByText('70.0%')).toBeInTheDocument()
+    expect(names()).toEqual(['云服务器 ECS', '对象存储'])
+    // 排序在页面上做：默认按金额从大到小，再点一次从小到大
+    await userEvent.click(within(card).getByRole('button', { name: '金额' }))
+    expect(names()).toEqual(['对象存储', '云服务器 ECS'])
+    // 产品筛选写进 URL，与账单视图同一套条件，整个分析视图都只看它
+    await userEvent.click(within(card).getByRole('button', { name: '按产品筛选' }))
+    await userEvent.click(await screen.findByRole('option', { name: '对象存储' }))
+    const chips = (await screen.findByText('筛选')).parentElement!
+    expect(within(chips).getByText('对象存储')).toBeInTheDocument()
+    expect(seen.filter((u) => u.pathname === '/api/bills/allocation').at(-1)?.searchParams.get('product')).toBe('对象存储')
+  })
+
+  it('按产品筛选后只剩所选产品，同名的后付费与预付费摊销两行不会残留', async () => {
+    const products = [
+      { product: '云服务器 ECS', rule: null, amount: 700, daily: 350, share: 0.7, prepaid: false },
+      { product: '云服务器 ECS', rule: null, amount: 200, daily: null, share: 0.2, prepaid: true },
+      { product: '对象存储', rule: null, amount: 100, daily: 50, share: 0.1, prepaid: false },
+    ]
+    stubApi({
+      '/api/bills/allocation': (u: URL) => {
+        const want = u.searchParams.get('product')
+        return { ...ALLOCATION, products: want ? products.filter((p) => p.product === want) : products }
+      },
+    })
+    page('/cost?view=analysis&est=2026-10')
+    const card = await screen.findByRole('region', { name: '按产品' })
+    const names = () => within(card).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]?.textContent)
+    await within(card).findByText('对象存储')
+    expect(names()).toHaveLength(3)
+    await userEvent.click(within(card).getByRole('button', { name: '按产品筛选' }))
+    await userEvent.click(await screen.findByRole('option', { name: '对象存储' }))
+    await waitFor(() => expect(names()).toEqual(['对象存储']))
+  })
+
+  it('按天钻取：选一天看各业务线由哪些产品构成，再跳到那一天那个产品的账单明细', async () => {
+    seen.length = 0
+    stubApi({ '/api/bills/allocation': ALLOCATION })
+    page('/cost?view=analysis&est=2026-10')
+    await userEvent.click(await screen.findByRole('button', { name: '查看某一天的构成' }))
+    await userEvent.click(await screen.findByRole('option', { name: /9\/21/ }))
+    const drill = await screen.findByRole('region', { name: /当日构成/ })
+    expect(seen.find((u) => u.pathname === '/api/bills/allocation/day')?.searchParams.get('day')).toBe('2026-09-21')
+    // 合计与前一天比：250 对 550
+    expect(within(drill).getByText('-300.00（-54.5%）')).toBeInTheDocument()
+    // 业务线可展开到产品，规则名标在产品旁
+    await userEvent.click(within(drill).getByRole('button', { name: '甲线' }))
+    expect(within(drill).getByText('甲线专用机器')).toBeInTheDocument()
+    // 未命中规则、也没并入哪条线的单列一行
+    expect(within(drill).getByText('未归属')).toBeInTheDocument()
+    // 按产品：云厂商不止一朵时标出来
+    await userEvent.click(within(drill).getByRole('button', { name: '按产品' }))
+    expect(within(drill).getByText('火山引擎')).toBeInTheDocument()
+
+    // 跳到账单视图的明细：那一天、那朵云、那个产品
+    await userEvent.click(within(drill).getByRole('button', { name: '查看 对象存储 在 2026-09-21 的账单明细' }))
+    await screen.findByRole('region', { name: '明细' })
+    const call = seen.filter((u) => u.pathname === '/api/bills/detail').at(-1)!
+    expect(call.searchParams.get('day_from')).toBe('2026-09-21')
+    expect(call.searchParams.get('product')).toBe('对象存储')
+    expect(call.searchParams.get('provider')).toBe('volcengine')
+    expect(screen.getByRole('button', { name: '明细的日期' })).toHaveTextContent('2026-09-21')
+  })
+
+  it('明细可按日期筛选：只作用于明细，选了日期就不再按粒度', async () => {
+    seen.length = 0
+    stubApi()
+    page('/cost?gran=monthly')
+    await screen.findByText('web-1')
+    await userEvent.click(screen.getByRole('button', { name: '明细的日期' }))
+    await userEvent.type(screen.getByPlaceholderText('筛日期，如 09-23…'), '09-23')
+    await userEvent.click(await screen.findByRole('option', { name: /2026-09-23/ }))
+    const detail = seen.filter((u) => u.pathname === '/api/bills/detail').at(-1)!
+    expect(detail.searchParams.get('day_from')).toBe('2026-09-23')
+    expect(detail.searchParams.get('granularity')).toBeNull()
+    // 统计与排行仍按账期
+    expect(seen.filter((u) => u.pathname === '/api/bills/summary').every((u) => !u.searchParams.has('day_from'))).toBe(true)
+    // 再选截止日看几天；导出跟着同一段日期
+    await userEvent.click(screen.getByRole('button', { name: '明细的截止日期' }))
+    await userEvent.click(await screen.findByRole('option', { name: /2026-09-25/ }))
+    expect(seen.filter((u) => u.pathname === '/api/bills/detail').at(-1)?.searchParams.get('day_to')).toBe('2026-09-25')
+    expect(screen.getByRole('link', { name: /导出 CSV/ }).getAttribute('href')).toContain('day_to=2026-09-25')
   })
 
   it('构成图画出未归属的部分，点图例可单独查看某条线', async () => {

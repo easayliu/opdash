@@ -43,6 +43,9 @@ export interface ColFilter {
   /** 可选的值；`note` 一般放条数 */
   options: ComboOption[]
   onChange: (v: string) => void
+  /** 候选值要现查时给：点开下拉那一刻调用 */
+  onOpen?: () => void
+  loading?: boolean
 }
 
 export interface LogSort {
@@ -128,13 +131,13 @@ function useScrollToMarked(
  * `aria-sort` 要挂在 `th` 上，不是挂在里面那个按钮上。可排序但没在排的列显式写 `none`，读屏
  * 才知道这列点了能排；不可排序的列不写这个属性。
  */
-function ariaSort(col: string, sort?: LogSort, onSort?: (key: string) => void): 'ascending' | 'descending' | 'none' | undefined {
+export function ariaSort(col: string, sort?: LogSort, onSort?: (key: string) => void): 'ascending' | 'descending' | 'none' | undefined {
   if (!onSort) return undefined
   if (sort?.key !== col) return 'none'
   return sort.dir === 'asc' ? 'ascending' : 'descending'
 }
 
-function SortHeader({ label, col, sort, onSort }: { label: string; col: string; sort?: LogSort; onSort?: (key: string) => void }) {
+export function SortHeader({ label, col, sort, onSort }: { label: string; col: string; sort?: LogSort; onSort?: (key: string) => void }) {
   if (!onSort) return <>{label}</>
   const active = sort?.key === col
   return (
@@ -149,8 +152,8 @@ function SortHeader({ label, col, sort, onSort }: { label: string; col: string; 
  * 表头里的下拉筛选：和筛选栏同一套带搜索的 Combobox，只是触发器缩成一个漏斗图标加当前值，
  * 看起来是表头的一部分。菜单 fixed 定位，不会被表格的滚动容器裁掉。
  */
-function HeaderFilter({ col, filter }: { col: string; filter: ColFilter }) {
-  const { value, options, onChange } = filter
+export function HeaderFilter({ col, filter, label = col }: { col: string; filter: ColFilter; /** 提示文字里怎么称呼这一列，默认即列名 */ label?: string }) {
+  const { value, options, onChange, onOpen, loading } = filter
   return (
     <span className="flex min-w-0 flex-1 items-center gap-0.5">
       <Combobox
@@ -158,10 +161,12 @@ function HeaderFilter({ col, filter }: { col: string; filter: ColFilter }) {
         value={value}
         options={options}
         onChange={onChange}
-        placeholder={`全部 ${col}`}
-        searchPlaceholder={`搜索 ${col}…`}
+        onOpenChange={onOpen ? (o) => o && onOpen() : undefined}
+        loading={loading}
+        placeholder={`全部${label === col ? ` ${col}` : label}`}
+        searchPlaceholder={`搜索${label === col ? ` ${col}` : label}…`}
         className="min-w-0 flex-1"
-        title={value ? `只看 ${col} = ${value}，点击换一个` : `按 ${col} 筛选`}
+        title={value ? `只看${label === col ? ` ${col} ` : label}= ${value}，点击换一个` : `按${label === col ? ` ${col} ` : label}筛选`}
       />
       {value && (
         <Hint text="取消筛选" asChild>

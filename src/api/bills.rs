@@ -31,8 +31,8 @@ use crate::error::{Error, Result};
 use crate::goscan::{Goscan, SyncRequest, TaskRow};
 use crate::query::bills::{
     AllocDetailRow, AllocPrepaidRow, AllocRow, Amount, BillFilter, BillQueries, BucketRow,
-    DEFAULT_PERIODS, DetailRow, Dimension, KeyRow, Kind, MAX_DETAIL_ROWS, MAX_PERIODS, PeriodRange,
-    PeriodRow, ProductDayRow, Provider, TotalRow, shift_period,
+    DEFAULT_PERIODS, DetailRow, DetailSort, Dimension, KeyRow, Kind, MAX_DETAIL_ROWS, MAX_PERIODS,
+    PeriodRange, PeriodRow, ProductDayRow, Provider, TotalRow, shift_period,
 };
 use crate::query::parse_tz;
 use crate::schema::{BillTable, BillTables, Schema};
@@ -44,8 +44,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/bills/daily", get(daily))
         .route("/api/bills/breakdown", get(breakdown))
         .route("/api/bills/allocation", get(allocation))
+        .route("/api/bills/allocation/day", get(allocation_day))
         .route("/api/bills/product-days", get(product_days))
         .route("/api/bills/detail", get(detail))
+        .route("/api/bills/facets", get(facets))
         .route("/api/bills/export", get(export))
         .route("/api/bills/sync", post(sync))
         .route("/api/bills/sync/running", get(sync_running))
@@ -70,6 +72,13 @@ const CONTROL_KEYS: &[&str] = &[
     "format",
     "q",
     "days",
+    "sort",
+    "order",
+    "dims",
+    "cols",
+    "day",
+    "day_from",
+    "day_to",
 ];
 
 /// 账单表在不在。不在就把原因原样告诉前端。
@@ -1172,6 +1181,163 @@ async fn product_days(
     }))
 }
 
+/// 按天钻取：某一天与前一天，各业务线由哪些产品构成、各花了多少。
+///
+/// 「按天的业务线构成」那张图点某一天时用：图只到业务线一层，想知道那一天某条线为什么涨，
+/// 得往下看到产品。口径与那张图一致——后付费、按同一套归属规则拆（预付费另走摊销，按天
+/// 看没有意义）。产品带着云厂商，页面据此跳到账单明细时知道该看哪张表。
+#[derive(Serialize)]
+pub struct AllocDayResponse {
+    pub day: String,
+    /// 前一天，比对用
+    pub previous_day: String,
+    pub amount: Amount,
+    pub configured: bool,
+    pub current: f64,
+    pub previous: f64,
+    /// 各业务线，按配置里的顺序；两天都没花钱的线不列
+    pub lines: Vec<AllocDayLine>,
+    /// 未命中任何规则的部分。配了 `unmatched` 时它已同时计入那条业务线，见 `unmatched_into`
+    pub unmatched: AllocDayLine,
+    pub unmatched_into: Option<String>,
+    /// 不分业务线，只按「云 + 产品」
+    pub products: Vec<AllocDayItem>,
+    pub stats: Stats,
+}
+
+#[derive(Serialize)]
+pub struct AllocDayLine {
+    pub name: String,
+    pub current: f64,
+    pub previous: f64,
+    pub items: Vec<AllocDayItem>,
+}
+
+#[derive(Serialize)]
+pub struct AllocDayItem {
+    pub provider: &'static str,
+    pub product: String,
+    /// 按哪条规则归来的；不分业务线的产品表、未命中规则的部分为 null
+    pub rule: Option<String>,
+    pub current: f64,
+    pub previous: f64,
+}
+
+/// （云, 产品, 规则名）→ [当天, 前一天]
+type DayItems = BTreeMap<(&'static str, String, String), [f64; 2]>;
+
+async fn allocation_day(
+    State(state): State<AppState>,
+    p: Params,
+) -> Result<Json<AllocDayResponse>> {
+    let schema = bills(&state).await?;
+    let tables = schema.bills.as_ref().expect("bills checked");
+    let amount = Amount::parse(p.get("amount"))?;
+    let day = parse_day(p.get("day").ok_or_else(|| Error::bad_request("缺少 day（YYYY-MM-DD）"))?)?;
+    let prev = day.pred_opt().ok_or_else(|| Error::bad_request("日期超出范围"))?;
+    let fallback = Alloc::default();
+    let alloc = state.alloc.as_deref().unwrap_or(&fallback);
+
+    // 账期取这两天所在的月份（前一天可能在上个月），日期条件再收到这两天
+    let mut filter = filter(&state, &p)?;
+    filter.range =
+        PeriodRange { from: prev.format("%Y-%m").to_string(), to: day.format("%Y-%m").to_string() };
+    filter.days = Some((prev.to_string(), day.to_string()));
+    let sources: Vec<(Kind, &BillTable)> =
+        sources(tables, &providers(&p)?, true).into_iter().filter(|(k, _)| k.has_days()).collect();
+    if sources.is_empty() {
+        return Err(Error::bad_request("按天钻取需要日度账单：请先同步日度账单"));
+    }
+    let results = futures_util::future::join_all(sources.iter().map(|(kind, table)| {
+        let q = queries(&state, *kind, table).alloc_detail(&filter, amount, alloc, None);
+        let client = state.client.clone();
+        let provider = kind.provider().as_str();
+        async move { Ok::<_, Error>((provider, client.rows::<AllocDetailRow>(q?).await?)) }
+    }))
+    .await;
+
+    let (day_s, prev_s) = (day.to_string(), prev.to_string());
+    let rule_of = |rule: i32| usize::try_from(rule).ok().and_then(|i| alloc.rules.get(i));
+    let rule_name = |rule: i32| rule_of(rule).map(|r| r.name.clone()).unwrap_or_default();
+    let n = alloc.lines.len();
+    let mut lines: Vec<DayItems> = vec![BTreeMap::new(); n];
+    let mut unmatched: DayItems = BTreeMap::new();
+    let mut products: DayItems = BTreeMap::new();
+    let mut stats = Vec::new();
+    for r in results {
+        let (provider, rows) = r?;
+        stats.push(rows.stats);
+        for row in rows.rows {
+            let slot = if row.bucket == day_s {
+                0
+            } else if row.bucket == prev_s {
+                1
+            } else {
+                continue;
+            };
+            products.entry((provider, row.product.clone(), String::new())).or_default()[slot] +=
+                row.amount;
+            if rule_of(row.rule).is_none() {
+                unmatched.entry((provider, row.product.clone(), String::new())).or_default()
+                    [slot] += row.amount;
+            }
+            for (line, part) in spread(alloc, row.rule, row.amount) {
+                let Some(line) = line else { continue };
+                lines[line]
+                    .entry((provider, row.product.clone(), rule_name(row.rule)))
+                    .or_default()[slot] += part;
+            }
+        }
+    }
+
+    let items_of = |items: DayItems| -> Vec<AllocDayItem> {
+        let mut rows: Vec<AllocDayItem> = items
+            .into_iter()
+            .map(|((provider, product, rule), [cur, prev])| AllocDayItem {
+                provider,
+                product,
+                rule: (!rule.is_empty()).then_some(rule),
+                current: round(cur),
+                previous: round(prev),
+            })
+            .filter(|i| i.current != 0.0 || i.previous != 0.0)
+            .collect();
+        rows.sort_by(|a, b| {
+            b.current.total_cmp(&a.current).then_with(|| b.previous.total_cmp(&a.previous))
+        });
+        rows
+    };
+    let line_of = |name: String, items: DayItems| -> AllocDayLine {
+        let items = items_of(items);
+        AllocDayLine {
+            name,
+            current: round(items.iter().map(|i| i.current).sum()),
+            previous: round(items.iter().map(|i| i.previous).sum()),
+            items,
+        }
+    };
+    let products = items_of(products);
+    Ok(Json(AllocDayResponse {
+        day: day_s,
+        previous_day: prev_s,
+        amount,
+        configured: state.alloc.is_some(),
+        current: round(products.iter().map(|i| i.current).sum()),
+        previous: round(products.iter().map(|i| i.previous).sum()),
+        lines: alloc
+            .lines
+            .iter()
+            .zip(lines)
+            .map(|(name, items)| line_of(name.clone(), items))
+            .filter(|l| !l.items.is_empty())
+            .collect(),
+        unmatched: line_of("未归属".to_owned(), unmatched),
+        unmatched_into: alloc.unmatched.map(|i| alloc.lines[i].clone()),
+        products,
+        stats: merge_stats(&stats),
+    }))
+}
+
 /// 日度账单是否明显少于月度账单。
 ///
 /// 两张表是同一批账单的两种粒度，同一段账期的合计理应相当；日度表若只补了几天，分析视图
@@ -1292,6 +1458,16 @@ fn detail_source<'a>(tables: &'a BillTables, p: &Params) -> Result<(Kind, &'a Bi
         Some(raw) => Some(Provider::parse(raw)?),
         None => None,
     };
+    // 按日期筛只有日度表做得到：带了日期就换到日度表，不管 granularity 写的是什么
+    if day_range(p)?.is_some() {
+        let list = sources(tables, &provider.into_iter().collect::<Vec<_>>(), true);
+        return list.into_iter().find(|(k, _)| k.has_days()).ok_or_else(|| {
+            Error::bad_request(match provider {
+                Some(p) => format!("{}没有日度账单，无法按日期筛选；请先同步日度账单", p.label()),
+                None => "当前部署没有日度账单，无法按日期筛选".to_owned(),
+            })
+        });
+    }
     let daily = match p.get("granularity") {
         None => false,
         Some("daily") => true,
@@ -1311,6 +1487,29 @@ fn detail_source<'a>(tables: &'a BillTables, p: &Params) -> Result<(Kind, &'a Bi
     })
 }
 
+/// `day_from` / `day_to`（`YYYY-MM-DD`）：明细按日期收窄。只给一端时两端相同，即只看那一天。
+fn day_range(p: &Params) -> Result<Option<(String, String)>> {
+    let (from, to) = (p.get("day_from"), p.get("day_to"));
+    let (Some(from), Some(to)) = (from.or(to), to.or(from)) else { return Ok(None) };
+    let (from, to) = (parse_day(from)?, parse_day(to)?);
+    if from > to {
+        return Err(Error::bad_request(format!("起始日期 {from} 晚于结束日期 {to}")));
+    }
+    Ok(Some((from.to_string(), to.to_string())))
+}
+
+fn parse_day(raw: &str) -> Result<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+        .map_err(|_| Error::bad_request(format!("日期须为 YYYY-MM-DD，不是 {raw:?}")))
+}
+
+/// 明细、导出、表头候选值用的筛选：账期与维度之外，再带上日期区间。
+fn detail_filter(state: &AppState, p: &Params) -> Result<BillFilter> {
+    let mut f = filter(state, p)?;
+    f.days = day_range(p)?;
+    Ok(f)
+}
+
 fn granularity_of(kind: Kind) -> &'static str {
     match kind {
         Kind::AlicloudMonthly => "monthly",
@@ -1322,7 +1521,7 @@ async fn detail(State(state): State<AppState>, p: Params) -> Result<Json<DetailR
     let schema = bills(&state).await?;
     let tables = schema.bills.as_ref().expect("bills checked");
     let amount = Amount::parse(p.get("amount"))?;
-    let filter = filter(&state, &p)?;
+    let filter = detail_filter(&state, &p)?;
     let (kind, table) = detail_source(tables, &p)?;
     let limit = p.get_limit("limit", 100, MAX_DETAIL_ROWS.min(state.config.max_rows))?;
     let offset = p.get_u32("offset")?.unwrap_or(0);
@@ -1332,9 +1531,11 @@ async fn detail(State(state): State<AppState>, p: Params) -> Result<Json<DetailR
             state.config.max_offset
         )));
     }
+    let sort = DetailSort::parse(p.get("sort"), p.get("order"))?;
+    let raw = p.get_list("cols");
     let q = queries(&state, kind, table);
     let (rows, count) = tokio::join!(
-        state.client.rows::<DetailRow>(q.detail(&filter, amount, limit, offset)?),
+        state.client.rows::<DetailRow>(q.detail(&filter, amount, &sort, &raw, limit, offset)?),
         state.client.rows::<TotalRow>(q.detail_count(&filter)?),
     );
     let rows = rows?;
@@ -1371,12 +1572,42 @@ async fn detail(State(state): State<AppState>, p: Params) -> Result<Json<DetailR
     }))
 }
 
+/// 表头下拉每个维度最多列出多少个值。再多就该用搜索框了。
+const FACET_LIMIT: u32 = 200;
+
+#[derive(Serialize)]
+pub struct FacetsResponse {
+    /// 维度名 → 出现最多的若干个取值，从多到少
+    pub facets: BTreeMap<&'static str, Vec<String>>,
+    pub stats: Stats,
+}
+
+/// 明细表头下拉筛选的候选值，`dims=product,region,…`。与明细同一张表、同一套筛选，
+/// 但每个维度不带它自己的那条筛选（见 [`BillQueries::facets`]）。
+async fn facets(State(state): State<AppState>, p: Params) -> Result<Json<FacetsResponse>> {
+    let schema = bills(&state).await?;
+    let tables = schema.bills.as_ref().expect("bills checked");
+    let filter = detail_filter(&state, &p)?;
+    let (kind, table) = detail_source(tables, &p)?;
+    let dims: Vec<Dimension> =
+        p.get_list("dims").iter().map(|d| Dimension::parse(d)).collect::<Result<_>>()?;
+    if dims.is_empty() {
+        return Err(Error::bad_request("dims 至少给一个维度"));
+    }
+    let q = queries(&state, kind, table).facets(&filter, &dims, FACET_LIMIT)?;
+    let rows = state.client.rows::<BTreeMap<String, Vec<String>>>(q).await?;
+    let mut row = rows.rows.into_iter().next().unwrap_or_default();
+    let facets =
+        dims.iter().map(|d| (d.as_str(), row.remove(d.as_str()).unwrap_or_default())).collect();
+    Ok(Json(FacetsResponse { facets, stats: rows.stats }))
+}
+
 /// 导出明细 CSV / JSONL：ClickHouse 直接出格式化文本，这里只转发字节流。
 async fn export(State(state): State<AppState>, p: Params) -> Result<Response> {
     let schema = bills(&state).await?;
     let tables = schema.bills.as_ref().expect("bills checked");
     let amount = Amount::parse(p.get("amount"))?;
-    let filter = filter(&state, &p)?;
+    let filter = detail_filter(&state, &p)?;
     let (kind, table) = detail_source(tables, &p)?;
     let limit = p.get_limit("limit", state.config.export_max_rows, state.config.export_max_rows)?;
     let (format, content_type, ext) = match p.get("format").unwrap_or("csv") {
@@ -1386,7 +1617,9 @@ async fn export(State(state): State<AppState>, p: Params) -> Result<Response> {
             return Err(Error::bad_request(format!("format 只能是 csv 或 jsonl，不是 {other:?}")));
         }
     };
-    let query = queries(&state, kind, table).export(&filter, amount, limit)?;
+    let sort = DetailSort::parse(p.get("sort"), p.get("order"))?;
+    let raw = p.get_list("cols");
+    let query = queries(&state, kind, table).export(&filter, amount, &sort, &raw, limit)?;
     let resp = state.client.send(&query, Some(format)).await?;
     let name = format!(
         "bills-{}-{}-{}.{ext}",

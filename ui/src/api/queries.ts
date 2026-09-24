@@ -7,6 +7,8 @@ import type {
   AuthMe,
   BillAllocationResponse,
   BillProductDaysResponse,
+  BillAllocDayResponse,
+  BillFacetsResponse,
   BillBreakdownResponse,
   BillDailyResponse,
   BillDetailResponse,
@@ -490,11 +492,33 @@ export function useBillAllocation(params: Params, enabled = true) {
   })
 }
 
+/** 按天钻取：某一天与前一天各业务线、各产品的金额。点了构成图里的某一天才查 */
+export function useBillAllocationDay(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'allocation-day', params],
+    queryFn: ({ signal }) => apiGet<BillAllocDayResponse>('/bills/allocation/day', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    enabled,
+  })
+}
+
 /** 产品费用对比的逐日数据。日期范围由服务端按今天推算，与账期无关，调用方不必传 from / to */
 export function useBillProductDays(params: Params, enabled = true) {
   return useQuery({
     queryKey: ['bills', 'product-days', params],
     queryFn: ({ signal }) => apiGet<BillProductDaysResponse>('/bills/product-days', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    enabled,
+  })
+}
+
+/** 明细表头下拉的候选值。点开下拉才查，不点不扫表 */
+export function useBillFacets(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'facets', params],
+    queryFn: ({ signal }) => apiGet<BillFacetsResponse>('/bills/facets', params, signal),
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000,
     enabled,

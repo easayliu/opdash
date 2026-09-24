@@ -246,7 +246,7 @@ async fn detail_is_per_provider_and_says_which_one() {
         "ORDER BY amount DESC",
         concat!(
             r#"{"period":"2026-09","day":"2026-09-01","product":"云服务器 ECS","item":"按量","#,
-            r#""instance_id":"i-1","instance":"web-1","region":"华东1","account":"主账号","#,
+            r#""instance_id":"i-1","instance":"web-1","region":"华东1","zone":"华东1 可用区 H","account":"主账号","#,
             r#""project":"默认","subscription":"PayAsYouGo","usage":"720","usage_unit":"小时","#,
             "\"currency\":\"CNY\",\"amount\":12.3456789,\"original\":15,\"paid\":12.3}\n",
         ),
@@ -261,8 +261,175 @@ async fn detail_is_per_provider_and_says_which_one() {
     assert_eq!(body["total"], 42);
     assert_eq!(body["rows"][0]["provider"], "alicloud");
     assert_eq!(body["rows"][0]["instance"], "web-1");
+    assert_eq!(body["rows"][0]["zone"], "华东1 可用区 H");
     // 金额对到分位再往下两位，别把 Float64 的尾巴带到页面上
     assert_eq!(body["rows"][0]["amount"], 12.3457);
+}
+
+/// 明细的排序在库里做，分页之后顺序才接得上；列名走白名单，用量按数值排。
+#[tokio::test]
+async fn detail_sorts_on_the_server() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &[]).await;
+    fake.respond_to("ORDER BY toFloat64OrZero(usage) ASC", "")
+        .respond_to("count() AS rows", "{\"rows\":0}\n");
+    let (status, body) =
+        get_json(&app, "/api/bills/detail?provider=alicloud&sort=usage&order=asc").await;
+    assert_eq!(status, 200, "{body}");
+    let q = sql_for(&fake, "ORDER BY toFloat64OrZero(usage)");
+    // 同为某个用量的行再按默认顺序排，不会每翻一页换个次序
+    assert!(
+        q.contains("ORDER BY toFloat64OrZero(usage) ASC, amount DESC, period DESC, product"),
+        "{q}"
+    );
+
+    // 导出跟着同一个顺序
+    fake.respond_to("ORDER BY (original - amount) DESC", "");
+    let (status, _) = get_json(&app, "/api/bills/export?provider=alicloud&sort=discount").await;
+    assert_eq!(status, 200);
+}
+
+/// 明细按需带上原始字段：列名须是这张表真有的，值一律转成字符串收进 `extra`；
+/// 数值列按数值排，导出时一个字段一列，与统一列撞名的加 `raw.` 前缀。
+#[tokio::test]
+async fn detail_brings_raw_columns_on_request() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &[]).await;
+    fake.respond_to(
+        "AS extra",
+        concat!(
+            r#"{"period":"2026-09","day":"","product":"云服务器 ECS","item":"按量","instance_id":"i-1","#,
+            r#""instance":"web-1","region":"华东1","zone":"","account":"","project":"","subscription":"","#,
+            r#""usage":"","usage_unit":"","currency":"CNY","amount":1,"original":1,"paid":1,"#,
+            r#""extra":{"instance_spec":"ecs.g7.xlarge","pretax_amount":"1"}}"#,
+            "\n",
+        ),
+    )
+    .respond_to("count() AS rows", "{\"rows\":1}\n");
+    let (status, body) = get_json(
+        &app,
+        "/api/bills/detail?provider=alicloud&cols=instance_spec,pretax_amount&sort=raw:pretax_amount&order=asc",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["extra"]["instance_spec"], "ecs.g7.xlarge");
+    let q = sql_for(&fake, "AS extra");
+    assert!(q.contains("any(ifNull(toString(`instance_spec`), '')) AS _raw_0"), "{q}");
+    // 数值列转回数值再排
+    assert!(q.contains("ORDER BY toFloat64OrZero(_raw_1) ASC"), "{q}");
+    // 列名作 Map 的键是绑参数的，不拼进 SQL
+    assert!(!q.contains("'instance_spec'"), "{q}");
+
+    // 导出：一个字段一列；阿里云的 region 与统一列同名，改叫 raw.region
+    fake.respond_to("AS `raw.region`", "");
+    let (status, _) =
+        get_json(&app, "/api/bills/export?provider=alicloud&cols=instance_spec,region").await;
+    assert_eq!(status, 200);
+    let q = sql_for(&fake, "AS `raw.region`");
+    assert!(q.contains("_raw_0 AS `instance_spec`"), "{q}");
+
+    for (uri, needle) in [
+        ("/api/bills/detail?provider=alicloud&cols=no_such_column", "没有字段"),
+        ("/api/bills/detail?provider=alicloud&sort=raw:instance_spec", "cols"),
+    ] {
+        let (status, body) = get_json(&app, uri).await;
+        assert_eq!(status, 400, "{uri} → {body}");
+        assert!(body["error"].as_str().unwrap().contains(needle), "{uri} → {body}");
+    }
+}
+
+/// 明细按日期筛：只有日度表有日期，带了日期就换到日度表，不管 granularity 写的是什么。
+#[tokio::test]
+async fn detail_filters_by_day_on_the_daily_table() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &[]).await;
+    fake.respond_to("alicloud_bill_daily", "").respond_to("count() AS rows", "{\"rows\":0}\n");
+    let (status, body) = get_json(
+        &app,
+        "/api/bills/detail?provider=alicloud&granularity=monthly&from=2026-09&to=2026-09&day_from=2026-09-21&day_to=2026-09-23",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["granularity"], "daily");
+    let q = sql_for(&fake, "alicloud_bill_daily");
+    assert!(q.contains("billing_date >= {") && q.contains(":Date} AND billing_date <= {"), "{q}");
+
+    for (uri, needle) in [
+        ("/api/bills/detail?day_from=2026-09-23&day_to=2026-09-21", "晚于"),
+        ("/api/bills/detail?day_from=2026/09/23", "YYYY-MM-DD"),
+        ("/api/bills/allocation/day", "缺少 day"),
+    ] {
+        let (status, body) = get_json(&app, uri).await;
+        assert_eq!(status, 400, "{uri} → {body}");
+        assert!(body["error"].as_str().unwrap().contains(needle), "{uri} → {body}");
+    }
+}
+
+/// 按天钻取：某一天与前一天，各业务线由哪些产品构成。与构成图同一套规则拆，其余日子的行不算。
+#[tokio::test]
+async fn allocation_day_breaks_a_day_down_to_products() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC)]).await;
+    fake.respond_to(
+        "GROUP BY _rule, _product, _bucket, _period",
+        concat!(
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":150}"#,
+            "\n",
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-21","period":"2026-09","amount":150}"#,
+            "\n",
+            r#"{"rule":1,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":400}"#,
+            "\n",
+            r#"{"rule":-1,"product":"对象存储","bucket":"2026-09-21","period":"2026-09","amount":100}"#,
+            "\n",
+        ),
+    );
+    let (status, body) =
+        get_json(&app, "/api/bills/allocation/day?provider=alicloud&day=2026-09-21").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["previous_day"], "2026-09-20");
+    assert_eq!(body["current"], 250.0);
+    assert_eq!(body["previous"], 550.0);
+    let line = |name: &str| {
+        body["lines"].as_array().unwrap().iter().find(|l| l["name"] == name).cloned().unwrap()
+    };
+    // 甲线 = 专属的那笔 + 其余部分的四分之一
+    assert_eq!(line("甲线")["current"], 150.0);
+    assert_eq!(line("甲线")["previous"], 250.0);
+    assert_eq!(line("乙线")["previous"], 300.0);
+    // 没命中规则的按 unmatched 归入公共，同时单列
+    assert_eq!(line("公共")["items"][0]["product"], "对象存储");
+    assert_eq!(body["unmatched"]["current"], 100.0);
+    // 产品带着云厂商，页面据此跳到对应那张表的明细
+    let ecs = &body["products"][0];
+    assert_eq!(ecs["provider"], "alicloud");
+    assert_eq!(
+        (ecs["product"].as_str(), ecs["current"].as_f64(), ecs["previous"].as_f64()),
+        (Some("云服务器 ECS"), Some(150.0), Some(550.0))
+    );
+    // 两天所在的账期，日期条件收到这两天
+    let q = sql_for(&fake, "GROUP BY _rule, _product, _bucket, _period");
+    assert!(q.contains("billing_date >= {"), "{q}");
+}
+
+/// 表头下拉的候选值：一条查询收齐各维度，每个维度不带它自己的筛选，只带其余维度的。
+#[tokio::test]
+async fn facets_leave_out_each_dimensions_own_filter() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &[]).await;
+    fake.respond_to("topKIf(", r#"{"product":["ECS","OSS"],"region":["cn-hangzhou"]}"#);
+    let (status, body) = get_json(
+        &app,
+        "/api/bills/facets?provider=alicloud&dims=product,region&product=ECS&region=cn-hangzhou",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["facets"]["product"], serde_json::json!(["ECS", "OSS"]));
+    assert_eq!(body["facets"]["region"], serde_json::json!(["cn-hangzhou"]));
+    let q = sql_for(&fake, "topKIf(");
+    // 两个维度各带对方那一条 IN，WHERE 里不带：带上自己的，下拉里就只剩已选的那一个值
+    assert_eq!(q.matches(" IN {").count(), 2, "{q}");
+    let where_sql = q.split("WHERE").nth(1).unwrap_or_default();
+    assert!(!where_sql.contains(" IN {"), "{q}");
 }
 
 /// 参数错的时候要说人话。
@@ -281,6 +448,9 @@ async fn rejects_bad_parameters() {
         ("/api/bills/detail?provider=tencent", "provider"),
         ("/api/bills/detail?granularity=hourly", "granularity"),
         ("/api/bills/export?format=xlsx", "format"),
+        ("/api/bills/detail?sort=amount%3Bdrop", "sort"),
+        ("/api/bills/detail?sort=amount&order=up", "order"),
+        ("/api/bills/facets", "dims"),
     ] {
         let (status, body) = get_json(&app, uri).await;
         assert_eq!(status, 400, "{uri} → {body}");

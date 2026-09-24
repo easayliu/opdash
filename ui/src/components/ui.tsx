@@ -577,10 +577,13 @@ export function Combobox({
   trigger,
   size = 'md',
   floating = false,
+  onOpenChange,
 }: {
   value: string
   options: ComboOption[]
   onChange: (v: string) => void
+  /** 菜单开合时通知调用方。候选值要现查的（表头筛选），据此在点开时才发请求 */
+  onOpenChange?: (open: boolean) => void
   /** 空值那一项的文案，也是没选时按钮上的字 */
   placeholder?: string
   searchPlaceholder?: string
@@ -613,6 +616,12 @@ export function Combobox({
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [cursor, setCursor] = useState(0)
+  // 开合的入口有好几处（点触发器、点外面、Esc、选中），在这里统一通知，不去每处各补一句
+  const notify = useRef(onOpenChange)
+  notify.current = onOpenChange
+  useEffect(() => {
+    notify.current?.(open)
+  }, [open])
   const [alignRight, setAlignRight] = useState(false)
   // inline 变体的菜单锚点：触发器的屏幕坐标（打开那一刻量的）
   const [anchor, setAnchor] = useState<{ top: number; left: number; right: number; width: number } | null>(null)

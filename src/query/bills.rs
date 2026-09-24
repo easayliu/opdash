@@ -33,6 +33,9 @@
 //! 根治办法在 README「账单表的分片键该改」一节：把 Distributed 的分片键换成按去重键哈希、
 //! 排序键里别放金额列，那时把 `--bill-dedupe` 调成 `final` 就行。
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::{Bindings, quote_ident};
@@ -466,11 +469,14 @@ pub struct BillFilter {
     pub dims: Vec<(Dimension, Vec<String>)>,
     /// 模糊搜：产品 / 实例 / 计费项里任一个包含就算
     pub q: Option<String>,
+    /// 日期区间（`YYYY-MM-DD`，两端都含），在账期之内再收窄。只有日度账单有日期，月度表上
+    /// 这一条不生效——要按日期筛的地方由调用方先换成日度表
+    pub days: Option<(String, String)>,
 }
 
 impl BillFilter {
     pub fn new(range: PeriodRange) -> Self {
-        Self { range, dims: Vec::new(), q: None }
+        Self { range, dims: Vec::new(), q: None, days: None }
     }
 
     /// WHERE 子句。**所有条件都放在去重之前**：重复的行在每一列上都一模一样，先筛后去重
@@ -485,6 +491,11 @@ impl BillFilter {
             let cols = [Dimension::Product, Dimension::Item, Dimension::Instance]
                 .map(|d| format!("positionCaseInsensitiveUTF8({}, {needle}) > 0", d.expr(kind)));
             parts.push(format!("({})", cols.join(" OR ")));
+        }
+        if let (Some((from, to)), Some(day)) = (&self.days, kind.day_expr()) {
+            let from = b.bind("Date", from);
+            let to = b.bind("Date", to);
+            parts.push(format!("{day} >= {from} AND {day} <= {to}"));
         }
         parts.join("\n    AND ")
     }
@@ -516,11 +527,12 @@ pub struct BillQueries<'a> {
 /// 去重子查询里要带出来的一列。`alias` 是给外层用的干净名字（`period` / `amount`……）。
 struct Col {
     expr: String,
-    alias: &'static str,
+    /// 多数是固定的名字；明细里按需加的原始字段是 `raw_0`、`raw_1`……现拼的
+    alias: Cow<'static, str>,
 }
 
-fn col(expr: impl Into<String>, alias: &'static str) -> Col {
-    Col { expr: expr.into(), alias }
+fn col(expr: impl Into<String>, alias: impl Into<Cow<'static, str>>) -> Col {
+    Col { expr: expr.into(), alias: alias.into() }
 }
 
 /// 子查询里这一列叫什么。
@@ -535,7 +547,10 @@ fn inner(alias: &str) -> String {
 
 /// 外层的投影：`_period AS period, _amount AS amount`。
 fn project(cols: &[Col]) -> String {
-    cols.iter().map(|c| format!("{} AS {}", inner(c.alias), c.alias)).collect::<Vec<_>>().join(", ")
+    cols.iter()
+        .map(|c| format!("{} AS {}", inner(&c.alias), c.alias))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl<'a> BillQueries<'a> {
@@ -570,7 +585,7 @@ impl<'a> BillQueries<'a> {
         let select_of = |wrap: bool| -> String {
             cols.iter()
                 .map(|c| {
-                    let alias = inner(c.alias);
+                    let alias = inner(&c.alias);
                     if wrap {
                         format!("any({}) AS {alias}", c.expr)
                     } else {
@@ -627,7 +642,7 @@ impl<'a> BillQueries<'a> {
         // 同一次同步里并列的几行相隔不过数秒（线上 6–8 月最多 2.2 秒），两次同步则相隔数小时起，
         // 这个窗口把两者分得很开。这也正是 ReplacingMergeTree(updated_at) 合并后该剩下的样子，
         // 只是引擎会把并列行也吞掉，这里不会
-        let passthrough = cols.iter().map(|c| inner(c.alias)).collect::<Vec<_>>().join(", ");
+        let passthrough = cols.iter().map(|c| inner(&c.alias)).collect::<Vec<_>>().join(", ");
         Ok(format!(
             "SELECT {passthrough}\n  FROM (\n    SELECT {},\n         max({version}) AS __version,\n         max(max({version})) OVER (PARTITION BY {keys}) AS __latest\n      FROM {}\n      WHERE {where_sql}\n      GROUP BY {group}\n  )\n  WHERE __version >= __latest - INTERVAL {SYNC_WINDOW_SECS} SECOND",
             select_of(true),
@@ -706,23 +721,94 @@ impl<'a> BillQueries<'a> {
         )))
     }
 
-    /// 明细列表。列是跨云统一过的，见 [`DetailRow`]。
+    /// 明细列表。列是跨云统一过的，见 [`DetailRow`]。排序在库里做：分页之后再在页面上排，
+    /// 排的只是这一页的 50 行，翻到下一页顺序就接不上了。
+    ///
+    /// `raw` 是另要带上的原始字段（表里的真实列名），页面「显示列」里勾了才查：每多一列，去重
+    /// 那一步就要多收一列，七八十列全带上在大账期上是白花的内存。原始字段一律转成字符串，
+    /// 收进 `extra` 这一个 Map 列，两朵云的列名各不相同，不必为每一列定一个结构体字段。
     pub fn detail(
         &self,
         filter: &BillFilter,
         amount: Amount,
+        sort: &DetailSort,
+        raw: &[String],
         limit: u32,
         offset: u32,
     ) -> Result<Query> {
         let mut b = Bindings::new();
         let where_sql = filter.where_sql(self.kind, &mut b);
-        let cols = self.detail_cols(amount);
-        let inner = self.deduped(&cols, &where_sql)?;
+        let raw_cols = self.raw_cols(raw)?;
+        let mut cols = self.detail_cols(amount);
+        let fixed = cols.len();
+        cols.extend(raw_cols.iter().map(|(c, _)| col(c.expr.clone(), c.alias.clone())));
+        let sub = self.deduped(&cols, &where_sql)?;
+        let order_by = sort.order_by(raw, &raw_cols)?;
+        let mut select = project(&cols[..fixed]);
+        if !raw_cols.is_empty() {
+            let pairs: Vec<String> = raw
+                .iter()
+                .zip(&raw_cols)
+                .map(|(name, (c, _))| format!("{}, {}", b.bind("String", name), inner(&c.alias)))
+                .collect();
+            select = format!("{select}, map({}) AS extra", pairs.join(", "));
+        }
         let limit = b.bind("UInt32", limit);
         let offset = b.bind("UInt32", offset);
         Ok(b.into_query(format!(
-            "SELECT {}\nFROM (\n  {inner}\n)\nORDER BY amount DESC, period DESC, product\nLIMIT {limit} OFFSET {offset}",
-            project(&cols)
+            "SELECT {select}\nFROM (\n  {sub}\n)\nORDER BY {order_by}\nLIMIT {limit} OFFSET {offset}"
+        )))
+    }
+
+    /// 原始字段 → 去重子查询里的列（`raw_0`……），以及它能不能按数值排。列名须是表里真有的，
+    /// 不认识的直接拒绝：它要拼进 SQL，白名单就是这张表的列。
+    fn raw_cols(&self, raw: &[String]) -> Result<Vec<(Col, bool)>> {
+        if raw.len() > MAX_RAW_COLUMNS {
+            return Err(Error::bad_request(format!("cols 最多 {MAX_RAW_COLUMNS} 个")));
+        }
+        raw.iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let column = self.table.table.column(name).ok_or_else(|| {
+                    Error::bad_request(format!("{} 没有字段 {name:?}", self.table.table.name))
+                })?;
+                let numeric = matches!(column.kind, ColumnKind::Int | ColumnKind::Float);
+                let expr = format!("ifNull(toString({}), '')", quote_ident(&column.name)?);
+                Ok((col(expr, format!("raw_{i}")), numeric))
+            })
+            .collect()
+    }
+
+    /// 明细表头下拉筛选的候选值：每个维度取出现最多的 `limit` 个。
+    ///
+    /// 一条查询、扫一遍表，各维度用 `topKIf` 分别收。**每个维度都不带它自己的筛选**，只带其余
+    /// 维度的：带上自己的，下拉里就只剩已选的那一个值，换不了别的。候选值只是个列表，不去重。
+    pub fn facets(&self, filter: &BillFilter, dims: &[Dimension], limit: u32) -> Result<Query> {
+        let mut b = Bindings::new();
+        let mut base = BillFilter::new(filter.range.clone());
+        base.q = filter.q.clone();
+        base.days = filter.days.clone();
+        let where_sql = base.where_sql(self.kind, &mut b);
+        let conds: Vec<(Dimension, String)> = filter
+            .dims
+            .iter()
+            .map(|(dim, values)| {
+                (*dim, format!("{} IN {}", dim.expr(self.kind), b.bind("Array(String)", values)))
+            })
+            .collect();
+        let cols: Vec<String> = dims
+            .iter()
+            .map(|dim| {
+                let expr = dim.expr(self.kind);
+                let mut cond = vec![format!("{expr} != ''")];
+                cond.extend(conds.iter().filter(|(d, _)| d != dim).map(|(_, c)| c.clone()));
+                format!("topKIf({limit})({expr}, {}) AS `{}`", cond.join(" AND "), dim.as_str())
+            })
+            .collect();
+        Ok(b.into_query(format!(
+            "SELECT {}\nFROM {}\nWHERE {where_sql}",
+            cols.join(",\n       "),
+            self.table_ref()
         )))
     }
 
@@ -734,9 +820,35 @@ impl<'a> BillQueries<'a> {
         Ok(b.into_query(format!("SELECT count() AS rows\nFROM (\n  {inner}\n)")))
     }
 
-    /// 导出：和明细同样的列，不分页。
-    pub fn export(&self, filter: &BillFilter, amount: Amount, limit: u32) -> Result<Query> {
-        self.detail(filter, amount, limit, 0)
+    /// 导出：和明细同样的列、同样的顺序，不分页。原始字段不收成 Map，一个字段一列、列名照抄
+    /// 表里的名字——CSV 里一格 `{'k':'v'}` 没法在表格软件里用。与统一列同名的（阿里云就有
+    /// `region`、`zone`）加上 `raw.` 前缀，免得两列撞名
+    pub fn export(
+        &self,
+        filter: &BillFilter,
+        amount: Amount,
+        sort: &DetailSort,
+        raw: &[String],
+        limit: u32,
+    ) -> Result<Query> {
+        let mut b = Bindings::new();
+        let where_sql = filter.where_sql(self.kind, &mut b);
+        let raw_cols = self.raw_cols(raw)?;
+        let mut cols = self.detail_cols(amount);
+        let fixed: Vec<String> = cols.iter().map(|c| c.alias.to_string()).collect();
+        cols.extend(raw_cols.iter().map(|(c, _)| col(c.expr.clone(), c.alias.clone())));
+        let sub = self.deduped(&cols, &where_sql)?;
+        let order_by = sort.order_by(raw, &raw_cols)?;
+        let mut select = project(&cols[..fixed.len()]);
+        for (name, (c, _)) in raw.iter().zip(&raw_cols) {
+            let label =
+                if fixed.iter().any(|f| f == name) { format!("raw.{name}") } else { name.clone() };
+            select = format!("{select}, {} AS {}", inner(&c.alias), quote_ident(&label)?);
+        }
+        let limit = b.bind("UInt32", limit);
+        Ok(b.into_query(format!(
+            "SELECT {select}\nFROM (\n  {sub}\n)\nORDER BY {order_by}\nLIMIT {limit}"
+        )))
     }
 
     // -----------------------------------------------------------------------------------------
@@ -997,6 +1109,7 @@ impl<'a> BillQueries<'a> {
             col(instance_id, "instance_id"),
             col(Dimension::Instance.expr(k), "instance"),
             col(Dimension::Region.expr(k), "region"),
+            col(Dimension::Zone.expr(k), "zone"),
             col(Dimension::Account.expr(k), "account"),
             col(Dimension::Project.expr(k), "project"),
             col(Dimension::Subscription.expr(k), "subscription"),
@@ -1007,6 +1120,110 @@ impl<'a> BillQueries<'a> {
             col(self.amount_expr(Amount::Original), "original"),
             col(self.amount_expr(Amount::Paid), "paid"),
         ]
+    }
+}
+
+/// 明细一次最多另带多少个原始字段。两张表都在七八十列上下，全勾上也够。
+pub const MAX_RAW_COLUMNS: usize = 120;
+
+/// 明细按哪一列排，接口上是 `sort=<列>&order=asc|desc`。默认按金额从大到小。
+/// 原始字段写作 `sort=raw:<列名>`，且须同时在 `cols` 里请求它。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailSort {
+    key: SortKey,
+    desc: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SortKey {
+    Fixed(&'static str),
+    Raw(String),
+}
+
+/// 能排的统一列，也是页面表头的列键。
+pub const DETAIL_SORT_KEYS: &[&str] = &[
+    "day",
+    "product",
+    "item",
+    "instance",
+    "region",
+    "zone",
+    "account",
+    "project",
+    "subscription",
+    "currency",
+    "usage",
+    "amount",
+    "original",
+    "paid",
+    "discount",
+];
+
+impl Default for DetailSort {
+    fn default() -> Self {
+        Self { key: SortKey::Fixed("amount"), desc: true }
+    }
+}
+
+impl DetailSort {
+    pub fn parse(sort: Option<&str>, order: Option<&str>) -> Result<Self> {
+        let Some(raw) = sort.map(str::trim) else { return Ok(Self::default()) };
+        let key = match raw.strip_prefix("raw:") {
+            Some(name) if !name.is_empty() => SortKey::Raw(name.to_owned()),
+            _ => SortKey::Fixed(DETAIL_SORT_KEYS.iter().find(|k| **k == raw).ok_or_else(|| {
+                Error::bad_request(format!(
+                    "sort 不认识 {raw:?}；可用: {}，或 raw:<字段名>",
+                    DETAIL_SORT_KEYS.join(", ")
+                ))
+            })?),
+        };
+        let desc = match order {
+            None | Some("desc") => true,
+            Some("asc") => false,
+            Some(other) => {
+                return Err(Error::bad_request(format!(
+                    "order 只能是 asc 或 desc，不是 {other:?}"
+                )));
+            }
+        };
+        Ok(Self { key, desc })
+    }
+
+    /// ORDER BY 子句。统一列用外层 SELECT 的别名，键来自白名单；原始字段用去重子查询里的
+    /// `_raw_N`，列名只拿来找是第几个，不拼进 SQL。其后接上默认顺序作为次序，同值的行
+    /// 不会每翻一页就换个次序
+    fn order_by(&self, names: &[String], raw: &[(Col, bool)]) -> Result<String> {
+        let dir = if self.desc { "DESC" } else { "ASC" };
+        let first = match &self.key {
+            // 月度账单的日期是空串，先按账期排才有意义
+            SortKey::Fixed("day") => format!("period {dir}, day {dir}"),
+            // 用量在两张表里都存成字符串，按字符串排「10」会排在「9」前面
+            SortKey::Fixed("usage") => format!("toFloat64OrZero(usage) {dir}"),
+            SortKey::Fixed("discount") => format!("(original - amount) {dir}"),
+            SortKey::Fixed(key) => format!("{key} {dir}"),
+            SortKey::Raw(name) => {
+                let (c, numeric) =
+                    names.iter().position(|n| n == name).and_then(|i| raw.get(i)).ok_or_else(
+                        || {
+                            Error::bad_request(format!(
+                                "按原始字段 {name:?} 排序时，须同时在 cols 里请求它"
+                            ))
+                        },
+                    )?;
+                // 数值列转回数值再排；原始字段都已转成字符串，按字符串排「10」会排在「9」前面
+                let expr = inner(&c.alias);
+                if *numeric {
+                    format!("toFloat64OrZero({expr}) {dir}")
+                } else {
+                    format!("{expr} {dir}")
+                }
+            }
+        };
+        Ok(if self.key == SortKey::Fixed("amount") {
+            format!("{first}, period DESC, product")
+        } else {
+            format!("{first}, amount DESC, period DESC, product")
+        })
     }
 }
 
@@ -1107,6 +1324,7 @@ pub struct DetailRow {
     pub instance_id: String,
     pub instance: String,
     pub region: String,
+    pub zone: String,
     pub account: String,
     pub project: String,
     pub subscription: String,
@@ -1119,6 +1337,9 @@ pub struct DetailRow {
     pub original: f64,
     #[serde(deserialize_with = "num::de")]
     pub paid: f64,
+    /// 按需带上的原始字段（`cols`），列名 → 转成字符串的值；没请求时为空
+    #[serde(default)]
+    pub extra: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -1291,12 +1512,14 @@ mod tests {
         let ali = table("alicloud_bill_daily", Kind::AlicloudDaily);
         let filter = BillFilter::new(PeriodRange::new(None, None, "2026-09").unwrap());
         let a = queries(&volc, Kind::Volcengine, Dedupe::Group)
-            .detail(&filter, Amount::Payable, 100, 0)
+            .detail(&filter, Amount::Payable, &DetailSort::default(), &[], 100, 0)
             .unwrap();
         let b = queries(&ali, Kind::AlicloudDaily, Dedupe::Group)
-            .detail(&filter, Amount::Payable, 100, 0)
+            .detail(&filter, Amount::Payable, &DetailSort::default(), &[], 100, 0)
             .unwrap();
-        for alias in ["period", "day", "product", "instance_id", "amount", "original", "paid"] {
+        for alias in
+            ["period", "day", "product", "instance_id", "zone", "amount", "original", "paid"]
+        {
             let projected = format!("_{alias} AS {alias}");
             assert!(a.sql().contains(&projected), "火山缺 {alias}: {}", a.sql());
             assert!(b.sql().contains(&projected), "阿里云缺 {alias}: {}", b.sql());

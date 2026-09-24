@@ -245,6 +245,7 @@ export interface BillDetailRow {
   instance_id: string
   instance: string
   region: string
+  zone: string
   account: string
   project: string
   subscription: string
@@ -254,6 +255,8 @@ export interface BillDetailRow {
   amount: number
   original: number
   paid: number
+  /** 按需带上的原始字段（请求时的 `cols`），字段名 → 转成字符串的值 */
+  extra?: Record<string, string>
 }
 
 /** 分析视图里的一行：某条业务线里的某个产品，或不分业务线时的某个产品 */
@@ -340,6 +343,39 @@ export interface BillAllocationResponse {
   stats: Stats
 }
 
+/** `/api/bills/allocation/day`：某一天与前一天，各业务线由哪些产品构成（仅后付费） */
+export interface BillAllocDayResponse {
+  day: string
+  previous_day: string
+  amount: BillAmount
+  configured: boolean
+  current: number
+  previous: number
+  lines: BillAllocDayLine[]
+  /** 未命中任何规则的部分；配了 unmatched 时已同时计入 unmatched_into 那条线 */
+  unmatched: BillAllocDayLine
+  unmatched_into: string | null
+  /** 不分业务线，只按「云 + 产品」 */
+  products: BillAllocDayItem[]
+  stats: Stats
+}
+
+export interface BillAllocDayLine {
+  name: string
+  current: number
+  previous: number
+  items: BillAllocDayItem[]
+}
+
+export interface BillAllocDayItem {
+  provider: BillProvider
+  product: string
+  /** 按哪条归属规则归来的；产品表与未命中规则的部分为 null */
+  rule: string | null
+  current: number
+  previous: number
+}
+
 /**
  * `/api/bills/product-days`：按产品、按天的后付费金额，「产品费用对比」据此比对两段日期。
  * 日期以今天为终点往回数，不跟所选账期走
@@ -364,6 +400,12 @@ export interface BillCoverage {
   daily: number
   /** 同一段账期月度账单的合计 */
   monthly: number
+}
+
+/** `/api/bills/facets`：明细表头下拉的候选值，维度名 → 出现最多的若干个取值 */
+export interface BillFacetsResponse {
+  facets: Record<string, string[]>
+  stats: Stats
 }
 
 export interface BillDetailResponse {

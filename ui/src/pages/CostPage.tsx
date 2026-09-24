@@ -1,7 +1,7 @@
-import { Suspense, lazy, useMemo, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { CloudDownloadIcon, DownloadIcon, SearchIcon } from 'lucide-react'
 import { apiUrl } from '@/api/client'
-import { useBillBreakdown, useBillDaily, useBillDetail, useBillPeriods, useBillSummary, useMeta } from '@/api/queries'
+import { useBillBreakdown, useBillDaily, useBillDetail, useBillFacets, useBillPeriods, useBillSummary, useMeta } from '@/api/queries'
 import { AnalysisControls, CostAnalysis } from '@/components/CostAnalysis'
 import type { BillAmount, BillPoint, BillProvider } from '@/api/types'
 import { StatsLine } from '@/components/StatsLine'
@@ -24,6 +24,7 @@ import {
   shiftPeriod,
 } from '@/lib/bills'
 import { usePageTitle } from '@/lib/title'
+import { BillDetailTable, ColumnPicker, DETAIL_COLUMNS, DayRangePicker, FACET_DIMS, detailTable, rawColumns, useDetailColumns } from '@/components/BillDetailTable'
 
 /** 拉取账单的对话框：点了才加载，它带着一套轮询逻辑，没人点就不该进首屏 */
 const BillSyncDialog = lazy(() => import('@/components/BillSyncDialog').then((m) => ({ default: m.BillSyncDialog })))
@@ -74,6 +75,15 @@ export function CostPage() {
   const days = params.get('days') ?? ''
   const estimate = params.get('est') || (to ? shiftPeriod(to, 1) : '')
   const [syncing, setSyncing] = useState(false)
+  // 从分析视图钻取过来时，切到账单视图后把明细卷到眼前：它在页面最底下，不卷过去像是什么都没发生
+  const detailRef = useRef<HTMLElement>(null)
+  const scrollToDetail = useRef(false)
+  useEffect(() => {
+    if (scrollToDetail.current && view === 'bills' && detailRef.current) {
+      scrollToDetail.current = false
+      detailRef.current.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+    }
+  })
 
   // 维度筛选：URL 上的维度键原样往接口传
   const filters = useMemo(() => {
@@ -97,16 +107,32 @@ export function CostPage() {
   const dailyProviders = (bills?.daily_providers ?? []).filter((p) => !provider || p === provider)
   const daily = useBillDaily(base, billsView && dailyProviders.length > 0)
   const breakdown = useBillBreakdown({ ...base, by, limit: 15 }, billsView)
-  const detail = useBillDetail(
-    {
-      ...base,
-      provider: provider || undefined,
-      granularity: params.get('gran') || undefined,
-      limit: DETAIL_PAGE,
-      offset: page * DETAIL_PAGE,
-    },
-    billsView,
-  )
+  // 明细可显示的列：常用字段，加上这一页所读账单表的全部原始字段。勾了的原始字段才向接口要
+  const columns = useDetailColumns()
+  // 明细的日期筛选（day_from / day_to）。只有日度表有日期，选了日期就按日度表出明细
+  const dayFrom = params.get('day_from') ?? ''
+  const dayTo = params.get('day_to') ?? ''
+  const gran = dayFrom ? 'daily' : params.get('gran')
+  const source = useMemo(() => (bills ? detailTable(bills, provider, gran) : null), [bills, provider, gran])
+  const raw = useMemo(() => rawColumns(source), [source])
+  const allColumns = useMemo(() => [...DETAIL_COLUMNS, ...raw], [raw])
+  const rawCols = raw.filter((c) => columns.shown.has(c.key)).map((c) => c.raw)
+  // 明细的排序：URL 上的 sort / order，不写就是按金额从大到小（与接口默认一致）。按原始字段排时
+  // 那一列得是显示着的，否则接口不会带上它，退回默认
+  const sortCol = allColumns.find((c) => c.sort && c.sort === params.get('sort') && (!c.raw || columns.shown.has(c.key)))
+  const detailSort = { key: sortCol?.sort ?? 'amount', dir: (sortCol && params.get('order') === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc' }
+  const sortParams = { sort: sortCol ? detailSort.key : undefined, order: sortCol ? detailSort.dir : undefined, cols: rawCols.join(',') || undefined }
+  const detailBase = {
+    ...base,
+    provider: provider || undefined,
+    granularity: dayFrom ? undefined : params.get('gran') || undefined,
+    day_from: dayFrom || undefined,
+    day_to: dayTo || undefined,
+  }
+  const detail = useBillDetail({ ...detailBase, ...sortParams, limit: DETAIL_PAGE, offset: page * DETAIL_PAGE }, billsView)
+  // 表头下拉的候选值：点开任一个下拉才去查，一次查齐所有可筛选的列
+  const [wantFacets, setWantFacets] = useState(false)
+  const facets = useBillFacets({ ...detailBase, dims: FACET_DIMS.join(',') }, billsView && wantFacets)
 
   const points = summary.data?.points ?? []
   const current = points.at(-1)
@@ -149,7 +175,8 @@ export function CostPage() {
         <span className="flex flex-wrap items-center gap-2 py-2 md:ml-auto">
           {(summary.isFetching || periods.isFetching) && <Spinner className="size-4" />}
           <StatsLine stats={summary.data?.stats} className="hidden text-2xs text-muted-fg 2xl:inline" />
-          <PeriodPicker known={known} from={from} to={to} onChange={(next) => set({ ...next, page: null })} />
+          {/* 换了账期，原先选的日期多半已不在范围里，一并清掉 */}
+          <PeriodPicker known={known} from={from} to={to} onChange={(next) => set({ ...next, page: null, day_from: null, day_to: null })} />
           <span className="flex items-center gap-1.5">
             <span role="group" aria-label="金额口径" className="flex h-8 items-center rounded-md border border-input p-0.5">
               {AMOUNTS.map((a) => (
@@ -257,7 +284,23 @@ export function CostPage() {
         )}
 
         {ready && bills && known.length > 0 && view === 'analysis' && (
-          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} />
+          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} onFilter={(dim, value) => set({ [dim]: value, page: null })}
+            onDrill={(t) => {
+              // 跳到账单视图的明细：那一天、那朵云、那个产品。那一天不在所选账期里时，账期换成那个月
+              const month = t.day.slice(0, 7)
+              scrollToDetail.current = true
+              set({
+                view: null,
+                provider: t.provider,
+                product: t.product,
+                day_from: t.day,
+                day_to: null,
+                gran: null,
+                page: null,
+                ...(month < from || month > to ? { from_period: month, to_period: month } : {}),
+              })
+            }}
+          />
         )}
 
         {ready && known.length > 0 && view === 'bills' && (
@@ -347,6 +390,7 @@ export function CostPage() {
             </Card>
 
             <Card
+              ref={detailRef}
               title="明细"
               extra={
                 <span className="flex items-center gap-2">
@@ -357,7 +401,9 @@ export function CostPage() {
                       {detail.data.total !== null && ` · ${detail.data.total.toLocaleString('zh-CN')} 行`}
                     </span>
                   )}
-                  {bills?.alicloud_daily && bills.alicloud_monthly && (!provider || provider === 'alicloud') && (
+                  <DayRangePicker fromPeriod={from} toPeriod={to} dayFrom={dayFrom} dayTo={dayTo} onChange={(next) => set({ ...next, page: null })} />
+                  {/* 选了日期时只能看日度表，粒度就不必再选 */}
+                  {!dayFrom && bills?.alicloud_daily && bills.alicloud_monthly && (!provider || provider === 'alicloud') && (
                     <Combobox
                       value={params.get('gran') ?? 'monthly'}
                       onChange={(v) => set({ gran: v === 'monthly' ? null : v, page: null })}
@@ -372,7 +418,8 @@ export function CostPage() {
                       className="w-24"
                     />
                   )}
-                  <a href={apiUrl('/bills/export', { ...base, granularity: params.get('gran') || undefined, format: 'csv' })} className={buttonClass({ size: 'sm' })} download>
+                  <ColumnPicker shown={columns.shown} raw={raw} table={source?.meta.table} onToggle={columns.toggle} onReset={columns.reset} onSetMany={columns.setMany} />
+                  <a href={apiUrl('/bills/export', { ...detailBase, ...sortParams, format: 'csv' })} className={buttonClass({ size: 'sm' })} download>
                     <DownloadIcon className="size-4" />
                     导出 CSV
                   </a>
@@ -380,7 +427,34 @@ export function CostPage() {
               }
             >
               {detail.isError && <ErrorBox error={detail.error} onRetry={() => detail.refetch()} />}
-              <DetailTable rows={detail.data?.rows ?? []} pending={detail.isPending} stale={detail.isFetching} />
+              <BillDetailTable
+                rows={detail.data?.rows ?? []}
+                pending={detail.isPending}
+                stale={detail.isFetching}
+                columns={allColumns}
+                shown={columns.shown}
+                sort={detailSort}
+                onSort={(key) => {
+                  // 同一列再点一次换方向；换列时数字与日期先看大的、文字先看 A–Z
+                  const col = allColumns.find((c) => c.sort === key)
+                  const dir = detailSort.key === key ? (detailSort.dir === 'desc' ? 'asc' : 'desc') : col?.numeric || key === 'day' ? 'desc' : 'asc'
+                  const isDefault = key === 'amount' && dir === 'desc'
+                  set({ sort: isDefault ? null : key, order: isDefault ? null : dir, page: null })
+                }}
+                filters={Object.fromEntries(
+                  FACET_DIMS.map((dim) => [
+                    dim,
+                    {
+                      value: filters[dim] ?? '',
+                      options: (facets.data?.facets[dim] ?? []).map((v) => ({ value: v })),
+                      onChange: (v: string) => set({ [dim]: v || null, page: null }),
+                      onOpen: () => setWantFacets(true),
+                      loading: facets.isFetching,
+                    },
+                  ]),
+                )}
+                amountLabel={AMOUNTS.find((a) => a.value === amount)?.label ?? '应付'}
+              />
               <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-2">
                 <span className="mr-auto text-2xs text-muted-fg">第 {page * DETAIL_PAGE + 1} – {page * DETAIL_PAGE + (detail.data?.rows.length ?? 0)} 行</span>
                 <button type="button" disabled={page === 0} onClick={() => set({ page: page - 1 || null })} className={buttonClass({ size: 'xs' })}>
@@ -586,65 +660,6 @@ function Breakdown({
           未进入排行的其余项合计 <span className="tabular-nums text-fg">{formatMoney(other)}</span>
         </div>
       )}
-    </div>
-  )
-}
-
-/** 明细表。两朵云的列已在服务端对齐，此处只负责排版 */
-function DetailTable({ rows, pending, stale }: { rows: import('@/api/types').BillDetailRow[]; pending: boolean; stale?: boolean }) {
-  if (pending) {
-    return (
-      <div className="flex justify-center py-10">
-        <Spinner />
-      </div>
-    )
-  }
-  if (!rows.length) return <div className="px-4 py-8 text-center text-xs text-muted-fg">没有符合条件的账单明细</div>
-  return (
-    <div className={cn('overflow-x-auto', stale && 'opacity-60 transition-opacity')}>
-      <table className="w-full text-xs">
-        <thead className="sticky top-0 bg-card text-2xs text-muted-fg">
-          <tr className="border-b border-border">
-            <th className="px-3 py-2 text-left font-medium">账期</th>
-            <th className="px-3 py-2 text-left font-medium">产品</th>
-            <th className="px-3 py-2 text-left font-medium">计费项</th>
-            <th className="px-3 py-2 text-left font-medium">实例</th>
-            <th className="px-3 py-2 text-left font-medium">地域</th>
-            <th className="px-3 py-2 text-right font-medium">用量</th>
-            <th className="px-3 py-2 text-right font-medium">金额</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={`${r.instance_id}-${r.item}-${i}`} className="border-b border-border/60 last:border-b-0">
-              <td className="px-3 py-1.5 whitespace-nowrap tabular-nums">{r.day || r.period}</td>
-              <td className="max-w-40 truncate px-3 py-1.5">
-                <Hint text={`${PROVIDER_LABELS[r.provider]} · ${r.account || '—'} · ${r.subscription || '—'}`} asChild>
-                  <span>{r.product}</span>
-                </Hint>
-              </td>
-              <td className="max-w-40 truncate px-3 py-1.5 text-muted-fg">{r.item}</td>
-              <td className="max-w-48 truncate px-3 py-1.5">
-                <Hint text={r.instance_id || r.instance} asChild>
-                  <span className="mono">{r.instance || r.instance_id || '—'}</span>
-                </Hint>
-              </td>
-              <td className="px-3 py-1.5 whitespace-nowrap text-muted-fg">{r.region || '—'}</td>
-              <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums text-muted-fg">
-                {r.usage ? `${r.usage} ${r.usage_unit}` : '—'}
-              </td>
-              <td className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums font-medium">
-                {formatMoney(r.amount)}
-                {r.original > r.amount && (
-                  <Hint text={`原价 ${formatMoney(r.original)}`} asChild>
-                    <span className="ml-1 text-2xs text-muted-fg line-through">{formatMoneyShort(r.original)}</span>
-                  </Hint>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   )
 }
