@@ -303,7 +303,7 @@ claude mcp add --transport http opdash-uat https://opdash-uat.example.com/mcp \
 | `cost_compare` | 按产品比较两段等长日期的花费（与前一日、与上周同日、近 N 天与前 N 天），按变化额排序，用于回答「昨天为什么贵了」 | `/cost` 产品费用对比 |
 | `trace_db_calls` | 一条链路中的全部数据库调用：语句、耗时、库名、对端地址；JDBC 参数齐全时给出代入参数后的语句，标出对应的数据源，并列出重复执行的语句，便于识别 N+1 查询 | `/api/traces/{trace_id}/db` |
 | `db_calls_top` | 一段时间内的数据库调用按语句汇总：次数、错误数、P50 / P95 / 最大 / 总耗时，附最慢一次的样本链路，用于回答「这个服务最耗时的 SQL 是哪条」 | `/api/traces/db_calls` |
-| `db_sources` | 已配置的业务数据源：名称、类型、环境、说明及使用它的服务 | `/api/db/sources` |
+| `db_sources` | 已配置的业务数据源：名称、类型、环境、说明及使用它的服务；传入业务项目配置中的连接地址（`address`）时，只列出该地址所指向的数据源 | `/api/db/sources` |
 | `db_tables` | 数据源中的表（MySQL / ClickHouse）、索引（Elasticsearch）或按 glob 扫描到的键（Redis） | `/api/db/{source}/tables` |
 | `db_describe` | 表结构：建表语句、索引及其基数、行数与大小；Elasticsearch 给出字段映射，Redis 给出键的类型、TTL、长度与样本 | `/api/db/{source}/describe` |
 | `db_query` | 执行一条只读查询：SQL（仅限 SELECT / WITH / SHOW / DESCRIBE / EXPLAIN）、Elasticsearch 查询 DSL 或 ES SQL、Redis 只读命令 | `/api/db/{source}/query` |
@@ -343,6 +343,8 @@ claude mcp add --transport http opdash-uat https://opdash-uat.example.com/mcp \
 结果同样有上限：每个数据源有 `max_rows`（默认 500）与执行超时（默认 15 秒，MySQL 还会设置 `max_execution_time`）；Redis 中一次取出整个集合的命令会先检查集合大小，超过 1000 个成员即拒绝，并建议改用 `*SCAN`。每一次 `db_query` 都会在 opdash 的日志中记录数据源与语句，以备事后核查。
 
 **链路与数据源的对应**：`trace_db_calls` 与 `db_calls_top` 读取 span 上的 `db.system`、`db.namespace`、`server.address` 等属性（新旧两版 OTel 语义约定都支持），按「对端地址 → 库名 → 服务名」的优先级对应到配置中的数据源，写在结果的 `source` 字段中；三者都对应不上时宁可不标注，以免模型去查询错误的数据库。Java agent 采集了 JDBC 参数（`db.query.parameter.<下标>`）时，还会给出代入参数后的语句 `statement_filled`，可以直接交给 `db_query` 执行 `EXPLAIN`。这两个工具读取的是 span 表，未配置数据源时同样可用，只是不标注 `source`。
+
+**业务项目与数据源的对应**：在业务项目中使用 MCP 时，项目的连接地址与库名通常写在 `application-*.yml` 或数据源配置类中。模型读出地址后，将其原样传给 `db_sources` 的 `address` 参数（JDBC URL 可直接照抄），即可查出对应的数据源，库名写在 `matched_database` 中。匹配规则与链路相同：主机与数据源的连接地址或 `aliases` 一致，两边都写了端口时端口也须一致；地址带有协议（如 `jdbc:mysql://`）时，类型也须一致。同一实例常有内网、公网两个域名，项目配置中的写法未列入 `aliases` 时匹配不上，此时工具会附上全部数据源供模型比对，并提示将该地址补入 `aliases`。
 
 ### 传输与认证
 
@@ -454,7 +456,7 @@ GET    /api/bills/sync/{task_id}/events  同上，SSE 推送：event: task 为�
 DELETE /api/bills/sync/{task_id}         停止同步：goscan 写完当前这一趟再停，已结束的任务返回 409
 GET    /api/bills/sync/running           ?provider   这朵云正在进行的同步（手动或定时发起），没有则 task 为 null
 
-GET  /api/db/sources           已配置的业务数据源（--datasources），不含账号密码
+GET  /api/db/sources           已配置的业务数据源（--datasources），不含账号密码；?address=<JDBC URL 或 host:port>&database= 只列出该地址指向的数据源
 GET  /api/db/{source}/tables   ?database&match&limit
 GET  /api/db/{source}/describe ?target&database
 GET  /api/db/{source}/query    ?q&database&index&limit   只读查询，校验规则见上文「直连业务库」

@@ -582,8 +582,14 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool, datasources_enabled: boo
         ),
         tool(
             "db_sources",
-            "已配置、可直连的业务数据源（MySQL / Redis / Elasticsearch / ClickHouse）：名称、类型、环境、说明、哪些服务在用。其余 db_* 工具的 source 取这里的 name。",
-            schema(vec![], &[]),
+            "已配置、可直连的业务数据源（MySQL / Redis / Elasticsearch / ClickHouse）：名称、类型、环境、说明、哪些服务在用。在业务项目里排障时，先从项目配置（application-*.yml、数据源配置类）读出连接地址和库名，带上 address 查出对应的数据源。其余 db_* 工具的 source 取这里的 name。",
+            schema(
+                vec![
+                    ("address", string("只列这个地址指向的数据源：JDBC URL 原样照抄即可，或 host:port")),
+                    ("database", string("配合 address：库名，地址里没带时给")),
+                ],
+                &[],
+            ),
         ),
         tool(
             "db_tables",
@@ -3216,11 +3222,30 @@ fn db_path(a: &Args<'_>, action: &str) -> R<String> {
     Ok(format!("/api/db/{}/{action}", encode_segment(&a.required("source")?)))
 }
 
-async fn db_sources(mcp: &Mcp, _a: &Args<'_>) -> R<Value> {
-    let body = mcp.get("/api/db/sources", "").await?;
+async fn db_sources(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let address = a.string("address")?;
+    let mut qs = Qs::new();
+    qs.push_opt("address", address.as_deref()).push_opt("database", a.string("database")?);
+    let body = mcp.get("/api/db/sources", &qs.finish()).await?;
     let mut out = json!({ "sources": body["sources"] });
     if !body["env"].is_null() {
         out["env"] = body["env"].clone();
+    }
+    // 对不上时把全部数据源一并给出：同一个实例常有内网 / 公网两个域名，模型对着 address 和
+    // description 多半认得出来，省得它再调一次
+    if let Some(address) = address
+        && arr(&out["sources"]).is_empty()
+    {
+        let all = mcp.get("/api/db/sources", "").await?;
+        out["all_sources"] = all["sources"].clone();
+        if let Some(m) = out.as_object_mut() {
+            note(
+                m,
+                format!(
+                    "没有数据源的地址或 aliases 对得上 {address:?}。all_sources 是全部数据源：若其中某个是同一实例的另一种写法（内网 / 公网域名），可直接使用，并请管理员把这个地址加进它的 aliases；也可用 db_calls_top 按服务名查看线上实际访问的地址"
+                ),
+            );
+        }
     }
     Ok(out)
 }

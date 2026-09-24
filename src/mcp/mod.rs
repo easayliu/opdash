@@ -501,7 +501,7 @@ fn datasource_note(reg: &crate::datasource::Registry) -> String {
         })
         .collect();
     format!(
-        "\n\n业务数据源（只读直连，对照代码排查用）：{}。db_describe 看表结构与索引，db_query 执行只读查询（SQL 只接受 SELECT / SHOW / DESCRIBE / EXPLAIN），db_slow_queries 看数据库自己记录的慢查询。\
+        "\n\n业务数据源（只读直连，对照代码排查用）：{}。在业务项目里，先从项目配置（application-*.yml 等）读出连接地址，用 db_sources 的 address 查出它对应哪个数据源、哪个库，不要按名字猜。db_describe 看表结构与索引，db_query 执行只读查询（SQL 只接受 SELECT / SHOW / DESCRIBE / EXPLAIN），db_slow_queries 看数据库自己记录的慢查询。\
          {calls}它们会标出调用落在哪个数据源（source），参数齐全时给出代入参数后的语句（statement_filled），可直接 db_query 做 EXPLAIN。",
         list.join("、"),
     )

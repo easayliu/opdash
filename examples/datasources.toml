@@ -25,7 +25,8 @@
 #   description  一句话说明，模型据此判断该查哪个库
 #   env          所属环境。同一套 opdash 同时配置了多个环境的库时用于区分；省略即与 --env 相同
 #   services     使用此库的服务名（链路中的 service_name），用于把链路中的数据库调用对应到此数据源
-#   aliases      链路 server.address 中可能出现的其他写法（域名、VIP、host:port）
+#   aliases      同一实例的其他写法（域名、VIP、host:port）。链路的 server.address 与业务项目配置中的
+#                连接地址（db_sources 的 address）都按此匹配；内网、公网域名不同时，两者都应列出
 #   timeout      单次操作超时，默认 15s，上限 5m
 #   max_rows     单次查询最多返回的行数，默认 500，上限 10000
 #   cluster      仅 ClickHouse：集群名，读取 system.query_log 时跨全部副本

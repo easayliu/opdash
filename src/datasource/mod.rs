@@ -352,6 +352,29 @@ impl Source {
         }
     }
 
+    /// 主机（及端口，两边都有时）对得上连接地址或 `aliases` 里的某一个。
+    fn serves_host(&self, host: &str, port: Option<u16>) -> bool {
+        let host = host.trim();
+        if host.is_empty() {
+            return false;
+        }
+        let port_ok = |p: Option<u16>| match (p, port) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        };
+        (host.eq_ignore_ascii_case(&self.host) && port_ok(self.port))
+            || self.aliases.iter().any(|a| {
+                let (h, p) = split_host_port(a);
+                h.eq_ignore_ascii_case(host) && port_ok(p)
+            })
+    }
+
+    /// 业务项目配置里的连接地址是不是指向这个数据源。只认主机：库名是业务项目自己选的，
+    /// 同一个实例上的哪个库都算这个数据源；类型写明了（`jdbc:mysql://`）就还得对得上。
+    pub fn serves(&self, addr: &Address) -> bool {
+        addr.kind.is_none_or(|k| k == self.kind) && self.serves_host(&addr.host, addr.port)
+    }
+
     /// 这个数据源和一次数据库调用有多像：主机对上 4 分、库名对上 2 分、服务对上 1 分，
     /// 类型对不上直接 0。见 [`Registry::match_call`]。
     fn score(&self, call: &CallTarget<'_>) -> u32 {
@@ -359,20 +382,8 @@ impl Source {
             return 0;
         }
         let mut score = 0;
-        let host = call.host.trim().to_ascii_lowercase();
-        if !host.is_empty() {
-            let port_ok = |p: Option<u16>| match (p, call.port) {
-                (Some(a), Some(b)) => a == b,
-                _ => true,
-            };
-            let hit = (host == self.host.to_ascii_lowercase() && port_ok(self.port))
-                || self.aliases.iter().any(|a| {
-                    let (h, p) = split_host_port(a);
-                    h.eq_ignore_ascii_case(&host) && port_ok(p)
-                });
-            if hit {
-                score += 4;
-            }
+        if self.serves_host(call.host, call.port) {
+            score += 4;
         }
         if !call.database.is_empty() && self.database.as_deref() == Some(call.database) {
             score += 2;
@@ -578,6 +589,60 @@ fn build_source(
     })
 }
 
+/// 业务项目配置里的一个连接地址（`db_sources` 的 `address`）。项目的连接信息写在
+/// `application-*.yml` 或代码生成工具类里，模型在项目目录里读得到；拿它和数据源比对，
+/// 比按项目名、服务名猜准得多。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Address {
+    /// 地址里带了协议才知道；`host:port` 这种写法是 `None`
+    pub kind: Option<Kind>,
+    pub host: String,
+    pub port: Option<u16>,
+    /// 地址路径里的库名（`…:3306/aftc_uat`、`redis://…/2`）
+    pub database: Option<String>,
+}
+
+impl Address {
+    /// 接受 JDBC URL（`jdbc:mysql://h:3306/db?…`）、`mysql://` / `redis://` / `http://` 地址、
+    /// `host:port[/db]` 和光秃秃的主机名。解析不出主机时返回 `None`。
+    pub fn parse(raw: &str) -> Option<Self> {
+        let s = raw.trim();
+        let s = s.strip_prefix("jdbc:").unwrap_or(s);
+        if let Some((scheme, _)) = s.split_once("://") {
+            let url = url::Url::parse(s).ok()?;
+            let kind = match scheme.to_ascii_lowercase().as_str() {
+                "mysql" | "mariadb" => Some(Kind::Mysql),
+                "redis" | "rediss" => Some(Kind::Redis),
+                "clickhouse" | "ch" => Some(Kind::Clickhouse),
+                "elasticsearch" | "es" => Some(Kind::Elasticsearch),
+                // http(s) 可能是 ES，也可能是 ClickHouse
+                _ => None,
+            };
+            let host = url.host_str().filter(|h| !h.is_empty())?.to_owned();
+            let database = url
+                .path_segments()
+                .and_then(|mut segs| segs.next())
+                .filter(|d| !d.is_empty())
+                .map(str::to_owned);
+            return Some(Self { kind, host, port: url.port(), database });
+        }
+        let (hostport, database) = match s.split_once('/') {
+            Some((hp, rest)) => (hp, rest.split(['/', '?']).next().filter(|d| !d.is_empty())),
+            None => (s, None),
+        };
+        let (host, port) = split_host_port(hostport);
+        if host.is_empty() {
+            return None;
+        }
+        Some(Self {
+            kind: None,
+            host: host.to_owned(),
+            port,
+            database: database.map(str::to_owned),
+        })
+    }
+}
+
 /// `${NAME}` 换成环境变量的值；变量没设置就报错，不留空——空密码连上去的报错只会说「认证失败」，
 /// 看不出是漏配了环境变量。
 fn expand_env(
@@ -708,6 +773,33 @@ cluster = "default"
         assert_eq!(es.limit(0), 50);
         assert_eq!(es.timeout, Duration::from_secs(30));
         assert!(reg.get("nope").err().unwrap().to_string().contains("order-db"));
+    }
+
+    #[test]
+    fn finds_sources_by_the_address_in_a_project_config() {
+        let reg = Registry::parse(SAMPLE, &env).unwrap();
+        let hits = |raw: &str| -> Vec<String> {
+            let a = Address::parse(raw).unwrap();
+            reg.all().iter().filter(|s| s.serves(&a)).map(|s| s.name.clone()).collect()
+        };
+        let a = Address::parse(
+            "jdbc:mysql://rm-demo.mysql.example.com:3306/coupon?useSSL=false&serverTimezone=GMT%2B8",
+        )
+        .unwrap();
+        assert_eq!(a.kind, Some(Kind::Mysql));
+        assert_eq!(a.database.as_deref(), Some("coupon"));
+        // 项目里写的是云数据库域名，数据源配的是 IP，靠 aliases 对上；库名不影响
+        assert_eq!(hits("jdbc:mysql://RM-DEMO.mysql.example.com:3306/coupon"), ["order-db"]);
+        assert_eq!(hits("10.0.0.5:3306/shop"), ["order-db"]);
+        assert_eq!(hits("10.0.0.5"), ["order-db"]);
+        assert_eq!(hits("redis://:secret@10.0.0.6:6379/2"), ["order-cache"]);
+        assert!(hits("10.0.0.5:3307").is_empty(), "端口不同就不是同一个库");
+        assert!(hits("redis://10.0.0.5:3306").is_empty(), "写明了类型就得对得上");
+        assert_eq!(
+            Address::parse("10.0.0.5:3306/shop?x=1").unwrap().database.as_deref(),
+            Some("shop")
+        );
+        assert!(Address::parse("  ").is_none());
     }
 
     #[test]

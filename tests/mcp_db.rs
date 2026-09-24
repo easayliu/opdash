@@ -175,6 +175,26 @@ async fn db_tools_appear_only_with_datasources() {
     assert_eq!(list[0]["name"], "order-db");
     assert_eq!(list[0]["address"], "10.0.0.5:3306");
     assert_eq!(list[2]["env"], "测试");
+    // 业务项目配置里的 JDBC URL 原样传进来，按地址 / aliases 对到数据源，库名从 URL 里取
+    let (err, out) = call_tool(
+        &app,
+        "db_sources",
+        json!({ "address": "jdbc:mysql://rm-demo.mysql.example.com:3306/coupon?useSSL=false" }),
+    )
+    .await;
+    assert!(!err, "{out}");
+    let list = out["sources"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{out}");
+    assert_eq!(list[0]["name"], "order-db");
+    assert_eq!(list[0]["matched_database"], "coupon");
+    assert!(out.get("all_sources").is_none());
+    // 对不上时附上全部数据源，让模型自己认内网 / 公网的另一种写法
+    let (err, out) =
+        call_tool(&app, "db_sources", json!({ "address": "rm-other.example.com:3306" })).await;
+    assert!(!err, "{out}");
+    assert!(out["sources"].as_array().unwrap().is_empty());
+    assert_eq!(out["all_sources"].as_array().unwrap().len(), 3);
+    assert!(out.to_string().contains("aliases"), "{out}");
     // 说明里直接列出数据源，省一次调用
     let body = rpc_with(&app, request(1, "initialize", json!({})), &[]).await;
     let text = body["result"]["instructions"].as_str().unwrap();

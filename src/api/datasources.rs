@@ -11,7 +11,7 @@ use axum::{
 use serde_json::{Value, json};
 
 use super::{AppState, params::Params};
-use crate::datasource::{Ctx, QueryOpts, SlowOpts, SlowSort};
+use crate::datasource::{Address, Ctx, QueryOpts, SlowOpts, SlowSort};
 use crate::error::{Error, Result};
 
 pub fn routes() -> Router<AppState> {
@@ -33,11 +33,29 @@ fn ctx(state: &AppState) -> Ctx {
     }
 }
 
-async fn sources(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({
-        "env": state.config.env,
-        "sources": state.datasources.all().iter().map(|s| s.summary()).collect::<Vec<_>>(),
-    }))
+/// `?address=` 只列这个连接地址（业务项目配置里的）指向的数据源，库名取 `database` 参数或
+/// 地址路径，写在 `matched_database` 里，见 [`crate::datasource::Source::serves`]。
+async fn sources(State(state): State<AppState>, p: Params) -> Result<Json<Value>> {
+    let all = state.datasources.all().iter();
+    let sources: Vec<Value> = match p.get("address") {
+        Some(raw) => {
+            let addr = Address::parse(raw).ok_or_else(|| {
+                Error::bad_request("address 应为 JDBC URL、mysql:// 等连接地址或 host:port")
+            })?;
+            let db = p.get("database").map(str::to_owned).or(addr.database.clone());
+            all.filter(|s| s.serves(&addr))
+                .map(|s| {
+                    let mut v = s.summary();
+                    if let Some(db) = &db {
+                        v["matched_database"] = json!(db);
+                    }
+                    v
+                })
+                .collect()
+        }
+        None => all.map(|s| s.summary()).collect(),
+    };
+    Ok(Json(json!({ "env": state.config.env, "sources": sources })))
 }
 
 async fn tables(
