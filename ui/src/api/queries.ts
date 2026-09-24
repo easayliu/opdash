@@ -6,6 +6,7 @@ import type {
   ApiKeyInfo,
   AuthMe,
   BillAllocationResponse,
+  BillProductDaysResponse,
   BillBreakdownResponse,
   BillDailyResponse,
   BillDetailResponse,
@@ -483,6 +484,17 @@ export function useBillAllocation(params: Params, enabled = true) {
   return useQuery({
     queryKey: ['bills', 'allocation', params],
     queryFn: ({ signal }) => apiGet<BillAllocationResponse>('/bills/allocation', params, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+    enabled,
+  })
+}
+
+/** 产品费用对比的逐日数据。日期范围由服务端按今天推算，与账期无关，调用方不必传 from / to */
+export function useBillProductDays(params: Params, enabled = true) {
+  return useQuery({
+    queryKey: ['bills', 'product-days', params],
+    queryFn: ({ signal }) => apiGet<BillProductDaysResponse>('/bills/product-days', params, signal),
     placeholderData: keepPreviousData,
     staleTime: 5 * 60_000,
     enabled,

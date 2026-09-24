@@ -788,6 +788,65 @@ async fn daily_average_uses_each_clouds_own_day_count() {
     assert_eq!(body["unmatched"]["by_provider"]["alicloud"]["daily"], 900.0);
 }
 
+/// 产品费用对比：按「云 + 产品」逐日汇总，不分规则。日期以今天为终点往回数，**不跟所选账期走**
+/// ——前一段常落在上个月；各云账单出到哪天分开记，页面据此默认选两朵云都已出账的那一天。
+#[tokio::test]
+async fn product_days_line_up_each_product_by_day() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC)]).await;
+
+    // 测试不替换时钟，日期按运行当天（默认时区 Asia/Shanghai）推算
+    let today = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Shanghai).date_naive();
+    let ago = |n: u64| (today - chrono::Days::new(n)).format("%Y-%m-%d").to_string();
+    let (d2, d1) = (ago(2), ago(1));
+    let row = |product: &str, day: &str, amount: f64| {
+        format!(r#"{{"product":"{product}","bucket":"{day}","amount":{amount}}}"#)
+    };
+    fake.respond_to(
+        "any(if(ProductZh != '', ProductZh, Product)) AS _product",
+        [
+            row("云服务器", &d2, 100.0),
+            row("云服务器", &d1, 120.0),
+            // 落不进任何一天的钱不进逐日对比
+            row("云服务器", "", 7.0),
+        ]
+        .join("\n"),
+    );
+    fake.respond_to(
+        "any(if(product_name != '', product_name, product_code)) AS _product",
+        row("对象存储", &d2, 900.0),
+    );
+    let (status, body) =
+        get_json(&app, "/api/bills/product-days?from=2026-09&to=2026-09&days=7").await;
+    assert_eq!(status, 200, "{body}");
+    let days = body["days"].as_array().unwrap();
+    // 连续的 7 天，没有账单的日子也占一格
+    assert_eq!(days.len(), 7, "{body}");
+    assert_eq!(days[6], today.format("%Y-%m-%d").to_string());
+    assert_eq!(body["today"], days[6]);
+    assert_eq!(body["last_by_provider"]["volcengine"], d1.as_str());
+    assert_eq!(body["last_by_provider"]["alicloud"], d2.as_str());
+    let rows = body["rows"].as_array().unwrap();
+    let find = |product: &str| rows.iter().find(|r| r["product"] == product).unwrap();
+    assert_eq!(find("云服务器")["provider"], "volcengine");
+    assert_eq!(
+        find("云服务器")["amounts"],
+        serde_json::json!([0.0, 0.0, 0.0, 0.0, 100.0, 120.0, 0.0])
+    );
+    assert_eq!(
+        find("对象存储")["amounts"],
+        serde_json::json!([0.0, 0.0, 0.0, 0.0, 900.0, 0.0, 0.0])
+    );
+
+    // 按日期收窄、不按所选账期：SQL 里的日期下界是 7 天前，而不是 from 那个月的 1 号
+    let q = sql_for(&fake, "GROUP BY _product, _bucket");
+    assert!(q.contains(":Date}"), "{q}");
+    assert!(!q.contains("_rule"), "{q}");
+
+    let (status, _) = get_json(&app, "/api/bills/product-days?days=1").await;
+    assert_eq!(status, 400);
+}
+
 /// 火山偶有 `ExpenseDate` 为空的行：落不进任何一天，却是实实在在的钱。合并成一条查询之后，
 /// 它仍要计入合计、按产品与按月拆分，只是不算作一天、不进趋势。
 #[tokio::test]

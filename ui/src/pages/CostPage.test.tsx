@@ -95,6 +95,20 @@ const ALLOCATION = {
   stats: STATS,
 }
 
+/** 产品费用对比：今天 9/22，两朵云都出到 9/21 */
+const PRODUCT_DAYS = {
+  amount: 'payable',
+  today: '2026-09-22',
+  days: ['2026-09-19', '2026-09-20', '2026-09-21', '2026-09-22'],
+  last_by_provider: { alicloud: '2026-09-21', volcengine: '2026-09-21' },
+  monthly_only: [],
+  rows: [
+    { provider: 'alicloud', product: '云服务器 ECS', amounts: [300, 400, 250, 0] },
+    { provider: 'volcengine', product: '对象存储', amounts: [0, 0, 100, 0] },
+  ],
+  stats: STATS,
+}
+
 /** 一份「两朵云、三个账期」的假账单。没有后端，这里验的是页面画不画得出来 */
 function stubApi(overrides: Record<string, unknown> = {}) {
   const bodies: Record<string, unknown> = {
@@ -123,6 +137,7 @@ function stubApi(overrides: Record<string, unknown> = {}) {
       providers: ['volcengine'],
       stats: STATS,
     },
+    '/api/bills/product-days': PRODUCT_DAYS,
     '/api/bills/breakdown': {
       by: 'product',
       label: '产品',
@@ -312,6 +327,29 @@ describe('费用页', () => {
     expect(await screen.findByText('预付费摊销')).toBeInTheDocument()
   })
 
+  it('产品费用对比默认比各云都已出账的最后一天与前一天，可按变动排序', async () => {
+    stubApi({ '/api/bills/allocation': ALLOCATION })
+    page('/cost?view=analysis&est=2026-10')
+    const card = await screen.findByRole('region', { name: '产品费用对比' })
+    // 22 日是今天、账单未出齐，默认比 21 日：21 日 350，20 日 400，少了 50
+    expect(await within(card).findByText('350.00')).toBeInTheDocument()
+    expect(within(card).getByText('-50.00（-12.5%）')).toBeInTheDocument()
+    // 前一天没花钱的产品标为新增，而不是 ∞
+    expect(within(card).getByText('新增')).toBeInTheDocument()
+    expect(within(card).getByText('-37.5%')).toBeInTheDocument()
+    // 按变动排：对象存储 +100 排到 ECS -150 之后
+    await userEvent.click(within(card).getByRole('button', { name: '按变动' }))
+    const products = within(card).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]?.textContent)
+    expect(products).toEqual(['云服务器 ECS', '对象存储'])
+    // 点开一个产品看逐日走势：写明是哪几天、共几天，并标出比较的那两天
+    await userEvent.click(within(card).getByRole('button', { name: '云服务器 ECS' }))
+    expect(within(card).getByText('9/19–9/21，共 3 天')).toBeInTheDocument()
+    expect(within(card).getByText(/竖线标出比较的两天：9\/20 周日 与 9\/21 周一/)).toBeInTheDocument()
+    // 点这一行的其他位置同样能收起
+    await userEvent.click(within(card).getByText('-37.5%'))
+    expect(within(card).queryByText('9/19–9/21，共 3 天')).not.toBeInTheDocument()
+  })
+
   it('构成图画出未归属的部分，点图例可单独查看某条线', async () => {
     // 第二天合计 400，各线只摊到 250：多出的 150 就是未归属
     const points = [ALLOCATION.points[0], { ...ALLOCATION.points[1], total: 400 }]
@@ -365,7 +403,7 @@ describe('费用页', () => {
     expect(await screen.findByText('尚未配置成本归属规则')).toBeInTheDocument()
     expect((await screen.findAllByText(/bill-alloc/)).length).toBeGreaterThan(0)
     // 按产品那张表照常在
-    expect(await screen.findByText('云服务器 ECS')).toBeInTheDocument()
+    expect(within(await screen.findByRole('region', { name: '按产品' })).getByText('云服务器 ECS')).toBeInTheDocument()
   })
 
   it('没部署 goscan 就只给一句原因', async () => {

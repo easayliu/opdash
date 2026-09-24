@@ -882,6 +882,35 @@ impl<'a> BillQueries<'a> {
         )))
     }
 
+    /// 按「产品 + 哪一天」汇总 `since` 以来的后付费：分析视图「产品费用对比」用。
+    ///
+    /// 筛选与 [`Self::alloc_detail`] 相同（归属规则的 include、预付费排除），数字与「按产品」
+    /// 同一口径；日期范围则独立于所选账期——对比的前一段常落在上个月，只选了本月时也要查得到。
+    /// 调用方把 `filter.range` 设为覆盖这段日期的账期，走主键；日期条件再往里收。
+    /// 月度表没有日期，回 `None`。
+    pub fn product_days(
+        &self,
+        filter: &BillFilter,
+        amount: Amount,
+        alloc: &Alloc,
+        since: &str,
+    ) -> Result<Option<Query>> {
+        let Some(day) = self.kind.day_expr() else { return Ok(None) };
+        let mut b = Bindings::new();
+        let where_sql = self.alloc_where(filter, alloc, None, &mut b)?;
+        let since = b.bind("Date", since);
+        let where_sql = format!("{where_sql}\n    AND {day} >= {since}");
+        let cols = [
+            col(Dimension::Product.expr(self.kind), "product"),
+            col(self.kind.date_expr(), "bucket"),
+            col(self.amount_expr(amount), "amount"),
+        ];
+        let inner = self.deduped(&cols, &where_sql)?;
+        Ok(Some(b.into_query(format!(
+            "SELECT _product AS product, _bucket AS bucket, sum(_amount) AS amount\nFROM (\n  {inner}\n)\nGROUP BY _product, _bucket"
+        ))))
+    }
+
     /// 这张表摊不摊得了预付费：得有服务期那两列，才知道一笔购买该摊到哪几个月。
     /// 阿里云的两张表都有，火山那张没有。
     fn amortizable(&self) -> bool {
@@ -1040,6 +1069,16 @@ pub struct AllocDetailRow {
     /// 日期（`YYYY-MM-DD`），月度表为账期；火山偶有空串
     pub bucket: String,
     pub period: String,
+    #[serde(deserialize_with = "num::de")]
+    pub amount: f64,
+}
+
+/// [`BillQueries::product_days`] 的一行。
+#[derive(Debug, Deserialize)]
+pub struct ProductDayRow {
+    pub product: String,
+    /// `YYYY-MM-DD`
+    pub bucket: String,
     #[serde(deserialize_with = "num::de")]
     pub amount: f64,
 }

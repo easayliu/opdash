@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketDomain } from '@/components/charts/axis'
+import { bucketDomain, niceRange } from '@/components/charts/axis'
 
 const W = 60_000
 
@@ -40,5 +40,16 @@ describe('bucketDomain', () => {
     const to = from + 180_000
     const cells = [{ t_ms: from + 120_000 }, { t_ms: from - 60_000 }, { t_ms: from + 60_000 }]
     expect(bucketDomain(from, to, cells, W)).toEqual({ x0: from - 60_000, x1: to })
+  })
+})
+
+describe('niceRange', () => {
+  it('上下取到整刻度，把起伏撑满', () => {
+    // 每天 1,000 上下：从 0 起画只看得到一条平线
+    expect(niceRange(980, 1130)).toEqual({ lo: 950, hi: 1150, ticks: [950, 1000, 1050, 1100, 1150] })
+  })
+
+  it('全部相等时退回从 0 起', () => {
+    expect(niceRange(100, 100).lo).toBe(0)
   })
 })

@@ -32,7 +32,7 @@ use crate::goscan::{Goscan, SyncRequest, TaskRow};
 use crate::query::bills::{
     AllocDetailRow, AllocPrepaidRow, AllocRow, Amount, BillFilter, BillQueries, BucketRow,
     DEFAULT_PERIODS, DetailRow, Dimension, KeyRow, Kind, MAX_DETAIL_ROWS, MAX_PERIODS, PeriodRange,
-    PeriodRow, Provider, TotalRow, shift_period,
+    PeriodRow, ProductDayRow, Provider, TotalRow, shift_period,
 };
 use crate::query::parse_tz;
 use crate::schema::{BillTable, BillTables, Schema};
@@ -44,6 +44,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/bills/daily", get(daily))
         .route("/api/bills/breakdown", get(breakdown))
         .route("/api/bills/allocation", get(allocation))
+        .route("/api/bills/product-days", get(product_days))
         .route("/api/bills/detail", get(detail))
         .route("/api/bills/export", get(export))
         .route("/api/bills/sync", post(sync))
@@ -1033,6 +1034,140 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
             .collect(),
         monthly,
         coverage,
+        stats: merge_stats(&stats),
+    }))
+}
+
+/// 「产品费用对比」默认往回看几天：够比「近 30 天与前 30 天」，再留两天给账单的滞后。
+const DEFAULT_PRODUCT_DAYS: u32 = 62;
+/// 最多往回看几天。
+const MAX_PRODUCT_DAYS: u32 = 92;
+
+/// 按产品、按天的后付费金额，页面据此比对两段等长的日期区间（某一天与前一天、近 7 天与
+/// 前 7 天、与上周同日……）各产品花了多少。
+///
+/// 日期范围**不跟所选账期走**：以 `--timezone` 的今天为终点往回 `days` 天。对比的前一段常落在
+/// 上个月，只选了本月时也要比得出来；也不受「日均口径」影响，只看最近 7 天时照样有前 7 天。
+/// 其余筛选（云、搜索、维度、金额口径、归属规则的 include 与预付费排除）与分析视图一致。
+///
+/// 摆成「日期 × 产品」的矩阵而不是逐行展开：七十来个产品、两个月的天数，展开成对象要重复
+/// 几千遍日期与产品名。
+#[derive(Serialize)]
+pub struct ProductDaysResponse {
+    pub amount: Amount,
+    /// 按 `--timezone` 的今天。它的账单必然没出齐，页面据此不拿它作默认的比对日
+    pub today: String,
+    /// 从 `today` 往回 `days` 天的**每一个**日期，升序，没有账单的日子也在：区间按下标切，
+    /// 缺了哪天一眼看得出
+    pub days: Vec<String>,
+    /// 各云的日度账单出到哪一天。两朵云的同步进度常不一致，页面据此默认选各云都已出账的那天
+    pub last_by_provider: BTreeMap<&'static str, String>,
+    /// 要看、却只有月度账单的云：它们不在对比里，页面要说明
+    pub monthly_only: Vec<&'static str>,
+    pub rows: Vec<ProductDaysRow>,
+    pub stats: Stats,
+}
+
+#[derive(Serialize)]
+pub struct ProductDaysRow {
+    pub provider: &'static str,
+    pub product: String,
+    /// 与 `days` 一一对应
+    pub amounts: Vec<f64>,
+}
+
+async fn product_days(
+    State(state): State<AppState>,
+    p: Params,
+) -> Result<Json<ProductDaysResponse>> {
+    let schema = bills(&state).await?;
+    let tables = schema.bills.as_ref().expect("bills checked");
+    let amount = Amount::parse(p.get("amount"))?;
+    let n = match p.get_u32("days")? {
+        None => DEFAULT_PRODUCT_DAYS,
+        Some(n @ 2..=MAX_PRODUCT_DAYS) => n,
+        Some(_) => {
+            return Err(Error::bad_request(format!("days 须在 2 至 {MAX_PRODUCT_DAYS} 之间")));
+        }
+    };
+    let fallback = Alloc::default();
+    let alloc = state.alloc.as_deref().unwrap_or(&fallback);
+
+    let tz = parse_tz(&state.config.timezone)?;
+    let today = chrono::DateTime::from_timestamp_millis(state.now_ms())
+        .ok_or_else(|| Error::internal("当前时间超出范围"))?
+        .with_timezone(&tz)
+        .date_naive();
+    let since = today - chrono::Days::new(u64::from(n - 1));
+    let days: Vec<String> =
+        since.iter_days().take(n as usize).map(|d| d.format("%Y-%m-%d").to_string()).collect();
+    let mut filter = filter(&state, &p)?;
+    filter.range = PeriodRange {
+        from: since.format("%Y-%m").to_string(),
+        to: today.format("%Y-%m").to_string(),
+    };
+
+    let wanted = providers(&p)?;
+    let all = sources(tables, &wanted, false);
+    let daily: Vec<(Kind, &BillTable)> =
+        sources(tables, &wanted, true).into_iter().filter(|(k, _)| k.has_days()).collect();
+    let monthly_only: Vec<&'static str> = all
+        .iter()
+        .map(|(k, _)| k.provider())
+        .filter(|p| !daily.iter().any(|(k, _)| k.provider() == *p))
+        .map(|p| p.as_str())
+        .collect();
+
+    let since_str = since.format("%Y-%m-%d").to_string();
+    let results = futures_util::future::join_all(daily.iter().map(|(kind, table)| {
+        let q = queries(&state, *kind, table).product_days(&filter, amount, alloc, &since_str);
+        let client = state.client.clone();
+        let provider = kind.provider().as_str();
+        async move {
+            match q? {
+                Some(q) => Ok::<_, Error>(Some((provider, client.rows::<ProductDayRow>(q).await?))),
+                None => Ok(None),
+            }
+        }
+    }))
+    .await;
+
+    let index: BTreeMap<&str, usize> =
+        days.iter().enumerate().map(|(i, d)| (d.as_str(), i)).collect();
+    let mut by_product: BTreeMap<(&'static str, String), Vec<f64>> = BTreeMap::new();
+    let mut last_by_provider: BTreeMap<&'static str, String> = BTreeMap::new();
+    let mut stats = Vec::new();
+    for r in results {
+        let Some((provider, rows)) = r? else { continue };
+        stats.push(rows.stats);
+        for row in rows.rows {
+            // 空日期、以及火山偶有的「今天之后」的日期，落不进任何一格
+            let Some(&i) = index.get(row.bucket.as_str()) else { continue };
+            by_product.entry((provider, row.product)).or_insert_with(|| vec![0.0; days.len()])
+                [i] += row.amount;
+            let last = last_by_provider.entry(provider).or_default();
+            if row.bucket > *last {
+                last.clone_from(&row.bucket);
+            }
+        }
+    }
+    let rows = by_product
+        .into_iter()
+        .map(|((provider, product), amounts)| ProductDaysRow {
+            provider,
+            product,
+            amounts: amounts.into_iter().map(round).collect(),
+        })
+        .filter(|r| r.amounts.iter().any(|v| *v != 0.0))
+        .collect();
+
+    Ok(Json(ProductDaysResponse {
+        amount,
+        today: today.format("%Y-%m-%d").to_string(),
+        days,
+        last_by_provider,
+        monthly_only,
+        rows,
         stats: merge_stats(&stats),
     }))
 }

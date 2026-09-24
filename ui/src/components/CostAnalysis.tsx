@@ -11,16 +11,20 @@
  * 预付费（包年包月）不走日均这条路：它在购买当月一次性出账，由后端按服务期摊到各月，页面上
  * 单独列出。月度预估因此是两段相加——后付费的日均 × 天数，加上那个月的摊销额；摊到未来几个月
  * 的摊销是已经发生的购买摊过来的，所以下个月的预估里它是已知项，不必估。
+ *
+ * 页尾的「产品费用对比」补上日均看不到的一面：某一天（或近几天）各产品比之前多花或少花了多少。
  */
 import { Fragment, useMemo, useState } from 'react'
 import { CalendarDaysIcon, ChevronRightIcon, CircleAlertIcon, DownloadIcon, TrendingUpIcon, WalletIcon, type LucideIcon } from 'lucide-react'
-import { useBillAllocation } from '@/api/queries'
-import type { BillAllocItem, BillAllocLine, BillAllocPoint, BillAllocationResponse, BillsMeta } from '@/api/types'
+import { useBillAllocation, useBillProductDays } from '@/api/queries'
+import type { BillAllocItem, BillAllocLine, BillAllocPoint, BillAllocationResponse, BillProductDaysResponse, BillsMeta } from '@/api/types'
 import { Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Spinner, buttonClass } from '@/components/ui'
+import { LineChart, Legend, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
-import { AMOUNTS, PROVIDER_LABELS, daysInMonth, dayTick, formatMoney, formatMoneyShort, formatMoneyTick, periodSlots, periodSpan, periodTick, shiftPeriod } from '@/lib/bills'
+import { AMOUNTS, PROVIDER_LABELS, changeRatio, daysInMonth, dayTick, formatChange, formatMoney, formatMoneyShort, formatMoneyTick, periodSlots, periodSpan, periodTick, shiftPeriod } from '@/lib/bills'
 import { allocSection, allocSections, allocSummary, currentLabel, thisPeriod, type SectionKey } from '@/lib/allocTable'
 import { seriesVar } from '@/lib/colors'
+import { COMPARE_MODES, compare, defaultEnd, endOptions, trend, type CompareMode, type Comparison, type ProductDiff, type Range } from '@/lib/productDays'
 import { cn } from '@/lib/utils'
 
 /**
@@ -242,6 +246,8 @@ export function CostAnalysis({
           </>
         )}
       </Card>
+
+      <ProductCompare base={base} ready={ready} prepaid={prepaid} />
     </div>
   )
 }
@@ -704,6 +710,339 @@ function ItemTable({ items, nights, compact, max = Math.max(0, ...items.map((i) 
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+const WEEKDAYS = '日一二三四五六'
+
+/** 「9/23 周三」 */
+const dayLabel = (day: string) => `${dayTick(day)} 周${WEEKDAYS[new Date(`${day}T00:00:00`).getDay()] ?? ''}`
+
+/** 一段日期：单日写「9/23 周三」，多日写「9/17–9/23」 */
+const rangeLabel = (r: Range) => (r.from === r.to ? dayLabel(r.to) : `${dayTick(r.from)}–${dayTick(r.to)}`)
+
+/** 涨价标红、降价标强调色，与账单视图「环比」卡片同一套配色 */
+const changeTone = (delta: number) => (delta > 0.005 ? 'text-danger' : delta < -0.005 ? 'text-accent' : 'text-muted-fg')
+
+/** 变动额，带正负号；0 显示为「—」 */
+const formatDelta = (delta: number) => (Math.abs(delta) < 0.005 ? '—' : `${delta > 0 ? '+' : ''}${formatMoney(delta)}`)
+
+/** 金额口径、云、搜索与维度筛选照用；账期不传——对比的日期由服务端按今天往回数，与账期无关 */
+const withoutPeriod = (base: Record<string, string | undefined>) =>
+  Object.fromEntries(Object.entries(base).filter(([k]) => k !== 'from' && k !== 'to'))
+
+/**
+ * 产品费用对比：两段等长的日期里各产品花了多少，多了还是少了。
+ *
+ * 回答的是「昨天（这周）哪个产品突然多花了钱」——日均把波动抹平了，按月拆分又太粗，都看不出
+ * 这个。比法见 `COMPARE_MODES`，默认截止到哪一天见 `defaultEnd`。只含后付费：预付费在购买那天
+ * 一次性出账，逐日比只会冒出一根尖刺。
+ *
+ * 数据单独查（`/api/bills/product-days`），不取分析接口的：那份受所选账期与「日均口径」约束，
+ * 对比段常常落在范围之外。
+ */
+function ProductCompare({ base, ready, prepaid }: { base: Record<string, string | undefined>; ready: boolean; prepaid: boolean }) {
+  const params = useMemo(() => withoutPeriod(base), [base])
+  const q = useBillProductDays(params, ready)
+  const data = q.data
+  const [mode, setMode] = useState<CompareMode>('1')
+  const [picked, setPicked] = useState<string | null>(null)
+  const [order, setOrder] = useState<'amount' | 'delta'>('amount')
+  const [all, setAll] = useState(false)
+  const options = data ? endOptions(data, mode) : []
+  // 换了比法或筛选之后，原先选的那天可能已不可选，退回默认
+  const end = picked && options.includes(picked) ? picked : data ? defaultEnd(data, mode) : null
+  const cmp = data && end ? compare(data, mode, end) : null
+  const multiCloud = new Set(data?.rows.map((r) => r.provider)).size > 1
+  const rows = cmp
+    ? [...cmp.rows].sort((a, b) =>
+        order === 'delta'
+          ? Math.abs(b.delta) - Math.abs(a.delta) || b.current - a.current
+          : b.current - a.current || b.previous - a.previous || a.product.localeCompare(b.product),
+      )
+    : []
+  const shown = all ? rows : rows.slice(0, PRODUCT_TOP)
+
+  return (
+    <Card
+      title="产品费用对比"
+      extra={
+        <span className="flex flex-wrap items-center justify-end gap-2">
+          {q.isFetching && <Spinner className="size-4" />}
+          <span role="group" aria-label="排序" className="flex h-7 items-center rounded-md border border-input p-0.5">
+            {(
+              [
+                ['amount', '按金额'],
+                ['delta', '按变动'],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={order === key}
+                onClick={() => setOrder(key)}
+                className={cn('h-full rounded-sm px-2 text-xs whitespace-nowrap text-muted-fg hover:text-fg', order === key && 'bg-accent-soft text-accent')}
+              >
+                {label}
+              </button>
+            ))}
+          </span>
+          <Combobox
+            value={mode}
+            onChange={(v) => setMode(v as CompareMode)}
+            options={COMPARE_MODES}
+            clearable={false}
+            searchPlaceholder="筛比法…"
+            title="比法"
+            size="sm"
+            className="w-40"
+          />
+          {cmp && (
+            <Combobox
+              value={cmp.current.to}
+              onChange={setPicked}
+              options={options.map((d) => ({ value: d, label: `截至 ${dayLabel(d)}` }))}
+              clearable={false}
+              searchPlaceholder="筛日期…"
+              title="截止日"
+              size="sm"
+              className="w-36"
+            />
+          )}
+        </span>
+      }
+    >
+      {q.isError ? (
+        <ErrorBox error={q.error} onRetry={() => q.refetch()} />
+      ) : !data ? (
+        <div className="flex justify-center py-10">
+          <Spinner />
+        </div>
+      ) : !cmp ? (
+        <div className="px-4 py-6 text-center text-xs text-muted-fg">
+          {data.rows.length
+            ? `近 ${data.days.length} 天的日度账单不足以「${COMPARE_MODES.find((m) => m.value === mode)?.label}」，请换一种比法。`
+            : '近期没有日度账单，无法按天对比。'}
+        </div>
+      ) : (
+        <div className={cn(q.isFetching && 'opacity-60 transition-opacity')}>
+          <CompareSummary cmp={cmp} prepaid={prepaid} />
+          <CompareNotes cmp={cmp} data={data} />
+          <CompareTable data={data} cmp={cmp} rows={shown} multiCloud={multiCloud} />
+          {rows.length > PRODUCT_TOP && (
+            <button
+              type="button"
+              onClick={() => setAll(!all)}
+              className="w-full border-t border-border px-3 py-2 text-center text-xs text-accent hover:bg-muted/40"
+            >
+              {all ? `收起，仅显示前 ${PRODUCT_TOP} 项` : `展开其余 ${rows.length - PRODUCT_TOP} 项`}
+            </button>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+/** 两段的合计与变动 */
+function CompareSummary({ cmp, prepaid }: { cmp: Comparison; prepaid: boolean }) {
+  const noun = cmp.basis === 'daily' ? '日均' : '合计'
+  const delta = cmp.currentTotal - cmp.previousTotal
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 border-b border-border px-4 py-2.5 text-xs">
+      <span>
+        <span className="text-muted-fg">
+          {rangeLabel(cmp.current)} {noun}{' '}
+        </span>
+        <span className="font-semibold tabular-nums">{formatMoney(cmp.currentTotal)}</span>
+      </span>
+      <span>
+        <span className="text-muted-fg">
+          {rangeLabel(cmp.previous)} {noun}{' '}
+        </span>
+        <span className="tabular-nums">{formatMoney(cmp.previousTotal)}</span>
+      </span>
+      <span className={cn('tabular-nums', changeTone(delta))}>
+        {formatDelta(delta)}（{formatChange(changeRatio(cmp.currentTotal, cmp.previousTotal))}）
+      </span>
+      {prepaid && <span className="ml-auto text-2xs text-muted-fg">仅含后付费</span>}
+    </div>
+  )
+}
+
+/** 比出来的数字可能失真的几种情形，各写一句 */
+function CompareNotes({ cmp, data }: { cmp: Comparison; data: BillProductDaysResponse }) {
+  const notes: string[] = []
+  if (cmp.pending.length) {
+    notes.push(
+      `${cmp.pending.map((p) => `${PROVIDER_LABELS[p]}的日度账单截至 ${dayTick(data.last_by_provider[p] ?? '')}`).join('，')}，本段不含该云其后的费用，其产品的「下降」并非实际下降。`,
+    )
+  }
+  const gaps = [...cmp.previous.gaps, ...cmp.current.gaps]
+  if (gaps.length) {
+    notes.push(
+      `${gaps.map(dayTick).join('、')} 没有账单，可能尚未同步${cmp.basis === 'daily' ? '；两段有账单的天数不同，改按各自有账单的天数折算日均比较' : ''}。`,
+    )
+  }
+  if (data.monthly_only.length) {
+    notes.push(`${data.monthly_only.map((p) => PROVIDER_LABELS[p]).join('、')}仅有月度账单，未计入对比。`)
+  }
+  if (!notes.length) return null
+  return (
+    <ul className="space-y-0.5 border-b border-border bg-warn-soft px-4 py-2 text-2xs leading-5 text-warn">
+      {notes.map((n) => (
+        <li key={n}>{n}</li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * 变动条：从中线出发，涨价向右标红、降价向左用强调色，长度按本表最大的变动额折算。
+ * 扫一眼就知道变动集中在哪几个产品，不必逐行读数字
+ */
+function DeltaBar({ delta, max }: { delta: number; max: number }) {
+  const pct = max > 0 ? Math.min(50, (Math.abs(delta) / max) * 50) : 0
+  return (
+    <span aria-hidden className="relative block h-2.5 w-full">
+      <span className="absolute inset-y-0 left-1/2 w-px bg-border" />
+      {pct > 0 && (
+        <span
+          className={cn('absolute inset-y-0 rounded-[2px]', delta > 0 ? 'bg-danger/70' : 'bg-accent/70')}
+          style={delta > 0 ? { left: '50%', width: `${pct}%` } : { right: '50%', width: `${pct}%` }}
+        />
+      )}
+    </span>
+  )
+}
+
+function CompareTable({ data, cmp, rows, multiCloud }: { data: BillProductDaysResponse; cmp: Comparison; rows: ProductDiff[]; multiCloud: boolean }) {
+  const [open, setOpen] = useState<string | null>(null)
+  if (!rows.length) return <div className="px-4 py-6 text-center text-xs text-muted-fg">两段均无后付费账单</div>
+  const suffix = cmp.basis === 'daily' ? ' 日均' : ''
+  // 按全部产品取最大值，不只取显示出来的这几行：展开其余项时条长不该跟着变
+  const max = Math.max(0, ...cmp.rows.map((r) => Math.abs(r.delta)))
+  const colSpan = multiCloud ? 7 : 6
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs tabular-nums">
+        <thead className="text-2xs text-muted-fg">
+          <tr className="border-b border-border">
+            <th className="px-3 py-2 text-left font-medium">产品</th>
+            {multiCloud && <th className="px-3 py-2 text-left font-medium">云厂商</th>}
+            <th className="px-3 py-2 text-right font-medium whitespace-nowrap">
+              {rangeLabel(cmp.previous)}
+              {suffix}
+            </th>
+            <th className="px-3 py-2 text-right font-medium whitespace-nowrap">
+              {rangeLabel(cmp.current)}
+              {suffix}
+            </th>
+            <th className="hidden w-32 px-3 py-2 text-center font-medium sm:table-cell">变动</th>
+            <th className="px-3 py-2 text-right font-medium">变动额</th>
+            <th className="px-3 py-2 text-right font-medium">变动率</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const key = `${r.provider}-${r.product}`
+            const isOpen = open === key
+            const ratio = changeRatio(r.current, r.previous)
+            const amounts = data.rows.find((x) => x.provider === r.provider && x.product === r.product)?.amounts
+            return (
+              <Fragment key={key}>
+                {/* 整行都能点开；产品名那个按钮留给键盘与读屏，它的点击冒泡到行上，不另绑一次 */}
+                <tr onClick={() => setOpen(isOpen ? null : key)} className="row-hover cursor-pointer border-b border-border/60 last:border-b-0">
+                  <td className="max-w-64 px-3 py-1.5">
+                    <button type="button" aria-expanded={isOpen} className="flex max-w-full items-center gap-1.5 text-left">
+                      <ChevronRightIcon className={cn('size-3.5 shrink-0 text-muted-fg transition-transform', isOpen && 'rotate-90')} />
+                      <span className="truncate">{r.product}</span>
+                    </button>
+                  </td>
+                  {multiCloud && <td className="px-3 py-1.5 whitespace-nowrap text-muted-fg">{PROVIDER_LABELS[r.provider]}</td>}
+                  <td className="px-3 py-1.5 text-right whitespace-nowrap text-muted-fg">
+                    <Money value={r.previous} />
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-medium whitespace-nowrap">
+                    <Money value={r.current} />
+                  </td>
+                  <td className="hidden px-3 py-1.5 sm:table-cell">
+                    <DeltaBar delta={r.delta} max={max} />
+                  </td>
+                  <td className={cn('px-3 py-1.5 text-right whitespace-nowrap', changeTone(r.delta))}>{formatDelta(r.delta)}</td>
+                  <td className={cn('px-3 py-1.5 text-right whitespace-nowrap', changeTone(r.delta))}>
+                    {/* 对比段分文未花的，环比无从谈起，标为新增 */}
+                    {ratio === null ? (r.current > 0 ? '新增' : '—') : formatChange(ratio)}
+                  </td>
+                </tr>
+                {isOpen && amounts && (
+                  <tr className="border-b border-border/60 bg-muted/20">
+                    <td colSpan={colSpan} className="px-3 py-2">
+                      <ProductTrend data={data} cmp={cmp} product={r.product} amounts={amounts} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+const DAY_MS = 86_400_000
+const dayMs = (day: string) => new Date(`${day}T00:00:00`).getTime()
+
+/**
+ * 点开一个产品看到的逐日走势，见 `trend`。纵轴按这个产品自己的金额取上下限、不从 0 起：
+ * 日费用大多平稳，从 0 起画时涨一成只高出几个像素
+ */
+function ProductTrend({ data, cmp, product, amounts }: { data: BillProductDaysResponse; cmp: Comparison; product: string; amounts: number[] }) {
+  const t = trend(data, cmp.mode, cmp.current.to, amounts)
+  const overlay = t.points.some((p) => p.previousDay)
+  const first = t.points[0]?.day ?? ''
+  const last = t.points.at(-1)?.day ?? ''
+  const series: LineSeries[] = [
+    { key: 'current', label: overlay ? `本段 ${rangeLabel(cmp.current)}` : product, color: 'var(--chart-1)' },
+    ...(overlay ? [{ key: 'previous', label: `对比段 ${rangeLabel(cmp.previous)}`, color: 'var(--muted-fg)', dashed: true }] : []),
+  ]
+  const byMs = new Map(t.points.map((p) => [dayMs(p.day), p]))
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-2xs text-muted-fg">
+        <span className="font-medium text-fg">{product}</span>
+        <span>
+          {dayTick(first)}–{dayTick(last)}，共 {t.points.length} 天
+        </span>
+        {overlay ? (
+          <>
+            <span>对比段按天对齐叠放：第 1 天对第 1 天</span>
+            <Legend series={series} className="ml-auto" />
+          </>
+        ) : (
+          <span>竖线标出比较的两天：{t.marks.map(dayLabel).join(' 与 ')}</span>
+        )}
+      </div>
+      <LineChart
+        fromMs={dayMs(first)}
+        toMs={dayMs(last) + DAY_MS}
+        widthMs={DAY_MS}
+        points={t.points.map((p): { t_ms: number; values: Record<string, number> } => ({ t_ms: dayMs(p.day), values: overlay ? { current: p.value, previous: p.previous ?? 0 } : { current: p.value } }))}
+        series={series}
+        format={formatMoneyTick}
+        fitY
+        dots
+        events={t.marks.map((d) => ({ t_ms: dayMs(d), label: dayLabel(d) }))}
+        hoverTitle={(ms) => {
+          const p = byMs.get(ms)
+          if (!p) return ''
+          return p.previousDay ? `${dayLabel(p.day)} · 对比 ${dayLabel(p.previousDay)}` : dayLabel(p.day)
+        }}
+        label={`${product}的逐日费用`}
+        height={170}
+      />
     </div>
   )
 }

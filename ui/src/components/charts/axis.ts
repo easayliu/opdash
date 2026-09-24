@@ -19,6 +19,25 @@ export function niceMax(max: number, count = 4): number {
   return last >= max ? last : last + (ticks[1] ?? last)
 }
 
+/**
+ * 不从 0 起的纵轴：上下各取到整刻度，把数据的起伏撑满画布。费用这类「每天都差不多」的量从 0 起画，
+ * 涨一成只高出几个像素。全部相等时退回从 0 起——没有起伏可撑，硬撑只会把一条平线画到正中间
+ */
+export function niceRange(min: number, max: number, count = 4): { lo: number; hi: number; ticks: number[] } {
+  if (!(max > min)) {
+    const ticks = niceTicks(max, count)
+    return { lo: 0, hi: niceMax(max, count), ticks }
+  }
+  const rough = (max - min) / count
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)))
+  const step = [1, 2, 5, 10].map((m) => m * pow).find((c) => c >= rough) ?? 10 * pow
+  const lo = Math.floor(min / step) * step
+  const hi = Math.ceil(max / step) * step
+  const ticks: number[] = []
+  for (let v = lo; v <= hi + step * 1e-9; v += step) ticks.push(Number(v.toFixed(10)))
+  return { lo, hi, ticks }
+}
+
 export function formatCompact(n: number): string {
   if (!Number.isFinite(n)) return '-'
   const abs = Math.abs(n)

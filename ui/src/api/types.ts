@@ -340,6 +340,24 @@ export interface BillAllocationResponse {
   stats: Stats
 }
 
+/**
+ * `/api/bills/product-days`：按产品、按天的后付费金额，「产品费用对比」据此比对两段日期。
+ * 日期以今天为终点往回数，不跟所选账期走
+ */
+export interface BillProductDaysResponse {
+  amount: BillAmount
+  /** 按服务端时区的今天；它的账单必然未出齐 */
+  today: string
+  /** 连续的每一天（`YYYY-MM-DD`），升序，没有账单的日子也在 */
+  days: string[]
+  /** 各云的日度账单出到哪一天 */
+  last_by_provider: Partial<Record<BillProvider, string>>
+  /** 要看、却只有月度账单的云，不在对比之内 */
+  monthly_only: BillProvider[]
+  rows: { provider: BillProvider; product: string; /** 与 days 一一对应 */ amounts: number[] }[]
+  stats: Stats
+}
+
 export interface BillCoverage {
   provider: BillProvider
   /** 所选账期内日度账单的合计 */

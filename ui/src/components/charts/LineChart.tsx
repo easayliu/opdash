@@ -2,7 +2,7 @@ import { useMemo, useState, type PointerEvent } from 'react'
 import { ChartTooltip } from './Tooltip'
 import { MAX_SPOKEN_SERIES, andMore, chartSummary } from './describe'
 import { useWidth } from './useWidth'
-import { bucketDomain, niceMax, niceTicks, timeTicks } from './axis'
+import { bucketDomain, niceMax, niceRange, niceTicks, timeTicks } from './axis'
 import { formatTick, formatTs } from '@/lib/time'
 import { cn } from '@/lib/utils'
 
@@ -63,6 +63,10 @@ interface Props {
   markers?: ChartMarker[]
   /** 读屏念的那句话里，这张图叫什么。不给就是「折线图」 */
   label?: string
+  /** 纵轴不从 0 起，按数据的上下限取整刻度（见 niceRange）。默认从 0 起 */
+  fitY?: boolean
+  /** 悬停气泡的标题。默认是桶的时刻；按天的图想写「9/23 周三」、或要注明对比的是哪一天时给 */
+  hoverTitle?: (tMs: number) => string
 }
 
 // 右边留够半个刻度标签的宽度：最后一格是 `23:10` 这种居中标签，只留 8px 会被切掉半个字
@@ -91,6 +95,8 @@ export function LineChart({
   dots,
   markers,
   label,
+  fitY,
+  hoverTitle,
 }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<{ x: number; y: number; point: LinePoint } | null>(null)
@@ -103,9 +109,13 @@ export function LineChart({
   const span = Math.max(1, x1 - x0)
   const xOf = (t: number) => M.left + ((t - x0 + widthMs / 2) / span) * W
   const tOf = (x: number) => x0 + ((x - M.left) / Math.max(1, W)) * span
-  const max = useMemo(() => Math.max(0, ...points.flatMap((p) => series.map((s) => p.values[s.key] ?? 0))), [points, series])
-  const yMax = niceMax(max)
-  const yOf = (v: number) => M.top + H - (yMax > 0 ? (v / yMax) * H : 0)
+  const y = useMemo(() => {
+    const values = points.flatMap((p) => series.map((s) => p.values[s.key]).filter((v): v is number => v !== undefined && Number.isFinite(v)))
+    const max = Math.max(0, ...values)
+    if (fitY && values.length) return niceRange(Math.min(...values), max)
+    return { lo: 0, hi: niceMax(max), ticks: niceTicks(niceMax(max)) }
+  }, [points, series, fitY])
+  const yOf = (v: number) => M.top + H - (y.hi > y.lo ? ((v - y.lo) / (y.hi - y.lo)) * H : 0)
   const ticks = useMemo(() => timeTicks(x0, x1), [x0, x1])
 
   /**
@@ -207,7 +217,7 @@ export function LineChart({
           onPointerDown={onDown}
           onPointerUp={onUp}
         >
-          {niceTicks(yMax).map((v) => (
+          {y.ticks.map((v) => (
             <g key={v}>
               <line x1={M.left} x2={M.left + W} y1={yOf(v)} y2={yOf(v)} stroke="var(--grid)" strokeWidth={1} />
               <text x={M.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={11} fill="var(--muted-fg)" className="tabular-nums">
@@ -239,7 +249,7 @@ export function LineChart({
             if (cur.length) segs.push(cur)
             const line = (seg: [number, number][]) =>
               seg.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
-            const baseline = yOf(0).toFixed(1)
+            const baseline = yOf(y.lo).toFixed(1)
             return (
               <g key={s.key}>
                 {area &&
@@ -335,7 +345,7 @@ export function LineChart({
           x={hover.x}
           y={hover.y}
           width={width}
-          title={formatTs(hover.point.t_ms, { ms: false })}
+          title={hoverTitle ? hoverTitle(hover.point.t_ms) : formatTs(hover.point.t_ms, { ms: false })}
           rows={series.map((s) => ({ color: s.color, label: s.label, value: hover.point.values[s.key] === undefined ? '-' : format(hover.point.values[s.key]) }))}
         />
       )}
