@@ -221,6 +221,7 @@ async fn full_login_flow_sets_session_and_logout_clears_it() {
     assert_eq!(key["expires_in"], "30d");
     assert_eq!(key["expired"], false);
     assert_eq!(key["mcp_url"], "https://opdash.example.com/mcp");
+    assert_eq!(key["mcp_name"], "opdash", "没配 --env / --mcp-name 时沿用原来的名字");
     // 能列出来，但列表里没有 key 本身
     let (status, list) = get_json_with(&app, "/api/auth/keys", &[("cookie", &session)]).await;
     assert_eq!(status, 200, "{list}");

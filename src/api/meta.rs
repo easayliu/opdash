@@ -37,6 +37,9 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Health>)
 #[derive(Serialize)]
 pub struct Meta {
     pub version: &'static str,
+    /// 这套 opdash 属于哪个环境（`--env`），没配就省略
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
     pub database: String,
     /// 直方图对齐用的时区（`--timezone`）
     pub timezone: String,
@@ -121,6 +124,7 @@ pub async fn meta(State(state): State<AppState>) -> crate::error::Result<Json<Me
     let cfg = &state.config;
     Ok(Json(Meta {
         version: env!("CARGO_PKG_VERSION"),
+        env: cfg.env.clone(),
         database: cfg.database.clone(),
         timezone: cfg.timezone.clone(),
         now_ms: state.now_ms(),

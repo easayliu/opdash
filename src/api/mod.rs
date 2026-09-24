@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod bills;
+pub mod datasources;
 pub mod logs;
 pub mod meta;
 pub mod metrics;
@@ -40,6 +41,8 @@ pub struct AppState {
     pub goscan: Option<Arc<crate::goscan::Goscan>>,
     /// 成本归属规则（`--bill-alloc`）。没配就是 `None`，费用页的分析视图只给日均与预估。
     pub alloc: Option<Arc<crate::alloc::Alloc>>,
+    /// 业务数据源（`--datasources`）。没配就是空的，MCP 里不出现 `db_*` 工具。
+    pub datasources: Arc<crate::datasource::Registry>,
 }
 
 impl AppState {
@@ -71,8 +74,21 @@ impl AppState {
                     None
                 }
             });
+        // 同上：文件有误时 main 已经退出，这里读不出来只会是测试里故意给的坏文件
+        let datasources = config
+            .datasources
+            .as_deref()
+            .map(|path| match crate::datasource::Registry::load(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(error = %e, "数据源配置无效，数据源工具已停用");
+                    crate::datasource::Registry::default()
+                }
+            })
+            .unwrap_or_default();
         Self {
             config: Arc::new(config),
+            datasources: Arc::new(datasources),
             client,
             schema,
             tails,
@@ -136,6 +152,7 @@ pub fn api_router(state: AppState) -> Router {
         .merge(traces::routes())
         .merge(metrics::routes())
         .merge(bills::routes())
+        .merge(datasources::routes())
         .merge(services::routes())
         .merge(saved::routes())
         .with_state(state)

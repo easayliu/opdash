@@ -235,6 +235,9 @@ cargo run --release -- --clickhouse-url http://127.0.0.1:8123 --clickhouse-user 
 | `--goscan-timeout` | `OPDASH_GOSCAN_TIMEOUT` | `10s` | 调 goscan 接口的超时。触发同步只是登记一个后台任务，很快返回；真正的拉取在 goscan 侧进行，与此超时无关 |
 | `--bill-dedupe` | `OPDASH_BILL_DEDUPE` | `group` | 账单查询怎么去重：`group` 按建表排序键分组（默认，跨分片也对）、`final` 给表加 `FINAL`、`off` 不去重。见下面「账单表：为什么要在查询里再去重一次」 |
 | `--bill-alloc` | `OPDASH_BILL_ALLOC` | 不配 | 成本归属规则文件（TOML），费用页的「分析」视图据此把费用摊到业务线、把预付费按服务期摊到各月。不配也能用，只是少了业务线这一层。示例与写法见 `examples/bill-alloc.toml` 和下面「成本归属」。**文件有误时进程直接退出**，不会静默降级 |
+| `--datasources` | `OPDASH_DATASOURCES` | 不配 | 业务数据源配置文件（TOML），供 MCP 排障时直连业务 MySQL / Redis / Elasticsearch / ClickHouse。不配则 MCP 中没有 `db_*` 工具。示例与写法见 `examples/datasources.toml` 和下面「直连业务库」。**文件有误时进程直接退出** |
+| `--env` | `OPDASH_ENV` | 不配 | 这套 opdash 所属的环境（如 `生产`、`测试`）。写进 MCP 握手的标题与使用说明的第一句，以及 `get_meta`、`db_sources` 的返回；同时接入多套 opdash 时，模型据此区分数据来自哪个环境。不配则只说明访问所用的域名 |
+| `--mcp-name` | `OPDASH_MCP_NAME` | 按 `--env` 推 | 页面「API key」对话框里拼接入命令用的 MCP 服务名（`claude mcp add … opdash-prod`）。同时接入几套 opdash 时必须各不相同。不配时 `--env` 是字母、数字、下划线、短横线就用 `opdash-<env>`，否则（如 `生产`）用 `opdash` |
 | `--timezone` | `OPDASH_TIMEZONE` | `Asia/Shanghai` | 直方图分桶对齐的时区，和两张表 `timestamp` 列的时区一致 |
 | `--query-timeout` | `OPDASH_QUERY_TIMEOUT` | `30s` | 传给 ClickHouse 的 `max_execution_time` |
 | `--max-range` | `OPDASH_MAX_RANGE` | `31d` | 允许查询的最大时间跨度 |
@@ -386,6 +389,29 @@ http_headers = { Authorization = "Bearer opdash_…" }
 换了 key（吊销重签、到期重签）就是把这一条里的 key 改掉，地址和其它都不用动。
 只支持 stdio 的老客户端用 `npx mcp-remote https://opdash.example.com/mcp --header "Authorization: Bearer opdash_…"` 桥一下。
 
+### 同时接入多个环境
+
+生产、测试等环境各部署一套 opdash、使用不同的域名时，两件事一起做，模型才不会把测试环境的数据
+当成生产的：
+
+1. **服务端声明环境**：给每套 opdash 配置 `--env`（`OPDASH_ENV=生产`、`OPDASH_ENV=测试`）。
+   环境名会写进 MCP 握手的 `serverInfo.title` 与使用说明的第一句（「【环境：生产】本 MCP 连接的是
+   生产环境的 opdash（opdash.example.com）……」），`get_meta` 与 `db_sources` 的返回中也带有 `env`。
+   未配置时，使用说明只写明访问所用的域名。
+2. **客户端按环境命名**：接入时每套使用不同的名称，工具名会带上这个前缀
+   （`mcp__opdash-prod__search_logs` 与 `mcp__opdash-uat__search_logs`），在对话中点名某个环境也更方便。
+   给每套配置 `--mcp-name`（`OPDASH_MCP_NAME=opdash-prod`），页面「API key」对话框复制出来的命令就会用这个
+   名称；名称相同时，命令里的 `remove` 会把先接入的那套删掉。手工接入的写法如下：
+
+```bash
+claude mcp add --transport http opdash-prod https://opdash.example.com/mcp \
+  --header "Authorization: Bearer opdash_…"        # 生产环境签发的 key
+claude mcp add --transport http opdash-uat https://opdash-uat.example.com/mcp \
+  --header "Authorization: Bearer opdash_…"        # UAT 环境签发的 key
+```
+
+各套 opdash 的 API key 互不通用，需要分别在各自的页面上生成。
+
 ### 有哪些工具
 
 | 工具 | 干什么 | 对应的页面 / 接口 |
@@ -412,9 +438,16 @@ http_headers = { Authorization = "Bearer opdash_…" }
 | `cost_detail` | 账单明细，一行一个计费项 | `/cost` 明细表 |
 | `cost_allocation` | 按归属规则（`--bill-alloc`）把账单摊到业务线：各线金额、日均、月度预估、产品构成与未归属金额；未配规则时给出按产品的日均与预估——「哪条业务线最贵」「下个月大约花多少」 | `/cost` 分析视图 |
 | `cost_compare` | 按产品比较两段等长日期的花费（与前一日、与上周同日、近 N 天与前 N 天），按变化额排序——「昨天为什么贵了」 | `/cost` 产品费用对比 |
+| `trace_db_calls` | 一条链路里的全部数据库调用：语句、耗时、库名、对端地址；JDBC 参数齐全时给出代入参数后的语句，标出对应的数据源，并列出重复执行的语句以便识别 N+1 查询 | `/api/traces/{trace_id}/db` |
+| `db_calls_top` | 一段时间内的数据库调用按语句汇总：次数、错误数、P50 / P95 / 最大 / 总耗时，附最慢一次的样本链路——「这个服务最费时的 SQL 是哪条」 | `/api/traces/db_calls` |
+| `db_sources` | 已配置的业务数据源：名称、类型、环境、说明、使用它的服务 | `/api/db/sources` |
+| `db_tables` | 数据源中的表（MySQL / ClickHouse）、索引（Elasticsearch）或按 glob 扫描到的键（Redis） | `/api/db/{source}/tables` |
+| `db_describe` | 表结构：建表语句、索引及其基数、行数与大小；ES 给字段映射，Redis 给键的类型、TTL、长度与样本 | `/api/db/{source}/describe` |
+| `db_query` | 执行一条只读查询：SQL（仅 SELECT / WITH / SHOW / DESCRIBE / EXPLAIN）、ES 查询 DSL 或 ES SQL、Redis 只读命令 | `/api/db/{source}/query` |
+| `db_slow_queries` | 数据库自身记录的慢查询：MySQL 的 performance_schema 语句摘要与正在执行的语句、ClickHouse 的 `system.query_log`、Redis 的 SLOWLOG 与命令耗时、ES 各索引的检索耗时 | `/api/db/{source}/slow` |
 
 工具都标了 `readOnlyHint`（全是只读查询），客户端据此可以免掉每次调用的确认。没配指标表的部署
-不列指标那几个工具，没接 goscan 的不列 `cost_*`——列出来模型也只会换回一句「未启用」，白占上下文。
+不列指标那几个工具，没接 goscan 的不列 `cost_*`，没配 `--datasources` 的不列 `db_*`——列出来模型也只会换回一句「未启用」，白占上下文。
 费用工具的时间参数是**账期**（`from` / `to` 写 `2026-09`，或者用 `months` 说「最近几个月」），
 和别的工具那套 `from` / `to` / `range` 不一样。`cost_allocation` 默认只统计当前一个账期；跨账期且未指定
 `days` 时改读阿里云的月度账单（行数约为日度账单的几十分之一），此时不提供日均与预估。`cost_compare`
@@ -433,6 +466,38 @@ http_headers = { Authorization = "Bearer opdash_…" }
 `now-30m` 这类相对写法；`range` 是跨度（`15m` / `1h` / `24h`），不给 `from` 时 `from = to - range`。
 `initialize` 的 `instructions` 里写了排障套路、这些写法、当前时间和表结构里实际可筛的列名，
 模型接上就知道该怎么用。
+
+### 直连业务库：数据源
+
+日志与链路能回答「哪里慢、哪里报错」，但不少问题要落到数据上才能定论：这一单的状态究竟是什么、
+那条 SQL 是否走了索引、缓存里的值是否过期。配置 `--datasources` 之后，在代码仓库中运行的 MCP 客户端
+可以对照代码直接查询业务库，不必再经由他人登录堡垒机代查。
+
+支持四种库：MySQL（含 MariaDB、TiDB 等兼容协议的库）、Redis、Elasticsearch、ClickHouse。
+配置写法见 `examples/datasources.toml`；密码写成 `${ENV}`，由 Secret 注入，配置文件本身可以放进 ConfigMap。
+
+**只读的保证分三层**，由外向内：
+
+1. **账号**：请为每个数据源创建只读账号。这是唯一真正可靠的一层，以下两层只是兜底；
+2. **库一侧的只读模式**：MySQL 每次都在 `START TRANSACTION READ ONLY` 中执行并随即 `ROLLBACK`；
+   ClickHouse 每条查询带 `readonly=2`；Elasticsearch 只开放 `_search`、`_sql`、`_mapping` 等读接口，
+   URL 由 opdash 拼接，索引名中不允许出现 `/`、`?`；Redis 只放行白名单中的只读命令，`KEYS` 也不在其列
+   （它会阻塞大库，列键一律走 SCAN）；
+3. **语句校验**：SQL 在到达库之前先经过校验，只接受单条 `SELECT` / `WITH` / `SHOW` / `DESCRIBE` /
+   `EXPLAIN`，任何位置出现写入类关键字（`WITH … DELETE`、`EXPLAIN ANALYZE UPDATE`）、MySQL 可执行注释
+   `/*! … */`、读取外部数据或占用锁的函数（ClickHouse 的 `url()` / `file()` / `remote()`，MySQL 的
+   `LOAD_FILE()` / `GET_LOCK()`）都会被拒绝。
+
+结果同样有上限：每个数据源的 `max_rows`（默认 500）与执行超时（默认 15 秒，MySQL 还会设置
+`max_execution_time`），Redis 一次取整个集合的命令会先检查集合大小，超过 1000 个成员即拒绝并建议改用
+`*SCAN`。每一次 `db_query` 都会在 opdash 的日志中记录数据源与语句，以备事后查证。
+
+**链路与数据源的对应**：`trace_db_calls` 与 `db_calls_top` 读取 span 上的 `db.system`、`db.namespace`、
+`server.address` 等属性（新旧两版 OTel 语义约定都认），按「对端地址 → 库名 → 服务名」的优先级对应到
+配置中的数据源，写在结果的 `source` 字段里；三者都对不上时宁可不标，以免模型拿着别的库去查。
+Java agent 采集了 JDBC 参数（`db.query.parameter.<下标>`）时，还会给出代入参数后的语句
+`statement_filled`，可以直接交给 `db_query` 执行 `EXPLAIN`。这两个工具读的是 span 表，
+未配置数据源时同样可用，只是不标 `source`。
 
 ### 传输和认证
 
@@ -1136,6 +1201,8 @@ GET /api/logs/export          同 search，&format=csv|jsonl
 GET /api/traces/search        ?from&to&service&span_name&kind&error_only&min_ms&max_ms&attr=k=v&rattr=k=v&sort=time|duration&limit&trace_id
 GET /api/traces/{trace_id}                       瀑布图用的轻列，不含属性
 GET /api/traces/{trace_id}/spans/{span_id}       ?at&service&name&ts   这一个 span 的属性 / events / links
+GET /api/traces/{trace_id}/db                    ?at   这条链路里的数据库调用（语句、参数、对应的数据源）
+GET /api/traces/db_calls      ?from&to&service&system&min_ms&error_only&sort=total|p95|max|calls|errors&limit
 GET /api/traces/values        ?field=service|span_name&service&kind=entry|client|all
 GET /api/traces/attr_keys     ?service&scope=span|resource
 GET /api/traces/attr_values   ?key&service&scope
@@ -1159,6 +1226,11 @@ GET /api/bills/sync/{task_id} 这次拉取跑到哪了（事件流不可用时�
 GET /api/bills/sync/{task_id}/events   同上，SSE 推送：event: task 为任务状态，event: done 表示已结束
 DELETE /api/bills/sync/{task_id}       停止同步：goscan 把当前这一趟写完再停，已结束的回 409
 GET /api/bills/sync/running   ?provider   这朵云正在进行的同步（手动或 cron 发起），没有则 task 为 null
+GET /api/db/sources           已配置的业务数据源（--datasources），不含账号密码
+GET /api/db/{source}/tables   ?database&match&limit
+GET /api/db/{source}/describe ?target&database
+GET /api/db/{source}/query    ?q&database&index&limit   只读查询，校验规则见上面「直连业务库」
+GET /api/db/{source}/slow     ?from&to&database&min_ms&sort=total|avg|max|calls&limit
 GET /api/errors               ?from&to&kind=entry|client|all&service&span_name   错误分组，默认 entry
 GET /api/services             ?from&to&compare=day|week|prev&<维度列>
 GET /api/services/operations          ?service=a&service=b&...   一次最多 24 个服务

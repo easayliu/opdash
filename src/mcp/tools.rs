@@ -150,7 +150,7 @@ fn bill_filter_props() -> Vec<(&'static str, Value)> {
 /// （没部署 goscan）时不列费用类工具：列出来模型也只会换来一个「未启用」，白占上下文。`initialize` 里 `listChanged` 仍然是 `false`——改变工具列表要发
 /// `notifications/tools/list_changed`，无状态端点没有服务端到客户端的流发不出去；指标表是部署时
 /// 定的，跑着跑着变的情况不存在。
-pub fn list(metrics_enabled: bool, bills_enabled: bool) -> Vec<Value> {
+pub fn list(metrics_enabled: bool, bills_enabled: bool, datasources_enabled: bool) -> Vec<Value> {
     // 全是只读查询：标上 annotations，客户端（Claude Code / Cursor 这类）就不必每次调用都问人一遍
     let tool = |name: &str, description: &str, input: Value| {
         json!({
@@ -548,12 +548,109 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool) -> Vec<Value> {
                 &[],
             ),
         ),
+        tool(
+            "trace_db_calls",
+            "一条链路里的全部数据库调用（MySQL / Redis / ES 等的 Client span）：语句、耗时、库名、对端地址；JDBC 参数齐全时给 statement_filled（已代入参数，可直接拿去 db_query 做 EXPLAIN），并标出对应的数据源 source。repeated 列出重复执行的语句，用来认 N+1 查询。",
+            schema(
+                vec![
+                    ("trace_id", string("32 位 hex")),
+                    ("at", string("这条链路大概什么时候；带上能少扫很多")),
+                    ("limit", integer("最多列几次调用，默认 100；多了保留最慢的")),
+                    ("max_chars", integer("单条语句保留多少字符，默认 2000")),
+                ],
+                &["trace_id"],
+            ),
+        ),
+        tool(
+            "db_calls_top",
+            "一段时间内的数据库调用按语句汇总（来自链路埋点）：次数、错误数、P50 / P95 / 最大 / 总耗时，附最慢一次的样本链路。回答「这个服务最慢 / 最费时的 SQL 是哪条」。不选服务时范围最多 6 小时。",
+            schema(
+                [
+                    vec![
+                        ("service", string("只看这个服务发出的调用")),
+                        ("system", string("只看这种库：mysql / redis / elasticsearch / clickhouse …")),
+                        ("min_ms", number("只统计耗时不低于它的调用")),
+                        ("error_only", boolean("只统计出错的调用")),
+                        ("sort", enumeration("默认 total（总耗时）", &["total", "p95", "max", "calls", "errors"])),
+                        ("limit", integer("默认 20，上限 200")),
+                    ],
+                    time_props("1h"),
+                ]
+                .concat(),
+                &[],
+            ),
+        ),
+        tool(
+            "db_sources",
+            "已配置、可直连的业务数据源（MySQL / Redis / Elasticsearch / ClickHouse）：名称、类型、环境、说明、哪些服务在用。其余 db_* 工具的 source 取这里的 name。",
+            schema(vec![], &[]),
+        ),
+        tool(
+            "db_tables",
+            "列出数据源里有什么：MySQL / ClickHouse 是表（估算行数、大小、注释），Elasticsearch 是索引，Redis 是按 match 用 SCAN 找到的键（带类型和 TTL）。",
+            schema(
+                vec![
+                    ("source", string("数据源名，见 db_sources")),
+                    ("database", string("MySQL / ClickHouse：看哪个库，默认数据源配置的库")),
+                    ("match", string("MySQL / ClickHouse：表名包含的子串；ES：索引通配符（order-*）；Redis：键的 glob（user:*）")),
+                    ("limit", integer("默认 200")),
+                ],
+                &["source"],
+            ),
+        ),
+        tool(
+            "db_describe",
+            "看一张表的结构：MySQL / ClickHouse 给建表语句、索引（含基数）、行数与大小；Elasticsearch 给字段映射；Redis 给键的类型、TTL、长度、内存与一段样本。对照代码里的实体 / Mapper 时用它。",
+            schema(
+                vec![
+                    ("source", string("数据源名")),
+                    ("target", string("表名（可写 库.表）/ ES 索引 / Redis 键")),
+                    ("database", string("MySQL / ClickHouse：target 没带库名时用哪个库")),
+                ],
+                &["source", "target"],
+            ),
+        ),
+        tool(
+            "db_query",
+            "在数据源上执行一条只读查询。MySQL / ClickHouse 写 SQL，只接受 SELECT / WITH / SHOW / DESCRIBE / EXPLAIN（MySQL 在只读事务里执行）；Elasticsearch 写查询 DSL（JSON，须给 index）或 ES SQL；Redis 写一条只读命令，如 HGETALL user:1。先 db_describe 看清列名和索引，大表务必带走索引的 WHERE 和 LIMIT。",
+            schema(
+                vec![
+                    ("source", string("数据源名")),
+                    ("query", string("SQL / DSL / Redis 命令")),
+                    ("database", string("MySQL / ClickHouse：在哪个库执行，默认数据源配置的库")),
+                    ("index", string("Elasticsearch 的 DSL 查询：索引名或通配符")),
+                    ("limit", integer("最多返回几行，默认 50，上限是数据源的 max_rows")),
+                ],
+                &["source", "query"],
+            ),
+        ),
+        tool(
+            "db_slow_queries",
+            "数据库自己记录的慢查询：MySQL 读 performance_schema 的语句摘要（累计值，含扫描行数、是否走索引）与正在执行的语句；ClickHouse 读 system.query_log；Redis 读 SLOWLOG 与各命令耗时；Elasticsearch 给各索引的平均检索耗时与正在执行的检索。",
+            schema(
+                [
+                    vec![
+                        ("source", string("数据源名")),
+                        ("database", string("只看这个库，默认数据源配置的库；* = 不限")),
+                        ("min_ms", number("只看平均 / 单次耗时不低于它的")),
+                        ("sort", enumeration("默认 total（总耗时）", &["total", "avg", "max", "calls"])),
+                        ("limit", integer("默认 20")),
+                    ],
+                    time_props("1h"),
+                ]
+                .concat(),
+                &["source"],
+            ),
+        ),
     ];
     if !metrics_enabled {
         tools.retain(|t| !METRIC_TOOLS.contains(&t["name"].as_str().unwrap_or("")));
     }
     if !bills_enabled {
         tools.retain(|t| !BILL_TOOLS.contains(&t["name"].as_str().unwrap_or("")));
+    }
+    if !datasources_enabled {
+        tools.retain(|t| !DB_TOOLS.contains(&t["name"].as_str().unwrap_or("")));
     }
     // 描述前面统一标一句数据来源，和 instructions 里的术语表对齐
     for t in &mut tools {
@@ -575,6 +672,7 @@ fn source_of(name: &str) -> &'static str {
         "list_metrics" | "query_metric" | "metric_exemplars" | "metric_events" => "指标表",
         "list_attrs" => "span 表 / 指标表",
         name if BILL_TOOLS.contains(&name) => "账单表",
+        name if DB_TOOLS.contains(&name) => "数据源",
         _ => "span 表",
     }
 }
@@ -586,6 +684,11 @@ const METRIC_TOOLS: &[&str] =
 /// 账单表（goscan）没启用时要拿掉的工具。
 const BILL_TOOLS: &[&str] =
     &["cost_summary", "cost_breakdown", "cost_detail", "cost_allocation", "cost_compare"];
+
+/// 没配 `--datasources` 时要拿掉的工具。`trace_db_calls` / `db_calls_top` 读的是 span 表，
+/// 不在此列：没有数据源也能从链路里看 SQL，只是标不出 source。
+const DB_TOOLS: &[&str] =
+    &["db_sources", "db_tables", "db_describe", "db_query", "db_slow_queries"];
 
 /// 按账期查的费用工具默认看几个账期，与费用页一致。
 const DEFAULT_BILL_MONTHS: u32 = crate::api::bills::DEFAULT_RANGE_MONTHS as u32;
@@ -866,7 +969,7 @@ const MAX_TOOL_BYTES: usize = 64 << 10;
 /// 整份工具目录（含指标工具），校验参数名用。
 fn all_tools() -> &'static [Value] {
     static ALL: OnceLock<Vec<Value>> = OnceLock::new();
-    ALL.get_or_init(|| list(true, true))
+    ALL.get_or_init(|| list(true, true, true))
 }
 
 /// 模型偶尔会把参数名记错（`service` 写成 `service_name`）。`inputSchema` 里写了
@@ -1008,6 +1111,13 @@ pub async fn call(
         "cost_detail" => cost_detail(mcp, &a).await,
         "cost_allocation" => cost_allocation(mcp, &a).await,
         "cost_compare" => cost_compare(mcp, &a).await,
+        "trace_db_calls" => trace_db_calls(mcp, &a).await,
+        "db_calls_top" => db_calls_top(mcp, &a).await,
+        "db_sources" => db_sources(mcp, &a).await,
+        "db_tables" => db_tables(mcp, &a).await,
+        "db_describe" => db_describe(mcp, &a).await,
+        "db_query" => db_query(mcp, &a).await,
+        "db_slow_queries" => db_slow_queries(mcp, &a).await,
         _ => return Err(ToolError::Unknown),
     };
     let value = fit_budget(out.map_err(ToolError::Failed)?, MAX_TOOL_BYTES);
@@ -1154,6 +1264,9 @@ async fn get_meta(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     });
     if let Some(n) = meta["metrics_note"].as_str() {
         out["metrics_note"] = json!(n);
+    }
+    if !meta["env"].is_null() {
+        out["env"] = meta["env"].clone();
     }
     Ok(out)
 }
@@ -2870,6 +2983,290 @@ async fn cost_compare(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------------------------
+// 数据库：链路里的数据库调用、业务数据源
+// ---------------------------------------------------------------------------------------------
+
+/// 一次数据库调用的对端：`host:port`，缺哪样就只写哪样。
+fn db_peer(v: &Value) -> String {
+    match (str_of(v, "server"), str_of(v, "port")) {
+        (h, p) if h.is_empty() => p,
+        (h, p) if p.is_empty() => h,
+        (h, p) => format!("{h}:{p}"),
+    }
+}
+
+/// 数据库调用里给模型看的公共字段：空的省掉。
+fn put_db_fields(row: &mut Map<String, Value>, v: &Value) {
+    for (key, out) in [
+        ("service", "service"),
+        ("system", "system"),
+        ("database", "database"),
+        ("operation", "operation"),
+        ("collection", "collection"),
+    ] {
+        let s = str_of(v, key);
+        if !s.is_empty() {
+            row.insert(out.into(), json!(s));
+        }
+    }
+    let peer = db_peer(v);
+    if !peer.is_empty() {
+        row.insert("server".into(), json!(peer));
+    }
+}
+
+async fn trace_db_calls(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let trace_id = a.required("trace_id")?.trim().to_ascii_lowercase();
+    let limit = a.limit("limit", 100, 1000)? as usize;
+    let max_chars = a.limit("max_chars", 2000, 20_000)? as usize;
+    let mut qs = Qs::new();
+    qs.push_opt("at", a.time("at")?.map(|v| v.to_string()));
+    let body =
+        mcp.get(&format!("/api/traces/{}/db", encode_segment(&trace_id)), &qs.finish()).await?;
+    let calls = arr(&body["calls"]);
+    let mut out = Map::new();
+    out.insert("trace_id".into(), json!(trace_id));
+    out.insert("call_count".into(), json!(calls.len()));
+    let total_ns: f64 = calls.iter().map(|c| f64_of(c, "duration_ns")).sum();
+    out.insert("total_db_ms".into(), json!(round(total_ns / 1e6, 2)));
+    // 同一条语句执行了好几次：多半是循环里查库（N+1），合起来的耗时往往比最慢的那一次还大
+    let mut repeated: BTreeMap<(String, String), (u64, f64)> = BTreeMap::new();
+    for c in calls {
+        let e = repeated.entry((str_of(c, "service"), str_of(c, "statement"))).or_default();
+        e.0 += 1;
+        e.1 += f64_of(c, "duration_ns");
+    }
+    let mut repeated: Vec<((String, String), (u64, f64))> =
+        repeated.into_iter().filter(|(_, (n, _))| *n >= 3).collect();
+    repeated.sort_by(|x, y| y.1.1.total_cmp(&x.1.1));
+    if !repeated.is_empty() {
+        out.insert(
+            "repeated".into(),
+            json!(
+                repeated
+                    .iter()
+                    .take(10)
+                    .map(|((service, stmt), (n, ns))| json!({
+                        "service": service,
+                        "statement": truncate(stmt, 300).0,
+                        "times": n,
+                        "total_ms": round(ns / 1e6, 2),
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
+    // 太多时留最慢的，再按时间排回去
+    let mut picked: Vec<&Value> = calls.iter().collect();
+    if picked.len() > limit {
+        picked.sort_by(|x, y| f64_of(y, "duration_ns").total_cmp(&f64_of(x, "duration_ns")));
+        picked.truncate(limit);
+        picked.sort_by_key(|c| i64_of(c, "start_us"));
+        note(
+            &mut out,
+            format!("共 {} 次数据库调用，只列出最慢的 {limit} 次（按时间排）", calls.len()),
+        );
+    }
+    let rows: Vec<Value> = picked
+        .into_iter()
+        .map(|c| {
+            let mut row = Map::new();
+            row.insert("time".into(), json!(fmt_time(i64_of(c, "start_us") / 1000, a.tz)));
+            row.insert("span_id".into(), c["span_id"].clone());
+            row.insert("duration_ms".into(), json!(round(f64_of(c, "duration_ns") / 1e6, 2)));
+            put_db_fields(&mut row, c);
+            if str_of(c, "status") == "Error" {
+                row.insert("status".into(), json!("ERROR"));
+                let msg = str_of(c, "status_message");
+                if !msg.is_empty() {
+                    row.insert("error".into(), json!(truncate(&msg, 500).0));
+                }
+            }
+            row.insert("statement".into(), json!(truncate(&str_of(c, "statement"), max_chars).0));
+            match c["statement_filled"].as_str() {
+                Some(f) => {
+                    row.insert("statement_filled".into(), json!(truncate(f, max_chars).0));
+                }
+                None if !arr(&c["params"]).is_empty() => {
+                    row.insert("params".into(), c["params"].clone());
+                }
+                None => {}
+            }
+            if let Some(src) = c["source"].as_str() {
+                row.insert("source".into(), json!(src));
+            }
+            Value::Object(row)
+        })
+        .collect();
+    let empty = rows.is_empty();
+    out.insert("calls".into(), Value::Array(rows));
+    if empty {
+        note(&mut out, "这条链路里没有带 db.system 属性的 Client span：可能没有访问数据库，或数据库客户端没有埋点".to_owned());
+    }
+    if body["truncated"].as_bool() == Some(true) {
+        note(&mut out, "这条 trace 的 span 超过了服务端上限，只看了前一部分".to_owned());
+    }
+    if body["params_unavailable"].as_bool() == Some(true) {
+        note(&mut out, "ClickHouse 不支持读取 JDBC 参数子对象，没有代入参数".to_owned());
+    }
+    Ok(Value::Object(out))
+}
+
+async fn db_calls_top(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let window = a.window("1h")?;
+    let mut qs = Qs::new();
+    qs.window(window)
+        .push_opt("service", a.string("service")?)
+        .push_opt("system", a.string("system")?)
+        .push_opt("min_ms", a.f64("min_ms")?.map(|v| v.to_string()))
+        .push_opt("error_only", a.boolean("error_only")?.map(|b| b.to_string()))
+        .push_opt("sort", a.string("sort")?)
+        .push("limit", a.limit("limit", 20, 200)?.to_string());
+    let body = mcp.get("/api/traces/db_calls", &qs.finish()).await?;
+    let groups: Vec<Value> = arr(&body["groups"])
+        .iter()
+        .map(|g| {
+            let mut row = Map::new();
+            put_db_fields(&mut row, g);
+            row.insert("statement".into(), g["statement"].clone());
+            row.insert("calls".into(), g["calls"].clone());
+            if u64_of(g, "errors") > 0 {
+                row.insert("errors".into(), g["errors"].clone());
+            }
+            for (key, out) in [
+                ("p50_ns", "p50_ms"),
+                ("p95_ns", "p95_ms"),
+                ("max_ns", "max_ms"),
+                ("total_ns", "total_ms"),
+            ] {
+                row.insert(out.into(), json!(round(f64_of(g, key) / 1e6, 2)));
+            }
+            row.insert("sample_trace".into(), g["sample_trace"].clone());
+            row.insert("sample_at".into(), json!(fmt_time(i64_of(g, "sample_ms"), a.tz)));
+            if let Some(src) = g["source"].as_str() {
+                row.insert("source".into(), json!(src));
+            }
+            Value::Object(row)
+        })
+        .collect();
+    Ok(json!({
+        "from": fmt_time(window.0, a.tz),
+        "to": fmt_time(window.1, a.tz),
+        "groups": groups,
+    }))
+}
+
+/// 数据源 API 回的 `{columns, rows, truncated}` 表 → 对象数组，并把截断写进 notes。
+/// 只处理顶层字段：这样 [`fit_budget`] 砍得到这些列表。`db_query` 的结果本身就是顶层的
+/// columns / rows，不走这里。
+fn tables_to_objects(body: Value) -> Value {
+    let Value::Object(map) = body else { return body };
+    let mut out = Map::new();
+    let mut truncated: Vec<String> = Vec::new();
+    for (k, v) in map {
+        let is_table = v.get("columns").is_some_and(Value::is_array)
+            && v.get("rows").is_some_and(Value::is_array);
+        if !is_table {
+            out.insert(k, v);
+            continue;
+        }
+        let cols: Vec<&str> = arr(&v["columns"]).iter().map(|c| c.as_str().unwrap_or("")).collect();
+        let rows: Vec<Value> = arr(&v["rows"])
+            .iter()
+            .map(|r| {
+                let obj: Map<String, Value> = cols
+                    .iter()
+                    .zip(arr(r))
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(c, v)| ((*c).to_owned(), v.clone()))
+                    .collect();
+                Value::Object(obj)
+            })
+            .collect();
+        if v["truncated"].as_bool() == Some(true) {
+            truncated.push(format!("{k} 只列出了前 {} 项", rows.len()));
+        }
+        out.insert(k, Value::Array(rows));
+    }
+    if !truncated.is_empty() {
+        note(&mut out, format!("{}；调大 limit 或缩小范围再看", truncated.join("，")));
+    }
+    // API 里的单条说明并进 notes，模型只需要看一个地方
+    if let Some(Value::String(n)) = out.remove("note") {
+        note(&mut out, n);
+    }
+    if let Some(Value::Array(ns)) = out.remove("notes") {
+        for n in ns {
+            if let Some(n) = n.as_str() {
+                note(&mut out, n.to_owned());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+fn db_path(a: &Args<'_>, action: &str) -> R<String> {
+    Ok(format!("/api/db/{}/{action}", encode_segment(&a.required("source")?)))
+}
+
+async fn db_sources(mcp: &Mcp, _a: &Args<'_>) -> R<Value> {
+    let body = mcp.get("/api/db/sources", "").await?;
+    let mut out = json!({ "sources": body["sources"] });
+    if !body["env"].is_null() {
+        out["env"] = body["env"].clone();
+    }
+    Ok(out)
+}
+
+async fn db_tables(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let mut qs = Qs::new();
+    qs.push_opt("database", a.string("database")?)
+        .push_opt("match", a.string("match")?)
+        .push("limit", a.limit("limit", 200, 10_000)?.to_string());
+    Ok(tables_to_objects(mcp.get(&db_path(a, "tables")?, &qs.finish()).await?))
+}
+
+async fn db_describe(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let mut qs = Qs::new();
+    qs.push("target", a.required("target")?).push_opt("database", a.string("database")?);
+    Ok(tables_to_objects(mcp.get(&db_path(a, "describe")?, &qs.finish()).await?))
+}
+
+async fn db_query(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let limit = a.limit("limit", 50, 10_000)?;
+    let mut qs = Qs::new();
+    qs.push("q", a.required("query")?)
+        .push_opt("database", a.string("database")?)
+        .push_opt("index", a.string("index")?)
+        .push("limit", limit.to_string());
+    let mut body = mcp.get(&db_path(a, "query")?, &qs.finish()).await?;
+    if let Some(m) = body.as_object_mut() {
+        if m.get("truncated").and_then(Value::as_bool) == Some(true) {
+            let n = m.get("rows").map(|r| arr(r).len()).unwrap_or(0);
+            note(
+                m,
+                format!(
+                    "结果不止 {n} 行，只返回了前 {n} 行；加条件缩小范围，或调大 limit（上限见 db_sources 的 max_rows）"
+                ),
+            );
+        }
+        m.remove("truncated");
+    }
+    Ok(body)
+}
+
+async fn db_slow_queries(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let window = a.window("1h")?;
+    let mut qs = Qs::new();
+    qs.window(window)
+        .push_opt("database", a.string("database")?)
+        .push_opt("min_ms", a.f64("min_ms")?.map(|v| v.to_string()))
+        .push_opt("sort", a.string("sort")?)
+        .push("limit", a.limit("limit", 20, 500)?.to_string());
+    Ok(tables_to_objects(mcp.get(&db_path(a, "slow")?, &qs.finish()).await?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2886,7 +3283,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_an_object_schema() {
-        let tools = list(true, true);
+        let tools = list(true, true, true);
         assert!(tools.len() >= 18);
         let mut names = BTreeSet::new();
         for t in &tools {
@@ -2915,11 +3312,12 @@ mod tests {
     /// 对应分析视图的业务线分摊与产品对比，是新能力的额度。
     #[test]
     fn the_tool_catalog_stays_within_its_token_budget() {
-        let json = serde_json::to_string(&list(true, true)).unwrap();
+        let json = serde_json::to_string(&list(true, true, true)).unwrap();
         let chars = json.chars().count();
-        assert!(chars < 21_500, "工具目录 {chars} 字符，超预算了（约 {} token）", chars / 2);
+        // 数据源工具只在配了 --datasources 时出现，按全开来算
+        assert!(chars < 26_000, "工具目录 {chars} 字符，超预算了（约 {} token）", chars / 2);
         // 单个工具别写成小作文
-        for t in list(true, true) {
+        for t in list(true, true, true) {
             let n = t["description"].as_str().unwrap().chars().count();
             assert!(n < 500, "{} 的描述 {n} 字符，太长了", t["name"]);
         }
@@ -2928,7 +3326,7 @@ mod tests {
     #[test]
     fn metric_and_bill_tools_disappear_without_their_tables() {
         let names = |metrics, bills| {
-            list(metrics, bills)
+            list(metrics, bills, false)
                 .iter()
                 .map(|t| t["name"].as_str().unwrap().to_owned())
                 .collect::<BTreeSet<_>>()
@@ -2949,6 +3347,14 @@ mod tests {
         );
         // 目录里的每个工具都得有对应的分支，否则调用时会莫名其妙地「没有这个工具」
         assert!(with.contains("list_attrs"));
+        // 没配 --datasources：db_* 整组消失，但从链路看 SQL 的两个工具还在
+        assert!(with.contains("trace_db_calls") && with.contains("db_calls_top"));
+        let all: BTreeSet<String> =
+            list(true, true, true).iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(
+            all.difference(&with).cloned().collect::<BTreeSet<_>>(),
+            DB_TOOLS.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
+        );
     }
 
     #[test]

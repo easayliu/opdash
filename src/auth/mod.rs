@@ -43,6 +43,8 @@ struct Inner {
     oidc: Option<Oidc>,
     sealer: Sealer,
     public_url: Option<String>,
+    /// 页面上拼 MCP 接入命令用的服务名（`--mcp-name`）
+    mcp_name: String,
     session_ttl_secs: i64,
     api_key_ttl_secs: i64,
     /// 开了认证才有；不认证的部署不需要 key
@@ -144,6 +146,7 @@ impl Auth {
                 oidc,
                 sealer: Sealer::new(cfg.session_secret.as_deref()),
                 public_url: cfg.public_url.clone(),
+                mcp_name: cfg.mcp_server_name(),
                 session_ttl_secs: cfg.session_ttl.as_secs() as i64,
                 api_key_ttl_secs: cfg.api_key_ttl.as_secs() as i64,
                 keys,
@@ -159,11 +162,17 @@ impl Auth {
                 oidc: None,
                 sealer: Sealer::new(None),
                 public_url: None,
+                mcp_name: "opdash".to_owned(),
                 session_ttl_secs: 3600,
                 api_key_ttl_secs: 90 * 86_400,
                 keys: None,
             }),
         }
+    }
+
+    /// MCP 服务名，见 `--mcp-name`。
+    pub fn mcp_name(&self) -> &str {
+        &self.inner.mcp_name
     }
 
     /// API key 最长有效期（秒），`--api-key-ttl`。

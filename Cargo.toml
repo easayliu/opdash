@@ -40,6 +40,10 @@ url = "2"
 tower = { version = "0.5", features = ["util"] }
 # 成本归属规则（`--bill-alloc`）是人手写的，要能写注释，所以用 TOML 而不是 JSON
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+# 数据源（`--datasources`）：MCP 排障时直连业务 MySQL / Redis。Elasticsearch 与 ClickHouse 走 HTTP，
+# 用现成的 reqwest 即可。TLS 与 reqwest 一样走 rustls + ring，不另拉 OpenSSL
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls", "tls12", "ring"] }
+redis = { version = "1", default-features = false, features = ["tokio-comp"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

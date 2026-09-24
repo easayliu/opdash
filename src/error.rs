@@ -35,6 +35,11 @@ pub enum Error {
     /// `status` 是它回的 HTTP 状态码，0 表示请求没发出去 / 没等到回应。
     #[error("{message}")]
     Goscan { status: u16, message: String },
+    /// 数据源（`--datasources` 里配的业务库）拒绝了查询、超时或连不上。`status` 是折算好的
+    /// HTTP 状态码：400 = 语句被拒（语法、权限、只读校验），404 = 没有这个数据源，
+    /// 502 = 连不上，504 = 超时。
+    #[error("{message}")]
+    Source { status: u16, message: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -89,6 +94,12 @@ impl Error {
                 409 => StatusCode::CONFLICT,
                 429 => StatusCode::TOO_MANY_REQUESTS,
                 400..=499 => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            },
+            Error::Source { status, .. } => match *status {
+                400 => StatusCode::BAD_REQUEST,
+                404 => StatusCode::NOT_FOUND,
+                504 => StatusCode::GATEWAY_TIMEOUT,
                 _ => StatusCode::BAD_GATEWAY,
             },
             Error::ClickHouse { code, .. } => match *code {

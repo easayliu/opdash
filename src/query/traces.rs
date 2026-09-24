@@ -40,6 +40,132 @@ const HEAVY_COLUMNS: &[&str] = &[
     "`links.attributes` AS link_attrs",
 ];
 
+/// 数据库调用的一个属性，新旧两版 OTel 语义约定都认：新名字有值就用新的，否则退回旧的
+/// （Java agent 1.x 写 `db.statement` / `db.name`，2.x 起写 `db.query.text` / `db.namespace`）。
+fn db_attr(new: &str, old: &str) -> String {
+    format!(
+        "if(toString(span_attributes.`{new}`) != '', toString(span_attributes.`{new}`), toString(span_attributes.`{old}`))"
+    )
+}
+
+/// 数据库调用要取的几列（不含语句本身，语句要截断，单独拼）。
+static DB_COLUMNS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    [
+        ("db.system.name", "db.system", "db_system"),
+        ("db.namespace", "db.name", "db_name"),
+        ("db.operation.name", "db.operation", "db_operation"),
+        ("db.collection.name", "db.sql.table", "db_collection"),
+        ("server.address", "net.peer.name", "db_server"),
+        ("server.port", "net.peer.port", "db_port"),
+    ]
+    .iter()
+    .map(|(new, old, alias)| format!("{} AS {alias}", db_attr(new, old)))
+    .collect()
+});
+
+/// 数据库调用汇总的排序方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbCallSort {
+    Total,
+    P95,
+    Max,
+    Calls,
+    Errors,
+}
+
+impl DbCallSort {
+    pub fn parse(raw: Option<&str>) -> Result<Self> {
+        Ok(match raw.unwrap_or("total") {
+            "total" => DbCallSort::Total,
+            "p95" => DbCallSort::P95,
+            "max" => DbCallSort::Max,
+            "calls" => DbCallSort::Calls,
+            "errors" => DbCallSort::Errors,
+            other => {
+                return Err(Error::bad_request(format!(
+                    "sort 只能是 total / p95 / max / calls / errors，不是 {other:?}"
+                )));
+            }
+        })
+    }
+}
+
+/// 一条 trace 里的一次数据库调用（数据库行的形状）。
+#[derive(Debug, Deserialize)]
+pub struct DbSpanRow {
+    pub span_id: String,
+    pub parent_span_id: String,
+    pub service_name: String,
+    pub span_name: String,
+    #[serde(deserialize_with = "num::de")]
+    pub start_us: i64,
+    #[serde(deserialize_with = "num::de")]
+    pub duration_ns: u64,
+    pub status_code: String,
+    pub status_message: String,
+    pub db_system: String,
+    pub db_name: String,
+    pub db_operation: String,
+    pub db_collection: String,
+    pub db_server: String,
+    pub db_port: String,
+    pub statement: String,
+    /// `{"0":"12","1":"abc"}`；没取参数时没有这一列
+    #[serde(default)]
+    pub params: String,
+}
+
+/// 按语句汇总的一组数据库调用。
+#[derive(Debug, Deserialize)]
+pub struct DbCallRow {
+    pub service_name: String,
+    pub db_system: String,
+    pub db_name: String,
+    pub db_operation: String,
+    pub db_collection: String,
+    pub db_server: String,
+    pub db_port: String,
+    pub statement: String,
+    #[serde(deserialize_with = "num::de")]
+    pub calls: u64,
+    #[serde(deserialize_with = "num::de")]
+    pub errors: u64,
+    pub p50_ns: f64,
+    pub p95_ns: f64,
+    #[serde(deserialize_with = "num::de")]
+    pub max_ns: u64,
+    #[serde(deserialize_with = "num::de")]
+    pub total_ns: u64,
+    pub sample_trace: String,
+    pub sample_span: String,
+    #[serde(deserialize_with = "num::de")]
+    pub sample_ms: i64,
+}
+
+/// JDBC 参数的子对象 `{"0":"12","1":"abc"}` → 按下标排好的值。下标不是数字的（别的埋点）
+/// 按字典序；值不是字符串的转成文本。
+pub fn parse_db_params(raw: &str) -> Vec<String> {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let mut items: Vec<(Option<u64>, String, String)> = map
+        .into_iter()
+        .map(|(k, v)| {
+            let text = match v {
+                Value::String(s) => s,
+                Value::Null => "NULL".to_owned(),
+                other => other.to_string(),
+            };
+            (k.parse().ok(), k, text)
+        })
+        .collect();
+    items.sort_by(|a, b| match (a.0, b.0) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => a.1.cmp(&b.1),
+    });
+    items.into_iter().map(|(_, _, v)| v).collect()
+}
+
 /// 错误分组的分组键。SQL 的 `GROUP BY` 和 [`ErrorGroupRow::group_id`] **必须用同一份**。
 ///
 /// 少一列的后果不是少分几组，而是**两组共用一个 id**——前端拿 id 记展开状态、React 也拿它当
@@ -827,6 +953,20 @@ impl TraceQueries<'_> {
             return Err(Error::internal("detail_fetch 需要至少一个 span"));
         }
         let mut b = Bindings::new();
+        let where_sql = Self::located_where(&mut b, trace_id, located);
+        let limit = b.bind("UInt32", located.len() as u32);
+        let cols = self.detail_columns(heavy)?;
+        let sql = format!(
+            "SELECT {cols}\nFROM {from}\nWHERE {where_sql}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
+            cols = cols.join(", "),
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
+    /// 按第一步定位到的 span 圈范围：trace id + 服务名 / span 名的排序键前缀 + 实际的时间跨度。
+    /// [`Self::detail_fetch`] 和 [`Self::detail_db`] 共用，为什么这么圈见前者。
+    fn located_where(b: &mut Bindings, trace_id: &str, located: &[LocatedSpan]) -> String {
         let id = b.bind("String", trace_id);
         let mut services: Vec<String> = located.iter().map(|s| s.service_name.clone()).collect();
         services.sort();
@@ -847,11 +987,87 @@ impl TraceQueries<'_> {
             String::new()
         };
         let time = b.time_predicate("timestamp", &range);
+        format!("trace_id = {id}\n  AND service_name IN {services}{names_sql}\n  AND {time}")
+    }
+
+    /// 一条 trace 里的数据库调用：Client span 里带 `db.system` 的那些，连同语句、库名、对端地址。
+    ///
+    /// 只取这几个子列，不取整个属性列，读量和瀑布图那一趟同一量级。`with_params` 时再带上
+    /// JDBC 参数（`db.query.parameter.<下标>`）：下标没有上限、路径一条一个，没法逐个列出来，
+    /// 用 `^` 把这一整棵子对象当子列读（`span_attributes.^db.query.parameter`），仍然只读这一支。
+    pub fn detail_db(
+        &self,
+        trace_id: &str,
+        located: &[LocatedSpan],
+        with_params: bool,
+        max_statement_chars: u32,
+    ) -> Result<Query> {
+        if located.is_empty() {
+            return Err(Error::internal("detail_db 需要至少一个 span"));
+        }
+        let mut b = Bindings::new();
+        let where_sql = Self::located_where(&mut b, trace_id, located);
+        let chars = b.bind("UInt32", max_statement_chars);
         let limit = b.bind("UInt32", located.len() as u32);
-        let cols = self.detail_columns(heavy)?;
+        let params = if with_params {
+            ",\n  toString(span_attributes.^db.query.parameter) AS params"
+        } else {
+            ""
+        };
         let sql = format!(
-            "SELECT {cols}\nFROM {from}\nWHERE trace_id = {id}\n  AND service_name IN {services}{names_sql}\n  AND {time}\nORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
-            cols = cols.join(", "),
+            "SELECT span_id, parent_span_id, service_name, span_name,\n  \
+             toUnixTimestamp64Micro(timestamp) AS start_us, duration_ns, status_code, status_message,\n  \
+             {db},\n  substring({stmt}, 1, {chars}) AS statement{params}\n\
+             FROM {from}\nWHERE {where_sql}\n  AND span_kind = 'Client' AND db_system != ''\n\
+             ORDER BY timestamp, span_id\nLIMIT 1 BY span_id\nLIMIT {limit}",
+            db = DB_COLUMNS.join(",\n  "),
+            stmt = db_attr("db.query.text", "db.statement"),
+            from = self.table_ref(),
+        );
+        Ok(Self::finish(b, sql))
+    }
+
+    /// 一段时间内的数据库调用按语句汇总：次数、错误数、耗时分位、总耗时，外加最慢的一次当样本。
+    ///
+    /// JDBC 语句里参数是 `?`，同一条语句天然归到一起；Redis 这类把参数写进语句的会散开，
+    /// 按总耗时排序时散开的也不会把真正费时的挤出去。`filter` 的 kind 固定是 Client，
+    /// 时间范围的护栏和链路检索同一套（不选服务最多 6 小时）。
+    pub fn db_calls(
+        &self,
+        filter: &TraceFilter,
+        system: Option<&str>,
+        sort: DbCallSort,
+        max_statement_chars: u32,
+        limit: u32,
+    ) -> Result<Query> {
+        filter.validate()?;
+        let mut b = Bindings::new();
+        let where_sql = filter.where_sql(&mut b)?;
+        let system_sql = match system {
+            Some(s) => format!("\n  AND db_system = {}", b.bind("String", s.to_ascii_lowercase())),
+            None => String::new(),
+        };
+        let chars = b.bind("UInt32", max_statement_chars);
+        let limit = b.bind("UInt32", limit);
+        let order = match sort {
+            DbCallSort::Total => "total_ns",
+            DbCallSort::P95 => "p95_ns",
+            DbCallSort::Max => "max_ns",
+            DbCallSort::Calls => "calls",
+            DbCallSort::Errors => "errors",
+        };
+        let sql = format!(
+            "SELECT service_name, {db},\n  substring({stmt}, 1, {chars}) AS statement,\n  \
+             count() AS calls, countIf(status_code = 'Error') AS errors,\n  \
+             quantile(0.5)(duration_ns) AS p50_ns, quantile(0.95)(duration_ns) AS p95_ns,\n  \
+             max(duration_ns) AS max_ns, sum(duration_ns) AS total_ns,\n  \
+             argMax(trace_id, duration_ns) AS sample_trace, argMax(span_id, duration_ns) AS sample_span,\n  \
+             toUnixTimestamp64Milli(argMax(timestamp, duration_ns)) AS sample_ms\n\
+             FROM {from}\nWHERE {where_sql}\n  AND db_system != ''{system_sql}\n\
+             GROUP BY service_name, db_system, db_name, db_operation, db_collection, db_server, db_port, statement\n\
+             ORDER BY {order} DESC\nLIMIT {limit}",
+            db = DB_COLUMNS.join(",\n  "),
+            stmt = db_attr("db.query.text", "db.statement"),
             from = self.table_ref(),
         );
         Ok(Self::finish(b, sql))

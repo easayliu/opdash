@@ -1,0 +1,71 @@
+# opdash 业务数据源示例（`--datasources` / `OPDASH_DATASOURCES`）
+#
+# 配置之后，MCP 客户端（在代码仓库中运行的 Claude Code、Cursor 等）可以对照代码直接查询业务库：
+# 查看表结构与索引、执行只读查询、查看数据库自身记录的慢查询；链路中的数据库调用也会标出
+# 对应的数据源，并给出代入参数后的语句，便于直接 EXPLAIN。
+#
+# 本文件中的名称与地址均为占位示例，请按实际情况改写。连接信息属于内部信息，**请勿提交至
+# 代码仓库**。密码写成 ${环境变量名}，由 Kubernetes Secret 注入环境变量，本文件便可放进 ConfigMap。
+# 引用的环境变量未设置、字段拼写有误或名称重复时，进程将给出原因并退出，不会静默忽略某个库。
+#
+# 本文件在进程启动时读取一次，修改后需重启 opdash 方才生效。
+#
+# 关于只读：opdash 在库一侧另有保护——MySQL 在只读事务中执行并随即回滚，ClickHouse 每条查询
+# 都带 readonly=2，Redis 只放行只读命令，Elasticsearch 只开放检索类接口——但这些只是兜底。
+# **请为每个数据源单独创建只读账号**，这是唯一可靠的一道防线。
+#
+# 各字段：
+#   name         数据源名称，MCP 工具的 source 参数取此值；字母、数字、下划线、短横线
+#   kind         mysql / redis / elasticsearch（可简写为 es）/ clickhouse
+#   url          连接地址：mysql://、redis://、http(s)://；可含账号，密码建议单独写在 password
+#   user         账号（覆盖 url 中的账号）
+#   password     密码，建议写成 ${ENV}
+#   api_key      仅 Elasticsearch：API key，与 user / password 二选一
+#   database     默认库；MySQL 与 Redis 也可写在 url 路径里（mysql://host/shop、redis://host/2）
+#   description  一句话说明，模型据此判断该查哪个库
+#   env          所属环境。同一套 opdash 同时配置了多个环境的库时用于区分；省略即与 --env 相同
+#   services     使用此库的服务名（链路中的 service_name），用于把链路中的数据库调用对应到此数据源
+#   aliases      链路 server.address 中可能出现的其他写法（域名、VIP、host:port）
+#   timeout      单次操作超时，默认 15s，上限 5m
+#   max_rows     单次查询最多返回的行数，默认 500，上限 10000
+#   cluster      仅 ClickHouse：集群名，读取 system.query_log 时跨全部副本
+
+[[source]]
+name = "order-db"
+kind = "mysql"
+url = "mysql://opdash_ro@10.0.0.5:3306/shop"
+password = "${ORDER_DB_PASSWORD}"
+description = "订单服务主库的只读从库"
+services = ["order-service", "order-job"]
+# 应用连接的是云数据库的域名，链路中的 server.address 记录的也是它
+aliases = ["rm-example.mysql.example.com"]
+
+[[source]]
+name = "order-cache"
+kind = "redis"
+url = "redis://10.0.0.6:6379/0"
+password = "${ORDER_REDIS_PASSWORD}"
+description = "订单服务的缓存"
+services = ["order-service"]
+
+[[source]]
+name = "search"
+kind = "elasticsearch"
+url = "http://10.0.0.7:9200"
+user = "opdash_ro"
+password = "${SEARCH_ES_PASSWORD}"
+description = "商品与订单的检索集群"
+services = ["search-service"]
+max_rows = 200
+
+[[source]]
+name = "report-ck"
+kind = "clickhouse"
+url = "http://10.0.0.8:8123"
+user = "opdash_ro"
+password = "${REPORT_CK_PASSWORD}"
+database = "report"
+cluster = "default"
+description = "报表服务的 ClickHouse"
+services = ["report-service"]
+timeout = "30s"

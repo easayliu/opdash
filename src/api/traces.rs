@@ -14,11 +14,12 @@ use super::{AppState, params::Params};
 use crate::clickhouse::Stats;
 use crate::error::{Error, Result};
 use crate::query::traces::{
-    AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, ENTRY_KINDS,
-    ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS, SUMMARY_WIDEN_MS, Span,
-    SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries, TraceSort, TraceSummary,
-    ValueRow, candidate_range, dedup_by_trace, detail_forward_probes, detail_probe_hit,
-    detail_probes, normalize_kind, normalize_span_id, normalize_trace_id,
+    AttrFilter, CANDIDATE_OVERFETCH, CLIENT_KINDS, CandidateRow, Candidates, DbCallRow, DbCallSort,
+    DbSpanRow, ENTRY_KINDS, ErrorGroupRow, HeatmapRow, KeyRow, LocatedSpan, PROBE_WINDOWS_MS,
+    SUMMARY_WIDEN_MS, Span, SpanEvent, SpanLink, SpanRow, SummaryRow, TraceFilter, TraceQueries,
+    TraceSort, TraceSummary, ValueRow, candidate_range, dedup_by_trace, detail_forward_probes,
+    detail_probe_hit, detail_probes, normalize_kind, normalize_span_id, normalize_trace_id,
+    parse_db_params,
 };
 use crate::query::{Bucket, TimeRange, parse_tz};
 use crate::schema::{Schema, TRACE_FIXED_COLUMNS};
@@ -31,7 +32,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/traces/values", get(values))
         .route("/api/traces/attr_keys", get(attr_keys))
         .route("/api/traces/attr_values", get(attr_values))
+        .route("/api/traces/db_calls", get(db_calls))
         .route("/api/traces/{trace_id}", get(detail))
+        .route("/api/traces/{trace_id}/db", get(trace_db))
         .route("/api/traces/{trace_id}/spans/{span_id}", get(span_attrs))
 }
 
@@ -854,4 +857,256 @@ async fn attr_values(State(state): State<AppState>, p: Params) -> Result<Json<Va
         .rows::<ValueRow>(queries.attr_values(&range, p.get("service"), scope, key, limit)?)
         .await?;
     Ok(Json(ValuesResponse { field: key.to_owned(), values: result.rows, stats: result.stats }))
+}
+
+/// 语句最多保留多少字符。一条批量 INSERT 能有几十 KB，排障看得清前面几千字就够了。
+const MAX_STATEMENT_CHARS: u32 = 8000;
+/// 汇总里的语句截得更短：几十组放在一起，每组一条完整长 SQL 会把结果撑爆。
+const MAX_GROUPED_STATEMENT_CHARS: u32 = 1500;
+
+/// 一次数据库调用对到哪个数据源（`--datasources`）上。
+fn match_source(
+    state: &AppState,
+    system: &str,
+    server: &str,
+    port: &str,
+    db: &str,
+    service: &str,
+) -> Option<String> {
+    state
+        .datasources
+        .match_call(&crate::datasource::CallTarget {
+            system,
+            host: server,
+            port: port.parse().ok(),
+            database: db,
+            service,
+        })
+        .map(|s| s.name.clone())
+}
+
+#[derive(Serialize)]
+pub struct DbCall {
+    pub span_id: String,
+    pub parent_span_id: String,
+    pub service: String,
+    pub name: String,
+    pub start_us: i64,
+    pub duration_ns: u64,
+    pub status: String,
+    pub status_message: String,
+    pub system: String,
+    pub database: String,
+    pub operation: String,
+    pub collection: String,
+    pub server: String,
+    pub port: String,
+    pub statement: String,
+    /// JDBC 参数，按下标排好
+    pub params: Vec<String>,
+    /// 参数齐全时代入参数后的语句，可以直接拿去 EXPLAIN
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement_filled: Option<String>,
+    /// 对得上的数据源名
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TraceDbResponse {
+    pub trace_id: String,
+    pub calls: Vec<DbCall>,
+    /// 这条 trace 的 span 超过了 `--max-trace-spans`，只看了前一部分
+    pub truncated: bool,
+    /// 参数取不到（ClickHouse 不认 `^` 子对象的写法），退回了不带参数的查询
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub params_unavailable: bool,
+    pub stats: Stats,
+}
+
+/// 一条 trace 里的数据库调用。先和瀑布图一样定位 span，再只取数据库那几个子列。
+async fn trace_db(
+    State(state): State<AppState>,
+    Path(trace_id): Path<String>,
+    p: Params,
+) -> Result<Json<TraceDbResponse>> {
+    let schema = state.schema.get().await?;
+    let trace_id = normalize_trace_id(&trace_id)?;
+    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
+    let max = state.config.max_trace_spans;
+    let probe = locate_spans(&state, &queries, &trace_id, max, p.get_i64("at")?).await?;
+    let mut stats = probe.stats;
+    let located: Vec<LocatedSpan> = probe.rows.into_iter().take(max as usize).collect();
+    let mut params_unavailable = false;
+    let rows = if located.is_empty() {
+        Vec::new()
+    } else {
+        match state
+            .client
+            .rows::<DbSpanRow>(queries.detail_db(&trace_id, &located, true, MAX_STATEMENT_CHARS)?)
+            .await
+        {
+            Ok(r) => {
+                stats.absorb(&r.stats);
+                r.rows
+            }
+            // 取参数用的 `^` 子对象语法老版本不认（语法错 62、标识符 47、参数类型 36 / 43 / 44）；
+            // 超时、读量超限这类与语法无关的错误照常抛出
+            Err(Error::ClickHouse { code, message }) if matches!(code, 36 | 43 | 44 | 47 | 62) => {
+                tracing::warn!(code, error = %message, "带 JDBC 参数的数据库调用查询失败，退回不带参数的查询");
+                params_unavailable = true;
+                let r = state
+                    .client
+                    .rows::<DbSpanRow>(queries.detail_db(
+                        &trace_id,
+                        &located,
+                        false,
+                        MAX_STATEMENT_CHARS,
+                    )?)
+                    .await?;
+                stats.absorb(&r.stats);
+                r.rows
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let calls = rows
+        .into_iter()
+        .map(|r| {
+            let params = parse_db_params(&r.params);
+            let is_sql = matches!(
+                crate::datasource::Kind::of_db_system(&r.db_system),
+                Some(crate::datasource::Kind::Mysql | crate::datasource::Kind::Clickhouse)
+            );
+            let statement_filled = (is_sql && !params.is_empty() && r.statement.contains('?'))
+                .then(|| crate::datasource::sql::fill_placeholders(&r.statement, &params))
+                .flatten();
+            let source = match_source(
+                &state,
+                &r.db_system,
+                &r.db_server,
+                &r.db_port,
+                &r.db_name,
+                &r.service_name,
+            );
+            DbCall {
+                span_id: r.span_id,
+                parent_span_id: r.parent_span_id,
+                service: r.service_name,
+                name: r.span_name,
+                start_us: r.start_us,
+                duration_ns: r.duration_ns,
+                status: r.status_code,
+                status_message: r.status_message,
+                system: r.db_system,
+                database: r.db_name,
+                operation: r.db_operation,
+                collection: r.db_collection,
+                server: r.db_server,
+                port: r.db_port,
+                statement: r.statement,
+                params,
+                statement_filled,
+                source,
+            }
+        })
+        .collect();
+    Ok(Json(TraceDbResponse {
+        trace_id,
+        calls,
+        truncated: probe.truncated,
+        params_unavailable,
+        stats,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct DbCallGroup {
+    pub service: String,
+    pub system: String,
+    pub database: String,
+    pub operation: String,
+    pub collection: String,
+    pub server: String,
+    pub port: String,
+    pub statement: String,
+    pub calls: u64,
+    pub errors: u64,
+    pub p50_ns: f64,
+    pub p95_ns: f64,
+    pub max_ns: u64,
+    pub total_ns: u64,
+    pub sample_trace: String,
+    pub sample_span: String,
+    pub sample_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DbCallsResponse {
+    pub groups: Vec<DbCallGroup>,
+    pub stats: Stats,
+}
+
+/// 一段时间内的数据库调用按语句汇总，见 [`TraceQueries::db_calls`]。
+async fn db_calls(State(state): State<AppState>, p: Params) -> Result<Json<DbCallsResponse>> {
+    let schema = state.schema.get().await?;
+    let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
+    let ms_to_ns = |v: Option<f64>| v.map(|ms| (ms.max(0.0) * 1_000_000.0) as u64);
+    let filter = TraceFilter {
+        range: Some(range(&state, &p)?),
+        service: p.get("service").map(str::to_owned),
+        kinds: vec!["Client".to_owned()],
+        error_only: p.get_bool("error_only")?.unwrap_or(false),
+        min_duration_ns: ms_to_ns(p.get_f64("min_ms")?),
+        ..TraceFilter::default()
+    };
+    let sort = DbCallSort::parse(p.get("sort"))?;
+    let limit = p.get_limit("limit", 30, 200)?;
+    let rows = state
+        .client
+        .rows::<DbCallRow>(queries.db_calls(
+            &filter,
+            p.get("system"),
+            sort,
+            MAX_GROUPED_STATEMENT_CHARS,
+            limit,
+        )?)
+        .await?;
+    let groups = rows
+        .rows
+        .into_iter()
+        .map(|r| {
+            let source = match_source(
+                &state,
+                &r.db_system,
+                &r.db_server,
+                &r.db_port,
+                &r.db_name,
+                &r.service_name,
+            );
+            DbCallGroup {
+                service: r.service_name,
+                system: r.db_system,
+                database: r.db_name,
+                operation: r.db_operation,
+                collection: r.db_collection,
+                server: r.db_server,
+                port: r.db_port,
+                statement: r.statement,
+                calls: r.calls,
+                errors: r.errors,
+                p50_ns: r.p50_ns,
+                p95_ns: r.p95_ns,
+                max_ns: r.max_ns,
+                total_ns: r.total_ns,
+                sample_trace: r.sample_trace,
+                sample_span: r.sample_span,
+                sample_ms: r.sample_ms,
+                source,
+            }
+        })
+        .collect();
+    Ok(Json(DbCallsResponse { groups, stats: rows.stats }))
 }

@@ -51,6 +51,8 @@ export interface ApiKeyCreated extends ApiKeyInfo {
   key: string
   expires_in: string
   mcp_url: string
+  /** 接入命令里的 MCP 服务名（`--mcp-name`），生产、UAT 等各套 opdash 各不相同 */
+  mcp_name: string
 }
 
 /** GET /api/saved 里的一条收藏：一个页面地址（路径 + 查询串）加名字，全是本人的。 */

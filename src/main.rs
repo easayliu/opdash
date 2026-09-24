@@ -145,6 +145,12 @@ async fn run() -> anyhow::Result<()> {
             "成本归属规则已加载"
         );
     }
+    // 数据源配置同理：少一个库静默不见，排障时比起不来更难发现
+    if let Some(path) = &config.datasources {
+        let reg = opdash::datasource::Registry::load(path).map_err(anyhow::Error::msg)?;
+        let names: Vec<&str> = reg.all().iter().map(|s| s.name.as_str()).collect();
+        tracing::info!(file = %path.display(), sources = ?names, "数据源配置已加载");
+    }
     let state = AppState::new(config, client, schema, saved);
     let app = api::app(state, auth.clone());
 

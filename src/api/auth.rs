@@ -133,6 +133,8 @@ struct CreatedKey {
     expires_in: String,
     /// MCP 端点的完整地址，页面上拼接入命令用
     mcp_url: String,
+    /// 接入命令里的服务名（`--mcp-name`），几套 opdash 各不相同
+    mcp_name: String,
 }
 
 #[derive(Serialize)]
@@ -232,6 +234,7 @@ async fn create_key(State(auth): State<Auth>, headers: HeaderMap, body: Bytes) -
         view: KeyView::from(key),
         expires_in,
         mcp_url: format!("{}/mcp", auth.public_base(&headers)),
+        mcp_name: auth.mcp_name().to_owned(),
     })
     .into_response()
 }

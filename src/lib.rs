@@ -16,6 +16,7 @@ pub mod api;
 pub mod auth;
 pub mod clickhouse;
 pub mod config;
+pub mod datasource;
 pub mod error;
 pub mod goscan;
 pub mod mcp;

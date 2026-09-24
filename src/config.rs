@@ -85,6 +85,32 @@ pub struct Config {
     #[arg(long, env = "OPDASH_BILL_ALLOC")]
     pub bill_alloc: Option<std::path::PathBuf>,
 
+    /// 数据源配置文件（TOML）：MCP 排障时可直连的业务 MySQL / Redis / Elasticsearch / ClickHouse。
+    ///
+    /// 配了之后 MCP 多出 `db_*` 一组工具（列表、看结构、只读查询、慢查询），链路里的数据库调用
+    /// 也能对到具体的数据源上。**全部只读**：MySQL 在只读事务里执行，ClickHouse 带 `readonly=2`，
+    /// Redis 只放行只读命令，Elasticsearch 只开放检索接口；但请务必给每个数据源配只读账号。
+    /// 格式见 `examples/datasources.toml` 与 [`crate::datasource`]。**文件有误时进程直接退出**。
+    #[arg(long, env = "OPDASH_DATASOURCES")]
+    pub datasources: Option<std::path::PathBuf>,
+
+    /// 这套 opdash 属于哪个环境（如 `生产`、`测试`、`prod`）。
+    ///
+    /// 同一个人往往同时接着几套 opdash 的 MCP（生产一套、测试一套，域名不同），模型只看工具名
+    /// 分不出哪套是哪套。配了之后环境名写进 MCP 握手的 `serverInfo.title` 和使用说明的第一句、
+    /// `get_meta` 与 `db_sources` 的返回里。不配就只报访问所用的域名。
+    #[arg(long, env = "OPDASH_ENV")]
+    pub env: Option<String>,
+
+    /// 页面上「API key」对话框里拼接入命令时用的 MCP 服务名（`claude mcp add … <名字>`）。
+    ///
+    /// 同一台电脑接着几套 opdash 时名字必须不同：命令里先 `remove` 同名的再 `add`，都叫
+    /// `opdash` 的话接第二套就把第一套删了。名字还会成为工具名的前缀（`mcp__opdash-prod__…`），
+    /// 模型靠它分清是哪套。只能用字母、数字、下划线、短横线。不配时：`--env` 是这些字符就用
+    /// `opdash-<env>`（小写），否则（如 `生产`）用 `opdash`。
+    #[arg(long, env = "OPDASH_MCP_NAME")]
+    pub mcp_name: Option<String>,
+
     /// goscan 的地址（如 `http://goscan.logging.svc.cluster.local:8080`）。
     ///
     /// 配了之后费用页上多一个「拉取账单」：opdash 把请求转给 goscan 的 `POST /sync`，再按返回的
@@ -296,6 +322,16 @@ impl Config {
         if self.session_ttl.as_secs() < 60 {
             return Err("--session-ttl 至少 1 分钟".into());
         }
+        if let Some(env) = &self.env
+            && (env.trim().is_empty() || env.chars().count() > 32)
+        {
+            return Err("--env 应是 1~32 个字符的环境名，如 生产 / 测试 / prod".into());
+        }
+        if let Some(n) = &self.mcp_name
+            && !is_mcp_name(n)
+        {
+            return Err(format!("--mcp-name 只能包含字母、数字、下划线、短横线，长度 1~64: {n:?}"));
+        }
         if self.api_key_ttl.as_secs() < 3600 {
             return Err("--api-key-ttl 至少 1 小时".into());
         }
@@ -314,6 +350,25 @@ impl Config {
         }
         Ok(())
     }
+}
+
+impl Config {
+    /// 生效的 MCP 服务名，见 [`Config::mcp_name`] 字段。
+    pub fn mcp_server_name(&self) -> String {
+        if let Some(n) = &self.mcp_name {
+            return n.clone();
+        }
+        match self.env.as_deref().map(|e| e.trim().to_ascii_lowercase().replace(' ', "-")) {
+            Some(e) if is_mcp_name(&e) => format!("opdash-{e}"),
+            _ => "opdash".to_owned(),
+        }
+    }
+}
+
+fn is_mcp_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// 库名表名只放行 `[A-Za-z0-9_]`：它们会被反引号拼进 SQL，别让配置里的一个反引号把语句拆了。
@@ -364,6 +419,19 @@ mod tests {
         ]);
         cfg.validate().unwrap();
         assert!(Config::try_parse_from(["opdash", "--oidc-issuer", "sso.example.com"]).is_err());
+    }
+
+    #[test]
+    fn mcp_name_follows_env_unless_given() {
+        let name = |args: &[&str]| {
+            let cfg = Config::parse_from([&["opdash"], args].concat());
+            cfg.validate().map(|_| cfg.mcp_server_name())
+        };
+        assert_eq!(name(&[]).unwrap(), "opdash");
+        assert_eq!(name(&["--env", "UAT"]).unwrap(), "opdash-uat");
+        assert_eq!(name(&["--env", "生产"]).unwrap(), "opdash", "中文环境名拼不进命令");
+        assert_eq!(name(&["--env", "生产", "--mcp-name", "opdash-prod"]).unwrap(), "opdash-prod");
+        assert!(name(&["--mcp-name", "opdash prod"]).is_err());
     }
 
     #[test]

@@ -92,14 +92,17 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
     }
   }
 
+  // 服务名由后端给（--mcp-name）：生产、UAT 各一套时名字必须不同，否则下面那条 remove
+  // 会把另一套删掉
+  const mcpName = created?.mcp_name ?? 'opdash'
   // add 碰上同名的会直接报 already exists，所以前面带一条 remove：没装过时它只在 stderr 说句找不到，
   // 不挡后面那条；装过就是换成这把新 key
   const mcpCommand = created
-    ? `claude mcp remove opdash 2>/dev/null\nclaude mcp add --transport http opdash ${created.mcp_url} \\\n  --header "Authorization: Bearer ${created.key}"`
+    ? `claude mcp remove ${mcpName} 2>/dev/null\nclaude mcp add --transport http ${mcpName} ${created.mcp_url} \\\n  --header "Authorization: Bearer ${created.key}"`
     : ''
   // Codex 不用命令行加远程服务，直接写 ~/.codex/config.toml
   const codexConfig = created
-    ? `[mcp_servers.opdash]\nurl = "${created.mcp_url}"\nhttp_headers = { Authorization = "Bearer ${created.key}" }`
+    ? `[mcp_servers.${mcpName}]\nurl = "${created.mcp_url}"\nhttp_headers = { Authorization = "Bearer ${created.key}" }`
     : ''
   const keys = list.data?.keys ?? []
   const live = keys.filter((k) => !k.expired).length

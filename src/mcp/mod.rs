@@ -84,6 +84,8 @@ impl Mcp {
         }
         let msg = value["error"].as_str().unwrap_or("查询失败").to_owned();
         Err(match value["kind"].as_str() {
+            // 数据源的错误各后端已经写好了建议（加索引条件、先 EXPLAIN……），不再套时间范围那句
+            _ if path.starts_with("/api/db/") => msg,
             // 账单没有「几分钟」可缩：它按账期查，读量跟着账期数和日度 / 月度表走
             Some("too_heavy") | Some("timeout") if path.starts_with("/api/bills/") => {
                 format!(
@@ -123,6 +125,8 @@ async fn handle(State(mcp): State<Arc<Mcp>>, headers: HeaderMap, body: Bytes) ->
     if let Err(resp) = check_origin(&headers) {
         return resp;
     }
+    let host = request_host(&headers);
+    let host = host.as_deref();
     let parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -143,19 +147,20 @@ async fn handle(State(mcp): State<Arc<Mcp>>, headers: HeaderMap, body: Bytes) ->
             }
             // 一批里的请求互不相干，并发跑（并发上限由 ClickHouse 客户端自己的信号量兜着）；
             // join_all 保序，回应的顺序还是请求的顺序
-            let out: Vec<Value> =
-                futures_util::future::join_all(items.into_iter().map(|item| dispatch(&mcp, item)))
-                    .await
-                    .into_iter()
-                    .flatten()
-                    .collect();
+            let out: Vec<Value> = futures_util::future::join_all(
+                items.into_iter().map(|item| dispatch(&mcp, item, host)),
+            )
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
             if out.is_empty() {
                 accepted()
             } else {
                 rpc_response(StatusCode::OK, Value::Array(out))
             }
         }
-        other => match dispatch(&mcp, other).await {
+        other => match dispatch(&mcp, other, host).await {
             Some(r) => rpc_response(StatusCode::OK, r),
             None => accepted(),
         },
@@ -219,7 +224,7 @@ impl RpcError {
 
 /// 一条消息 → 可能的一条回应。请求（有 `method` 有 `id`）有回应；通知（有 `method` 没 `id`）和
 /// 客户端的响应（有 `result` / `error`）没有。
-async fn dispatch(mcp: &Mcp, msg: Value) -> Option<Value> {
+async fn dispatch(mcp: &Mcp, msg: Value, host: Option<&str>) -> Option<Value> {
     let Some(obj) = msg.as_object() else {
         return Some(error_message(Value::Null, INVALID_REQUEST, "消息应是 JSON 对象"));
     };
@@ -240,7 +245,7 @@ async fn dispatch(mcp: &Mcp, msg: Value) -> Option<Value> {
         }
         (Some(method), Some(id)) => {
             let started = std::time::Instant::now();
-            let out = call(mcp, method, &params).await;
+            let out = call(mcp, method, &params, host).await;
             let elapsed_ms = started.elapsed().as_millis();
             Some(match out {
                 Ok(result) => {
@@ -256,13 +261,18 @@ async fn dispatch(mcp: &Mcp, msg: Value) -> Option<Value> {
     }
 }
 
-async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError> {
+async fn call(
+    mcp: &Mcp,
+    method: &str,
+    params: &Value,
+    host: Option<&str>,
+) -> Result<Value, RpcError> {
     match method {
-        "initialize" => Ok(initialize(mcp, params).await),
+        "initialize" => Ok(initialize(mcp, params, host).await),
         "ping" => Ok(json!({})),
         "tools/list" => {
             let (metrics, bills) = enabled_tables(mcp).await;
-            Ok(json!({ "tools": tools::list(metrics, bills) }))
+            Ok(json!({ "tools": tools::list(metrics, bills, !mcp.state.datasources.is_empty()) }))
         }
         "tools/call" => {
             let name = params["name"]
@@ -293,7 +303,7 @@ async fn call(mcp: &Mcp, method: &str, params: &Value) -> Result<Value, RpcError
                         "没有叫 {name:?} 的工具；可用: {}",
                         {
                             let (metrics, bills) = enabled_tables(mcp).await;
-                            tools::list(metrics, bills)
+                            tools::list(metrics, bills, !mcp.state.datasources.is_empty())
                         }
                         .iter()
                         .filter_map(|t| t["name"].as_str())
@@ -360,7 +370,7 @@ async fn enabled_tables(mcp: &Mcp) -> (bool, bool) {
     }
 }
 
-async fn initialize(mcp: &Mcp, params: &Value) -> Value {
+async fn initialize(mcp: &Mcp, params: &Value, host: Option<&str>) -> Value {
     let wanted = params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION);
     let version = if SUPPORTED_VERSIONS.contains(&wanted) { wanted } else { PROTOCOL_VERSION };
     json!({
@@ -368,19 +378,23 @@ async fn initialize(mcp: &Mcp, params: &Value) -> Value {
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": {
             "name": "opdash",
-            "title": "opdash · 日志 / 链路 / 指标查询",
+            "title": match &mcp.state.config.env {
+                Some(env) => format!("opdash（{env}）· 日志 / 链路 / 指标查询"),
+                None => "opdash · 日志 / 链路 / 指标查询".to_owned(),
+            },
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": instructions(mcp).await,
+        "instructions": instructions(mcp, host).await,
     })
 }
 
 /// 给模型的使用说明。表结构读得到就把可筛的维度列名也写进去，省一次 `get_meta`；
 /// 库暂时连不上就不写（握手不能因为库挂了而失败，工具调用时再报）。
-async fn instructions(mcp: &Mcp) -> String {
+async fn instructions(mcp: &Mcp, host: Option<&str>) -> String {
     let cfg = &mcp.state.config;
     let tz = mcp.tz();
-    let mut s = format!(
+    let mut s = env_line(cfg.env.as_deref(), host);
+    s.push_str(&format!(
         "opdash：线上日志（{db}.{logs}）、链路 span（{db}.{traces}）和指标（{db}.{metrics}）的只读查询，给业务排障用。\n\
          \n\
          排障套路：\n\
@@ -408,7 +422,7 @@ async fn instructions(mcp: &Mcp) -> String {
         metrics = cfg.metric_table,
         tz = cfg.timezone,
         max_range = fmt_duration(cfg.max_range.as_millis() as i64),
-    );
+    ));
     if let Ok(schema) = mcp.state.schema.get().await {
         let dims = |t: &crate::schema::Table, fixed: &[&str]| {
             t.extra_string_columns(fixed).iter().map(|c| c.name.clone()).collect::<Vec<_>>()
@@ -434,8 +448,63 @@ async fn instructions(mcp: &Mcp) -> String {
             None => s.push_str("\n账单表未启用，费用类工具（cost_*）用不了。"),
         }
     }
+    s.push_str(&datasource_note(&mcp.state.datasources));
     s.push_str(&format!("\n\n现在是 {}。", fmt_time(mcp.state.now_ms(), tz)));
     s
+}
+
+/// 请求打到的是哪个域名：反向代理转发时看 `X-Forwarded-Host`，否则看 `Host`。
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+/// 使用说明的第一句：这是哪个环境。一个人常常同时接着生产、测试好几套 opdash 的 MCP，
+/// 工具名一模一样，模型只能靠这一句分清查到的数据属于哪套。
+fn env_line(env: Option<&str>, host: Option<&str>) -> String {
+    let at = host.map(|h| format!("（{h}）")).unwrap_or_default();
+    match env {
+        Some(env) => format!(
+            "【环境：{env}】本 MCP 连接的是 {env} 环境的 opdash{at}，查到的日志、链路、指标和业务库数据都属于 {env} 环境；同时接入了几套 opdash 时以此区分，不要混用。\n\n"
+        ),
+        None => match host {
+            Some(h) => format!("本 MCP 连接的是 {h} 上的 opdash（部署方未声明环境名）。\n\n"),
+            None => String::new(),
+        },
+    }
+}
+
+/// 使用说明里关于业务数据源的一段。
+fn datasource_note(reg: &crate::datasource::Registry) -> String {
+    let calls = "链路里的 SQL：trace_db_calls 看一条链路的全部数据库调用（能认出 N+1），db_calls_top 按语句汇总一段时间内最慢 / 最费时的调用。";
+    if reg.is_empty() {
+        return format!("\n\n{calls}未配置业务数据源（--datasources），无法直连业务库。");
+    }
+    let list: Vec<String> = reg
+        .all()
+        .iter()
+        .map(|s| {
+            let mut d = format!("{}（{}", s.name, s.kind.as_str());
+            if let Some(env) = &s.env {
+                d.push_str(&format!("，{env}"));
+            }
+            if !s.services.is_empty() {
+                d.push_str(&format!("，{}", s.services.join(" / ")));
+            }
+            d.push('）');
+            d
+        })
+        .collect();
+    format!(
+        "\n\n业务数据源（只读直连，对照代码排查用）：{}。db_describe 看表结构与索引，db_query 执行只读查询（SQL 只接受 SELECT / SHOW / DESCRIBE / EXPLAIN），db_slow_queries 看数据库自己记录的慢查询。\
+         {calls}它们会标出调用落在哪个数据源（source），参数齐全时给出代入参数后的语句（statement_filled），可直接 db_query 做 EXPLAIN。",
+        list.join("、"),
+    )
 }
 
 /// unix 毫秒 → `2026-09-18T10:25:03.123+08:00`。
