@@ -262,7 +262,7 @@ impl Elastic {
             })
             .filter(|r| r.1 > 0)
             .collect();
-        per_index.sort_by(|a, b| b.2.cmp(&a.2));
+        per_index.sort_by_key(|a| std::cmp::Reverse(a.2));
         let mut indices = Table::new(&[
             "index",
             "queries",
