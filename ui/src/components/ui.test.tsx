@@ -94,6 +94,33 @@ describe('Combobox', () => {
     expect(picked).toEqual(['b'])
     expect(trigger).toHaveFocus()
   })
+  // 日志页的服务候选是按量取的前 N 个，量小的服务进不了候选，只能靠手输
+  it('allowCustom：搜索词不在候选里时可以直接用它，回车即选中', async () => {
+    const user = userEvent.setup()
+    const picked: string[] = []
+    render(<Combobox value="" options={OPTIONS} onChange={(v) => picked.push(v)} placeholder="全部服务" allowCustom />)
+    await user.click(screen.getByRole('button'))
+    await user.keyboard('ai-crm-admin{Enter}')
+    expect(picked).toEqual(['ai-crm-admin'])
+  })
+
+  it('allowCustom：搜索词正好是某个候选值时不再多出自定义那一行', async () => {
+    const user = userEvent.setup()
+    render(<Combobox value="" options={OPTIONS} onChange={() => {}} placeholder="全部服务" allowCustom />)
+    await user.click(screen.getByRole('button'))
+    await user.keyboard('b')
+    expect(screen.queryByRole('option', { name: /筛选「b」/ })).not.toBeInTheDocument()
+    await user.keyboard('x')
+    expect(screen.getByRole('option', { name: /筛选「bx」/ })).toBeInTheDocument()
+  })
+
+  it('不开 allowCustom 时照旧只能从候选里选', async () => {
+    const user = userEvent.setup()
+    render(<Combobox value="" options={OPTIONS} onChange={() => {}} placeholder="全部服务" />)
+    await user.click(screen.getByRole('button'))
+    await user.keyboard('ai-crm-admin')
+    expect(screen.queryByRole('option', { name: /筛选「/ })).not.toBeInTheDocument()
+  })
 })
 
 describe('Hint', () => {

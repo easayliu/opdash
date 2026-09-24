@@ -559,6 +559,10 @@ export interface ComboOption {
  *
  * `clearable`（默认开）：第一项是「全部」，选中别的值时触发器描成强调色，表示这个筛选正在生效。
  * 关掉它就是一个普通的「选一个」——账期、排行维度这类永远有值，不该一直亮着。
+ *
+ * `allowCustom`：搜索词不等于任何候选值时，在「全部」下面多一行「筛选「<搜索词>」」，选中就以搜索词
+ * 本身为值。候选只是按量取的前 N 个时要开——量小的值（日志页每小时几十行的服务）排不进候选，
+ * 不开的话人明知道名字也选不上。
  */
 export function Combobox({
   value,
@@ -573,6 +577,7 @@ export function Combobox({
   loading,
   mono,
   clearable = true,
+  allowCustom = false,
   variant = 'default',
   trigger,
   size = 'md',
@@ -595,6 +600,8 @@ export function Combobox({
   /** 选项是等宽内容（指标名、属性值这类） */
   mono?: boolean
   clearable?: boolean
+  /** 允许直接用搜索词当值，见上面的说明 */
+  allowCustom?: boolean
   /**
    * `inline`：嵌在表头 / 一行文字里用——触发器没有边框和高度，只是一个图标加当前值；
    * 菜单按触发器在屏幕上的位置 fixed 定位，不受外层滚动容器裁切。
@@ -642,9 +649,12 @@ export function Combobox({
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase()
     const hit = needle ? options.filter((o) => (o.label ?? o.value).toLowerCase().includes(needle) || o.value.toLowerCase().includes(needle)) : options
+    // 自定义那一行排在候选前面：候选可能上百条，放后面会被 MAX_COMBO_ROWS 截掉
+    const typed = q.trim()
+    const custom = allowCustom && typed && !options.some((o) => o.value === typed) ? [{ value: typed, label: `筛选「${typed}」`, note: '不在候选中' }] : []
     // 空值那一项（「全部服务」之类）始终排在最前，且不参与筛选
-    return clearable ? [{ value: '', label: placeholder }, ...hit] : hit
-  }, [options, q, clearable, placeholder])
+    return [...(clearable ? [{ value: '', label: placeholder }] : []), ...custom, ...hit]
+  }, [options, q, clearable, placeholder, allowCustom])
   const capped = shown.slice(0, MAX_COMBO_ROWS)
   const current = options.find((o) => o.value === value)
 
@@ -814,7 +824,8 @@ export function Combobox({
                 value={q}
                 onChange={(e) => {
                   setQ(e.target.value)
-                  setCursor(0)
+                  // 能自定义时高亮落在「全部」下面那行（自定义那一行或第一个候选），回车就是用这个值
+                  setCursor(allowCustom && e.target.value.trim() && clearable ? 1 : 0)
                 }}
                 onKeyDown={onKey}
                 placeholder={searchPlaceholder}

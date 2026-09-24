@@ -233,6 +233,7 @@ function DimSelect({ dim, value, values = [], loading, onChange }: { dim: string
       emptyText={`没有匹配的${label}`}
       loading={loading}
       title={dim}
+      allowCustom
       className={cn(HALF_ON_MOBILE, 'md:w-44')}
     />
   )
