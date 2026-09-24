@@ -280,7 +280,10 @@ async fn facets(State(state): State<AppState>, p: Params) -> Result<Json<FacetsR
         return Err(Error::bad_request(format!("一次最多问 {MAX_FACET_FIELDS} 个维度")));
     }
     let filter = build_filter(&state, &schema, &p)?;
-    let limit = p.get_limit("limit", 50, 500)?;
+    // 默认给 500：以前是 50，线上一小时里就有 89 个服务、126 个 pod，排在 50 名以后的（每小时
+    // 两千行以下的小服务）根本进不了下拉，页面上没法按它们筛。approx_top_k 反正要扫完整个窗口，
+    // 读量取决于行数不取决于 k——14 个维度实测 k=50 / 500 都是 477 MB / 0.25 s，响应 10 KB → 17 KB
+    let limit = p.get_limit("limit", 500, 2000)?;
     let queries = LogQueries {
         database: &state.config.database,
         table: &schema.logs,
