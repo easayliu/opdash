@@ -35,10 +35,12 @@ fn strip_empty_env() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    init_logging();
+    // 先读配置再起日志：日志时间要按 --timezone 写。参数写错时 clap 自己打印原因退出，不需要日志
     let config = Config::parse();
+    let tz = parse_tz(&config.timezone);
+    init_logging(*tz.as_ref().unwrap_or(&chrono_tz::UTC));
     config.validate().map_err(anyhow::Error::msg)?;
-    parse_tz(&config.timezone).map_err(|e| anyhow::anyhow!("--timezone: {e}"))?;
+    tz.map_err(|e| anyhow::anyhow!("--timezone: {e}"))?;
 
     let client = Client::new(ClientOptions {
         endpoint: config.clickhouse_url.clone(),
@@ -206,14 +208,29 @@ async fn shutdown_signal() {
 }
 
 /// 本地时间、不打 target、非终端自动关颜色。默认 info，`RUST_LOG=opdash=debug` 能看到每条 SQL。
-fn init_logging() {
+/// 日志时间按 `--timezone` 写，和页面、MCP 工具参数里的时间同一个时区。
+///
+/// 原来用的是进程的本地时区，容器里没配 `TZ` 就是 UTC：日志记着 08:16 调了工具，参数里却是
+/// `at: 12:20`，对照着看要自己换算八小时。也不靠 `TZ` 环境变量——运行时镜像是 debian-slim，
+/// 不一定带 tzdata；chrono-tz 把时区数据编进了程序，不依赖镜像。
+fn init_logging(tz: chrono_tz::Tz) {
     use std::io::IsTerminal;
-    use tracing_subscriber::{EnvFilter, fmt::time::ChronoLocal};
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
+
+    struct ConfiguredZone(chrono_tz::Tz);
+    impl FormatTime for ConfiguredZone {
+        fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
+            let now = chrono::Utc::now().with_timezone(&self.0);
+            write!(w, "{}", now.format("%Y-%m-%d %H:%M:%S%.3f"))
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_owned()))
+        .with_timer(ConfiguredZone(tz))
         .with_target(false)
         .with_ansi(std::io::stdout().is_terminal())
         .init();
