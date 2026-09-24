@@ -30,8 +30,8 @@
 //! 去重键从 `system.tables.sorting_key` 读（见 [`crate::schema::BillTable`]），读不到才退回
 //! 这里的静态定义：改了 goscan 的 DDL 而没改 opdash 时，去重键跟着表走，不会悄悄少算钱。
 //!
-//! 根治办法在 README「账单表的分片键该改」一节：把 Distributed 的分片键换成按去重键哈希、
-//! 排序键里别放金额列，那时把 `--bill-dedupe` 调成 `final` 就行。
+//! 根治办法见 docs/bills.md「表结构的演进」：分片键按去重键哈希、排序键只放业务身份、
+//! 每行账单的键唯一（goscan v0.5）。线上的表按新结构重建之后，`--bill-dedupe` 才能调成 `final`。
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

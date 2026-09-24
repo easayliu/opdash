@@ -1,6 +1,6 @@
 //! 日志表（logpipe 的 `app_log`）的 SQL。
 //!
-//! 这里的 SQL 是按排序键 `(service_name, timestamp, level, trace_id)` 写的（服务打头，见 README
+//! 这里的 SQL 是按排序键 `(service_name, timestamp, level, trace_id)` 写的（服务打头，见 docs/queries.md
 //! 「排序键」一节）：锁定一个服务时按 `ORDER BY timestamp, level, trace_id LIMIT n` 只读这个服务的
 //! 那一段；不锁服务时要把范围内各服务的排序列读出来排一遍，排序列很窄，实测墙钟没变差。
 //! 排序键以外的列参与排序会退化，见 [`order_by`]。
@@ -56,7 +56,7 @@ const MAX_TOKENS_PER_TERM: usize = 4;
 /// * `RESULT_CHANGE`、`im_enter_direct_msg`：切出来全是短词，**不发**。线上量过（2026-09-18，
 ///   1 小时窗、3 分片）：`change` / `result` 各命中 359 / 364 个 granule，一个都跳不掉，而多出来的
 ///   两个 `hasToken` 让墙钟多 10% ~ 40%（1320 → 1950 ms、1517 → 1655 ms）。常见词无论怎么组合都
-///   进不了索引，见 README「跳数索引的上限」。
+///   进不了索引，见 docs/queries.md「跳数索引的上限」。
 ///
 /// 只认全 ASCII 的词：中文字节在 tokenizer 里也算分隔符，但没必要在这条路上证明它。
 fn token_needles(term: &str) -> Option<Vec<String>> {

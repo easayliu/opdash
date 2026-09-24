@@ -72,7 +72,7 @@ pub struct Config {
     ///   在 goscan 让每行账单的键都唯一之前不要用；
     /// * `off`：什么都不做，最快，但重复拉过的账期金额会翻倍。
     ///
-    /// 详见 README「账单表：为什么要在查询里再去重一次」。
+    /// 详见 docs/bills.md「查询时去重」。
     #[arg(long, env = "OPDASH_BILL_DEDUPE", default_value = "group")]
     pub bill_dedupe: crate::query::bills::Dedupe,
 

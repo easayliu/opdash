@@ -1964,8 +1964,8 @@ async fn search_logs(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     let max_chars = a.limit("max_message_chars", 2000, 200_000)? as usize;
     // 默认不数总数。`/api/logs/search` 默认会并发一条 `count()`，而**没有关键字**时这条是整个
     // 请求里最贵的一步：行那条按排序键读够 limit 就停，count 那条要扫完整个时间范围（线上一
-    // 小时窗 900 多万行）。日志页早就为此传 `count=0`，用直方图各桶之和顶（见 README
-    // 「共 N 条不单独跑 count()」），这条路以前漏了。要总数就用 log_histogram，或显式 count=true
+    // 小时窗 900 多万行）。日志页早就为此传 `count=0`，用直方图各桶之和顶（见 docs/queries.md
+    // 「总条数不单独 count()」），这条路以前漏了。要总数就用 log_histogram，或显式 count=true
     let want_count = a.boolean("count")?.unwrap_or(false);
     let mut qs = Qs::new();
     if let Some(w) = window {
