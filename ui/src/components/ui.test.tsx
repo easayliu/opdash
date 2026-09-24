@@ -114,6 +114,37 @@ describe('Combobox', () => {
     expect(screen.getByRole('option', { name: /筛选「bx」/ })).toBeInTheDocument()
   })
 
+  it('multiple：点一项只勾上或取消，菜单不收；「全部」清空并收起', async () => {
+    const user = userEvent.setup()
+    const calls: string[][] = []
+    const { rerender } = render(<Combobox multiple value={[]} options={OPTIONS} onChange={(v) => calls.push(v)} placeholder="全部服务" />)
+    await user.click(screen.getByRole('button'))
+    expect(screen.getByRole('listbox')).toHaveAttribute('aria-multiselectable', 'true')
+    await user.click(screen.getByRole('option', { name: 'pay-service' }))
+    expect(calls.at(-1)).toEqual(['b'])
+    rerender(<Combobox multiple value={['b']} options={OPTIONS} onChange={(v) => calls.push(v)} placeholder="全部服务" />)
+    expect(screen.getByRole('option', { name: 'pay-service' })).toHaveAttribute('aria-selected', 'true')
+    await user.click(screen.getByRole('option', { name: 'user-service' }))
+    expect(calls.at(-1)).toEqual(['b', 'c'])
+    rerender(<Combobox multiple value={['b', 'c']} options={OPTIONS} onChange={(v) => calls.push(v)} placeholder="全部服务" />)
+    await user.click(screen.getByRole('option', { name: 'pay-service' }))
+    expect(calls.at(-1)).toEqual(['c'])
+    await user.click(screen.getByRole('option', { name: '全部服务' }))
+    expect(calls.at(-1)).toEqual([])
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+  })
+
+  it('multiple：已选却不在候选里的值排在最前，仍能取消；触发器上注明选了几项', async () => {
+    const user = userEvent.setup()
+    const calls: string[][] = []
+    render(<Combobox multiple value={['b', 'gone']} options={OPTIONS} onChange={(v) => calls.push(v)} placeholder="全部服务" />)
+    expect(screen.getByRole('button')).toHaveTextContent('pay-service 等 2 项')
+    await user.click(screen.getByRole('button'))
+    expect(screen.getAllByRole('option')[1]).toHaveTextContent('gone')
+    await user.click(screen.getByRole('option', { name: 'gone' }))
+    expect(calls.at(-1)).toEqual(['b'])
+  })
+
   it('不开 allowCustom 时照旧只能从候选里选', async () => {
     const user = userEvent.setup()
     render(<Combobox value="" options={OPTIONS} onChange={() => {}} placeholder="全部服务" />)

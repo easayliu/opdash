@@ -22,7 +22,7 @@ import { Card, Combobox, EmptyState, ErrorBox, Hint, InfoHint, Spinner, buttonCl
 import { HeaderFilter, SortHeader, ariaSort, type ColFilter, type LogSort } from '@/components/LogTable'
 import { LineChart, Legend, type LineSeries } from '@/components/charts/LineChart'
 import { StackedBars } from '@/components/charts/StackedBars'
-import { AMOUNTS, PROVIDER_LABELS, changeRatio, daysInMonth, dayTick, formatChange, formatMoney, formatMoneyShort, formatMoneyTick, periodSlots, periodSpan, periodTick, shiftPeriod } from '@/lib/bills'
+import { AMOUNTS, PROVIDER_LABELS, changeRatio, daysInMonth, dayTick, formatChange, formatMoney, formatMoneyShort, formatMoneyTick, periodSlots, periodSpan, periodTick, shiftPeriod, splitDimValues } from '@/lib/bills'
 import { allocSection, allocSections, allocSummary, currentLabel, thisPeriod, type SectionKey } from '@/lib/allocTable'
 import { seriesVar } from '@/lib/colors'
 import { COMPARE_MODES, compare, defaultEnd, endOptions, trend, type CompareMode, type Comparison, type ProductDiff, type Range } from '@/lib/productDays'
@@ -70,8 +70,8 @@ export function CostAnalysis({
   days: string
   /** 预估哪个月，`YYYY-MM`。两项口径的选择器在页头，见 `AnalysisControls` */
   estimate: string
-  /** 设置或清除某个维度的筛选（写到 URL 上，与账单视图同一套条件）；「按产品」的表头筛选用 */
-  onFilter: (dim: string, value: string | null) => void
+  /** 设置某个维度筛选的一组值，空数组为清除（写到 URL 上，与账单视图同一套条件）；「按产品」的表头筛选用 */
+  onFilter: (dim: string, values: string[]) => void
   /** 从按天钻取跳到账单视图的明细：那一天、那朵云、那个产品 */
   onDrill: (target: DrillTarget) => void
 }) {
@@ -281,7 +281,7 @@ export function CostAnalysis({
               nights={nights}
               sort={productSort}
               onSort={setProductSort}
-              selected={base.product}
+              selected={splitDimValues(base.product)}
               onFilter={(v) => onFilter('product', v)}
             />
             {products.length > PRODUCT_TOP && (
@@ -748,11 +748,11 @@ function ProductTable({
   nights: number
   sort: LogSort
   onSort: (sort: LogSort) => void
-  selected?: string
-  onFilter: (value: string | null) => void
+  selected: string[]
+  onFilter: (values: string[]) => void
 }) {
   const names = useRef<string[]>([])
-  if (!selected && products.length) names.current = [...new Set(products.map((p) => p.product))].sort((a, b) => a.localeCompare(b))
+  if (!selected.length && products.length) names.current = [...new Set(products.map((p) => p.product))].sort((a, b) => a.localeCompare(b))
   const by = PRODUCT_SORTS[sort.key] ?? PRODUCT_SORTS.amount
   const sorted = [...products].sort((a, b) => {
     const x = by(a, nights)
@@ -761,9 +761,10 @@ function ProductTable({
     return (sort.dir === 'asc' ? c : -c) || b.amount - a.amount
   })
   const filter: ColFilter = {
-    value: selected ?? '',
+    multiple: true,
+    value: selected,
     options: (names.current.length ? names.current : [...new Set(products.map((p) => p.product))]).map((v) => ({ value: v })),
-    onChange: (v) => onFilter(v || null),
+    onChange: onFilter,
   }
   return (
     <ItemTable

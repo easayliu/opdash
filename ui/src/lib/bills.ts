@@ -27,6 +27,22 @@ export const DIMENSIONS: { value: string; label: string }[] = [
   { value: 'currency', label: '币种' },
 ]
 
+/**
+ * 一个维度筛选在 URL 上的值拆成几个：同一维度选多个时写成 `product=A,B`，与接口的约定一致
+ * （后端按逗号拆开，同一维度的几个值之间是「或」）。本身带逗号的值因此没法单独筛
+ */
+export const splitDimValues = (raw: string | null | undefined): string[] => [
+  ...new Set(
+    (raw ?? '')
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean),
+  ),
+]
+
+/** 反过来：写回 URL 的值，一个都没有时为 null（删掉这个键） */
+export const joinDimValues = (values: string[]): string | null => values.join(',') || null
+
 export const PROVIDER_LABELS: Record<BillProvider, string> = {
   volcengine: '火山引擎',
   alicloud: '阿里云',

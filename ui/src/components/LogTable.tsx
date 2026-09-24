@@ -37,12 +37,16 @@ export interface LogTableProps {
   colFilters?: Record<string, ColFilter>
 }
 
-export interface ColFilter {
-  /** 当前选中的值，'' 是不筛 */
-  value: string
+/**
+ * 表头的一个下拉筛选。单选时 `value` 是一个值（'' 是不筛）；`multiple` 时是一组值（空数组是不筛），
+ * 同一列选中的几个值之间是「或」
+ */
+export type ColFilter = (
+  | { multiple?: false; value: string; onChange: (v: string) => void }
+  | { multiple: true; value: string[]; onChange: (v: string[]) => void }
+) & {
   /** 可选的值；`note` 一般放条数 */
   options: ComboOption[]
-  onChange: (v: string) => void
   /** 候选值要现查时给：点开下拉那一刻调用 */
   onOpen?: () => void
   loading?: boolean
@@ -153,24 +157,32 @@ export function SortHeader({ label, col, sort, onSort }: { label: string; col: s
  * 看起来是表头的一部分。菜单 fixed 定位，不会被表格的滚动容器裁掉。
  */
 export function HeaderFilter({ col, filter, label = col }: { col: string; filter: ColFilter; /** 提示文字里怎么称呼这一列，默认即列名 */ label?: string }) {
-  const { value, options, onChange, onOpen, loading } = filter
+  const { options, onOpen, loading } = filter
+  const picked = filter.multiple ? filter.value : filter.value ? [filter.value] : []
+  const name = label === col ? ` ${col} ` : label
+  const common = {
+    variant: 'inline' as const,
+    options,
+    onOpenChange: onOpen ? (o: boolean) => o && onOpen() : undefined,
+    loading,
+    placeholder: `全部${label === col ? ` ${col}` : label}`,
+    searchPlaceholder: `搜索${label === col ? ` ${col}` : label}…`,
+    className: 'min-w-0 flex-1',
+    title: picked.length
+      ? `只看${name}= ${picked.join('、')}，${filter.multiple ? '点击增减' : '点击换一个'}`
+      : `按${name}筛选`,
+  }
+  const clear = () => (filter.multiple ? filter.onChange([]) : filter.onChange(''))
   return (
     <span className="flex min-w-0 flex-1 items-center gap-0.5">
-      <Combobox
-        variant="inline"
-        value={value}
-        options={options}
-        onChange={onChange}
-        onOpenChange={onOpen ? (o) => o && onOpen() : undefined}
-        loading={loading}
-        placeholder={`全部${label === col ? ` ${col}` : label}`}
-        searchPlaceholder={`搜索${label === col ? ` ${col}` : label}…`}
-        className="min-w-0 flex-1"
-        title={value ? `只看${label === col ? ` ${col} ` : label}= ${value}，点击换一个` : `按${label === col ? ` ${col} ` : label}筛选`}
-      />
-      {value && (
+      {filter.multiple ? (
+        <Combobox {...common} multiple value={filter.value} onChange={filter.onChange} />
+      ) : (
+        <Combobox {...common} value={filter.value} onChange={filter.onChange} />
+      )}
+      {picked.length > 0 && (
         <Hint text="取消筛选" asChild>
-          <button type="button" onClick={() => onChange('')} className="shrink-0 text-muted-fg hover:text-fg">
+          <button type="button" onClick={clear} className="shrink-0 text-muted-fg hover:text-fg">
             <XIcon className="size-3" />
           </button>
         </Hint>

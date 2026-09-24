@@ -18,10 +18,12 @@ import {
   formatMoney,
   formatMoneyShort,
   formatMoneyTick,
+  joinDimValues,
   periodSlots,
   periodSpan,
   periodTick,
   shiftPeriod,
+  splitDimValues,
 } from '@/lib/bills'
 import { usePageTitle } from '@/lib/title'
 import { BillDetailTable, ColumnPicker, DETAIL_COLUMNS, DayRangePicker, FACET_DIMS, detailTable, rawColumns, useDetailColumns } from '@/components/BillDetailTable'
@@ -51,7 +53,7 @@ const VIEWS = [
 ]
 const DETAIL_PAGE = 50
 
-/** 维度筛选在 URL 上就叫维度名本身（`product=云服务器 ECS`），和接口收的参数一致 */
+/** 维度筛选在 URL 上就叫维度名本身（`product=云服务器 ECS`），和接口收的参数一致；同一维度选多个用逗号隔开 */
 const DIMENSION_KEYS = DIMENSIONS.map((d) => d.value)
 
 export function CostPage() {
@@ -85,7 +87,7 @@ export function CostPage() {
     }
   })
 
-  // 维度筛选：URL 上的维度键原样往接口传
+  // 维度筛选：URL 上的维度键原样往接口传；picked 是拆开后的各个值
   const filters = useMemo(() => {
     const out: Record<string, string> = {}
     for (const key of DIMENSION_KEYS) {
@@ -94,6 +96,8 @@ export function CostPage() {
     }
     return out
   }, [params])
+  const picked = useMemo(() => Object.fromEntries(Object.entries(filters).map(([k, v]) => [k, splitDimValues(v)])), [filters])
+  const setDim = (dim: string, values: string[]) => set({ [dim]: joinDimValues(values), page: null })
 
   const base = useMemo(
     () => ({ from, to, amount, provider: provider || undefined, q: q || undefined, ...filters }),
@@ -138,7 +142,7 @@ export function CostPage() {
   const current = points.at(-1)
   const previous = points.at(-2)
   const mom = changeRatio(current?.total ?? 0, previous?.total ?? 0)
-  const activeFilters = Object.entries(filters)
+  const activeFilters = Object.entries(picked).flatMap(([key, values]) => values.map((value) => ({ key, value })))
 
   // 没部署 goscan：页签本来就不显示，直接进来的给一句原因
   if (meta.data && !bills) {
@@ -257,12 +261,13 @@ export function CostPage() {
         {activeFilters.length > 0 && (
           <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
             <span className="text-muted-fg">筛选</span>
-            {activeFilters.map(([key, value]) => (
-              <span key={key} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-accent">
+            {/* 同一维度选了几个就列几项，各自可去掉 */}
+            {activeFilters.map(({ key, value }) => (
+              <span key={`${key}\u0000${value}`} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-accent">
                 <span className="shrink-0 text-muted-fg">{DIMENSIONS.find((d) => d.value === key)?.label ?? key}</span>
                 <span className="truncate">{value}</span>
                 <Hint text="移除该筛选条件" asChild>
-                  <button type="button" onClick={() => set({ [key]: null, page: null })}>
+                  <button type="button" onClick={() => setDim(key, picked[key].filter((v) => v !== value))}>
                     ✕
                   </button>
                 </Hint>
@@ -284,7 +289,7 @@ export function CostPage() {
         )}
 
         {ready && bills && known.length > 0 && view === 'analysis' && (
-          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} onFilter={(dim, value) => set({ [dim]: value, page: null })}
+          <CostAnalysis base={base} ready={ready} bills={bills} days={days} estimate={estimate} onFilter={setDim}
             onDrill={(t) => {
               // 跳到账单视图的明细：那一天、那朵云、那个产品。那一天不在所选账期里时，账期换成那个月
               const month = t.day.slice(0, 7)
@@ -384,8 +389,12 @@ export function CostPage() {
                 other={breakdown.data?.other ?? 0}
                 pending={breakdown.isPending}
                 stale={breakdown.isFetching}
-                selected={filters[by]}
-                onPick={(key) => set({ [by]: filters[by] === key ? null : key, page: null })}
+                selected={picked[by] ?? []}
+                // 点一项就只看它；已在筛选里的再点一次是把它去掉。要同时看几项，在明细的表头里多选
+                onPick={(key) => {
+                  const cur = picked[by] ?? []
+                  setDim(by, cur.includes(key) ? cur.filter((v) => v !== key) : [key])
+                }}
               />
             </Card>
 
@@ -445,9 +454,10 @@ export function CostPage() {
                   FACET_DIMS.map((dim) => [
                     dim,
                     {
-                      value: filters[dim] ?? '',
+                      multiple: true,
+                      value: picked[dim] ?? [],
                       options: (facets.data?.facets[dim] ?? []).map((v) => ({ value: v })),
-                      onChange: (v: string) => set({ [dim]: v || null, page: null }),
+                      onChange: (values: string[]) => setDim(dim, values),
                       onOpen: () => setWantFacets(true),
                       loading: facets.isFetching,
                     },
@@ -617,7 +627,7 @@ function Breakdown({
   other: number
   pending: boolean
   stale?: boolean
-  selected?: string
+  selected: string[]
   onPick: (key: string) => void
 }) {
   if (pending) {
@@ -637,8 +647,8 @@ function Breakdown({
             <button
               type="button"
               onClick={() => onPick(r.key)}
-              aria-pressed={selected === r.key}
-              className={cn('row-hover flex w-full items-center gap-3 px-3 py-1 text-left text-xs', selected === r.key && 'bg-accent-soft/50')}
+              aria-pressed={selected.includes(r.key)}
+              className={cn('row-hover flex w-full items-center gap-3 px-3 py-1 text-left text-xs', selected.includes(r.key) && 'bg-accent-soft/50')}
             >
               <span className="w-5 shrink-0 text-right text-2xs text-muted-fg tabular-nums">{i + 1}</span>
               <span className="flex min-w-0 flex-1 items-baseline gap-2">

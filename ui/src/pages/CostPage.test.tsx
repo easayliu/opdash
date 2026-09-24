@@ -323,6 +323,27 @@ describe('费用页', () => {
     localStorage.clear()
   })
 
+  it('明细的表头筛选可多选：同一列的几个值一并往接口传，筛选条逐项列出、可单独去掉', async () => {
+    seen.length = 0
+    stubApi()
+    page()
+    await screen.findByText('web-1')
+    const detailCalls = () => seen.filter((u) => u.pathname === '/api/bills/detail')
+    await userEvent.click(screen.getByRole('button', { name: '按产品筛选' }))
+    await userEvent.click(await screen.findByRole('option', { name: '云服务器' }))
+    // 菜单不收，接着勾第二个
+    await userEvent.click(screen.getByRole('option', { name: '对象存储' }))
+    await waitFor(() => expect(detailCalls().at(-1)?.searchParams.get('product')).toBe('云服务器,对象存储'))
+    expect(screen.getByRole('option', { name: '云服务器' })).toHaveAttribute('aria-selected', 'true')
+    await userEvent.keyboard('{Escape}')
+    // 同一维度选了两个，筛选条就列两项；去掉一项，另一项留着
+    const chips = (await screen.findByText('筛选')).parentElement!
+    expect(within(chips).getAllByText('产品')).toHaveLength(2)
+    await userEvent.click(within(within(chips).getByText('云服务器').parentElement!).getByRole('button'))
+    await waitFor(() => expect(detailCalls().at(-1)?.searchParams.get('product')).toBe('对象存储'))
+    expect(within(chips).queryByText('云服务器')).toBeNull()
+  })
+
   it('下拉一律用筛选栏的自绘下拉，不再弹系统原生菜单', async () => {
     stubApi()
     const { container } = page()

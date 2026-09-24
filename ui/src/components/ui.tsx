@@ -550,43 +550,11 @@ export interface ComboOption {
   note?: string
 }
 
-/**
- * 带搜索的下拉。选项上百的地方（服务、pod、接口、指标名）用它，原生 `<select>` 只能靠首字母跳，
- * 找一个名字要滚半天。选项只有几个的（排序、步长、对比区间）继续用 `Select`。
- *
- * 费用页整页都用它：那一页的下拉与筛选栏挨在一起，一半是系统弹出的原生菜单、一半是这种卡片式
- * 菜单，看上去像两个产品。
- *
- * `clearable`（默认开）：第一项是「全部」，选中别的值时触发器描成强调色，表示这个筛选正在生效。
- * 关掉它就是一个普通的「选一个」——账期、排行维度这类永远有值，不该一直亮着。
- *
- * `allowCustom`：搜索词不等于任何候选值时，在「全部」下面多一行「筛选「<搜索词>」」，选中就以搜索词
- * 本身为值。候选只是按量取的前 N 个时要开——量小的值（日志页每小时几十行的服务）排不进候选，
- * 不开的话人明知道名字也选不上。
- */
-export function Combobox({
-  value,
-  options,
-  onChange,
-  placeholder = '全部',
-  searchPlaceholder = '输入筛选…',
-  emptyText = '没有匹配项',
-  className,
-  title,
-  disabled,
-  loading,
-  mono,
-  clearable = true,
-  allowCustom = false,
-  variant = 'default',
-  trigger,
-  size = 'md',
-  floating = false,
-  onOpenChange,
-}: {
-  value: string
+/** 单选时 `value` 是一个值（'' 为不选），多选时是一组值（空数组为不选） */
+type ComboValue = { multiple?: false; value: string; onChange: (v: string) => void } | { multiple: true; value: string[]; onChange: (v: string[]) => void }
+
+export type ComboboxProps = ComboValue & {
   options: ComboOption[]
-  onChange: (v: string) => void
   /** 菜单开合时通知调用方。候选值要现查的（表头筛选），据此在点开时才发请求 */
   onOpenChange?: (open: boolean) => void
   /** 空值那一项的文案，也是没选时按钮上的字 */
@@ -619,7 +587,50 @@ export function Combobox({
    * 它定位、照样被它裁掉。对话框的水平居中因此用 `mx-auto`，不用 `-translate-x-1/2`
    */
   floating?: boolean
-}) {
+}
+
+/**
+ * 带搜索的下拉。选项上百的地方（服务、pod、接口、指标名）用它，原生 `<select>` 只能靠首字母跳，
+ * 找一个名字要滚半天。选项只有几个的（排序、步长、对比区间）继续用 `Select`。
+ *
+ * 费用页整页都用它：那一页的下拉与筛选栏挨在一起，一半是系统弹出的原生菜单、一半是这种卡片式
+ * 菜单，看上去像两个产品。
+ *
+ * `clearable`（默认开）：第一项是「全部」，选中别的值时触发器描成强调色，表示这个筛选正在生效。
+ * 关掉它就是一个普通的「选一个」——账期、排行维度这类永远有值，不该一直亮着。
+ *
+ * `allowCustom`：搜索词不等于任何候选值时，在「全部」下面多一行「筛选「<搜索词>」」，选中就以搜索词
+ * 本身为值。候选只是按量取的前 N 个时要开——量小的值（日志页每小时几十行的服务）排不进候选，
+ * 不开的话人明知道名字也选不上。
+ *
+ * `multiple`：多选。`value` / `onChange` 换成数组，选项前带勾选框，点一项只勾上或取消、菜单不收，
+ * 「全部」那一项清空全部。已选但不在候选里的值（候选换了一批、或是自定义输入的）排在最前，
+ * 否则勾上之后就再也取消不掉。
+ */
+export function Combobox(props: ComboboxProps) {
+  const {
+    options,
+    placeholder = '全部',
+    searchPlaceholder = '输入筛选…',
+    emptyText = '没有匹配项',
+    className,
+    title,
+    disabled,
+    loading,
+    mono,
+    clearable = true,
+    allowCustom = false,
+    variant = 'default',
+    trigger,
+    size = 'md',
+    floating = false,
+    onOpenChange,
+  } = props
+  // 单选也按「选中的一组值」处理，下面只认 picked
+  const multiple = props.multiple === true
+  const raw = props.value
+  const picked = useMemo(() => (Array.isArray(raw) ? raw : raw ? [raw] : []), [raw])
+  const isPicked = (v: string) => (v ? picked.includes(v) : picked.length === 0)
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [cursor, setCursor] = useState(0)
@@ -646,17 +657,23 @@ export function Combobox({
   const optId = (i: number) => `${uid}-opt-${i}`
   const input = useRef<HTMLInputElement>(null)
 
+  // 多选时已选、却不在候选里的值补在最前，见上面的说明
+  const pool = useMemo((): ComboOption[] => {
+    if (!multiple) return options
+    const missing = picked.filter((v) => !options.some((o) => o.value === v)).map((v) => ({ value: v }))
+    return missing.length ? [...missing, ...options] : options
+  }, [multiple, picked, options])
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase()
-    const hit = needle ? options.filter((o) => (o.label ?? o.value).toLowerCase().includes(needle) || o.value.toLowerCase().includes(needle)) : options
+    const hit = needle ? pool.filter((o) => (o.label ?? o.value).toLowerCase().includes(needle) || o.value.toLowerCase().includes(needle)) : pool
     // 自定义那一行排在候选前面：候选可能上百条，放后面会被 MAX_COMBO_ROWS 截掉
     const typed = q.trim()
-    const custom = allowCustom && typed && !options.some((o) => o.value === typed) ? [{ value: typed, label: `筛选「${typed}」`, note: '不在候选中' }] : []
+    const custom = allowCustom && typed && !pool.some((o) => o.value === typed) ? [{ value: typed, label: `筛选「${typed}」`, note: '不在候选中' }] : []
     // 空值那一项（「全部服务」之类）始终排在最前，且不参与筛选
     return [...(clearable ? [{ value: '', label: placeholder }] : []), ...custom, ...hit]
-  }, [options, q, clearable, placeholder, allowCustom])
+  }, [pool, q, clearable, placeholder, allowCustom])
   const capped = shown.slice(0, MAX_COMBO_ROWS)
-  const current = options.find((o) => o.value === value)
+  const labelOf = (v: string) => options.find((o) => o.value === v)?.label ?? v
 
   useEffect(() => {
     if (!open) return
@@ -703,7 +720,7 @@ export function Combobox({
     setAnchor(rect ? { top: rect.bottom, left: rect.left, right: window.innerWidth - rect.right, width: rect.width } : null)
     setQ('')
     // 清了搜索词，高亮直接按未筛选的列表算（clearable 的话前面还多一行「全部」）
-    const idx = options.findIndex((o) => o.value === value) + (clearable ? 1 : 0)
+    const idx = pool.findIndex((o) => o.value === picked[0]) + (clearable ? 1 : 0)
     setCursor(idx > 0 && idx < MAX_COMBO_ROWS ? idx : 0)
     setOpen(true)
   }
@@ -719,8 +736,17 @@ export function Combobox({
     if (backToTrigger) triggerRef.current?.focus()
   }
   const commit = (v: string) => {
-    onChange(v)
-    close()
+    if (!props.multiple) {
+      props.onChange(v)
+      return close()
+    }
+    // 多选：「全部」清空并收起；其余只勾上或取消，菜单留着接着选。自定义输入的值加上后清掉搜索词
+    if (!v) {
+      props.onChange([])
+      return close()
+    }
+    props.onChange(picked.includes(v) ? picked.filter((x) => x !== v) : [...picked, v])
+    if (!pool.some((o) => o.value === v)) setQ('')
   }
   /** 往下走 n 行（负数往上），到头绕回去 */
   const move = (n: number) => setCursor((c) => (capped.length ? (((c + n) % capped.length) + capped.length) % capped.length : 0))
@@ -774,18 +800,20 @@ export function Combobox({
                 size === 'sm' ? 'h-8 text-xs' : 'h-9 text-sm',
               ),
           // 只有「可清空的筛选」选了值才亮：它表示这一项正在收窄结果
-          value && clearable && (inline ? 'text-accent hover:text-accent' : 'border-accent text-accent'),
+          picked.length > 0 && clearable && (inline ? 'text-accent hover:text-accent' : 'border-accent text-accent'),
         )}
       >
         {inline ? (
           <>
             {trigger ?? <FilterIcon className="size-3 shrink-0" aria-hidden />}
-            {value && <span className={cn('min-w-0 truncate font-medium', mono && 'mono')}>{current?.label ?? value}</span>}
+            {picked.length > 0 && <span className={cn('min-w-0 truncate font-medium', mono && 'mono')}>{labelOf(picked[0])}</span>}
+            {picked.length > 1 && <span className="shrink-0 text-2xs font-medium">+{picked.length - 1}</span>}
           </>
         ) : (
           <>
-            <span className={cn('min-w-0 flex-1 truncate', mono && value && 'mono', !value && 'text-fg')}>
-              {value ? (current?.label ?? value) : placeholder}
+            <span className={cn('min-w-0 flex-1 truncate', mono && picked.length > 0 && 'mono', !picked.length && 'text-fg')}>
+              {picked.length ? labelOf(picked[0]) : placeholder}
+              {picked.length > 1 && ` 等 ${picked.length} 项`}
               {loading && '…'}
             </span>
             <ChevronDownIcon className="size-4 shrink-0 text-muted-fg" />
@@ -839,7 +867,7 @@ export function Combobox({
               />
             </div>
           </div>
-          <div ref={listBox} id={listId} role="listbox" aria-label={title ?? placeholder} className="max-h-72 overflow-auto py-1">
+          <div ref={listBox} id={listId} role="listbox" aria-label={title ?? placeholder} aria-multiselectable={multiple || undefined} className="max-h-72 overflow-auto py-1">
             {capped.map((o, i) => (
               /*
                * 选项是 `div role="option"`，不是 `button role="option"`：ARIA in HTML 明说
@@ -852,16 +880,28 @@ export function Combobox({
                 key={o.value || '__all__'}
                 id={optId(i)}
                 role="option"
-                aria-selected={o.value === value}
+                aria-selected={isPicked(o.value)}
                 tabIndex={-1}
                 onMouseEnter={() => setCursor(i)}
                 onClick={() => commit(o.value)}
                 className={cn(
                   'flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-xs',
                   i === cursor && 'bg-accent-soft',
-                  o.value === value && 'font-semibold text-accent',
+                  isPicked(o.value) && 'font-semibold text-accent',
                 )}
               >
+                {multiple && (
+                  <span
+                    aria-hidden
+                    className={cn(
+                      'flex size-3.5 shrink-0 items-center justify-center rounded-sm border',
+                      o.value && isPicked(o.value) ? 'border-accent bg-accent text-accent-fg' : 'border-input',
+                      !o.value && 'invisible',
+                    )}
+                  >
+                    {o.value && isPicked(o.value) && <CheckIcon className="size-3" />}
+                  </span>
+                )}
                 <span className={cn('min-w-0 flex-1 truncate', mono && o.value && 'mono')}>{o.label ?? o.value ?? ''}</span>
                 {o.note && <span className="shrink-0 text-2xs text-muted-fg">{o.note}</span>}
               </div>

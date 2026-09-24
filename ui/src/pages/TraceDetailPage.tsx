@@ -191,7 +191,8 @@ export function TraceDetailPage() {
   }, [filterDims, filterKey])
   const shownLogs = useMemo(() => spanLogs.filter((r) => matchDims(r, filterDims, dimFilter)), [spanLogs, filterDims, dimFilter])
   const colFilters = useMemo(() => {
-    const out: Record<string, ColFilter> = {}
+    // 这里都是单选：手机上那一排下拉直接拿它的 onChange 用
+    const out: Record<string, Extract<ColFilter, { multiple?: false }>> = {}
     for (const d of filterDims) {
       // 选项和条数按「其他列的筛选都生效」算：选了服务之后 pod 的下拉只剩这个服务的 pod
       const counts = new Map<string, number>()
