@@ -212,7 +212,11 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = self.status();
         let kind = self.kind();
-        if status.is_server_error() {
+        if let Error::Source { .. } = &self {
+            // 数据源的失败多半是模型写的查询不对（超时、语法、表不存在），是正常的试错，
+            // 不是 opdash 的故障；打成 ERROR 会让告警误报。调用处已经各记了一条
+            tracing::warn!(status = status.as_u16(), error = %self, "数据源请求失败");
+        } else if status.is_server_error() {
             tracing::error!(status = status.as_u16(), error = %self, "request failed");
         } else {
             tracing::debug!(status = status.as_u16(), error = %self, "request rejected");
