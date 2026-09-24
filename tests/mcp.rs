@@ -552,6 +552,200 @@ async fn cost_tools_speak_in_billing_periods() {
     assert!(out.as_str().unwrap_or_default().contains("YYYY-MM"), "{out}");
 }
 
+/// 写一份归属规则到临时文件，返回路径。
+fn alloc_file(body: &str) -> String {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "opdash-test-mcp-alloc-{}-{}.toml",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&path, body).expect("写归属规则");
+    path.to_string_lossy().into_owned()
+}
+
+const ALLOC: &str = r#"
+lines = ["甲线", "乙线", "公共"]
+unmatched = "公共"
+
+[[rules]]
+name = "甲线专用"
+product = ["云服务器 ECS"]
+to = "甲线"
+
+[[rules]]
+name = "存储"
+product = ["对象存储"]
+split = { "甲线" = 1, "乙线" = 1 }
+"#;
+
+/// 业务线分摊：默认只看当前一个账期、按日度账单算日均，再推出下个月的预估；未归属的钱
+/// 计入了别的线时要说清楚别重复相加。
+#[tokio::test]
+async fn cost_allocation_gives_lines_daily_average_and_estimate() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC)]).await;
+    fake.respond_to(
+        "GROUP BY _rule, _product, _bucket, _period",
+        concat!(
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":300}"#,
+            "\n",
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-21","period":"2026-09","amount":300}"#,
+            "\n",
+            r#"{"rule":1,"product":"对象存储","bucket":"2026-09-21","period":"2026-09","amount":200}"#,
+            "\n",
+            r#"{"rule":-1,"product":"短信","bucket":"2026-09-21","period":"2026-09","amount":200}"#,
+            "\n",
+        ),
+    );
+
+    let (err, out) = call_tool(
+        &app,
+        "cost_allocation",
+        json!({ "to": "2026-09", "provider": "alicloud", "limit": 1 }),
+    )
+    .await;
+    assert!(!err, "{out}");
+    assert_eq!(out["from"], "2026-09", "默认只看一个账期: {out}");
+    assert_eq!(out["granularity"], "daily");
+    assert_eq!(out["total"], 1000.0);
+    // 两天的账单：日均 500，2026-10 有 31 天
+    assert_eq!(out["daily"], 500.0);
+    assert_eq!(out["estimate"]["period"], "2026-10");
+    assert_eq!(out["estimate"]["amount"], 15500.0);
+
+    let line = |name: &str| {
+        out["lines"].as_array().unwrap().iter().find(|l| l["name"] == name).cloned().unwrap()
+    };
+    // 甲线 = 专用的 600 + 存储的一半
+    assert_eq!(line("甲线")["amount"], 700.0);
+    assert_eq!(line("甲线")["share_pct"], 70.0);
+    assert_eq!(line("甲线")["estimate"], 350.0 * 31.0);
+    // limit 管的是每条线列几个产品，其余的只报个数
+    assert_eq!(line("甲线")["products"].as_array().unwrap().len(), 1);
+    assert_eq!(line("甲线")["products"][0]["rule"], "甲线专用");
+    assert_eq!(line("甲线")["more_products"], 1);
+    // 单个账期不附月度拆分
+    assert!(line("甲线").get("by_period").is_none(), "{out}");
+    assert_eq!(out["unmatched"]["amount"], 200.0);
+    assert_eq!(out["unmatched"]["into"], "公共");
+    assert!(out["notes"].to_string().contains("别再与各业务线相加"), "{out}");
+
+    // 单个账期读日度表
+    let q = sql(&fake).into_iter().find(|s| s.contains("_rule, _product")).unwrap();
+    assert!(q.contains("alicloud_bill_daily"), "{q}");
+
+    // 业务线写错：把有哪些线告诉模型
+    fake.respond_to(
+        "GROUP BY _rule, _product, _bucket, _period",
+        r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09-20","period":"2026-09","amount":300}"#,
+    );
+    let (err, out) = call_tool(
+        &app,
+        "cost_allocation",
+        json!({ "to": "2026-09", "provider": "alicloud", "line": "丙线" }),
+    )
+    .await;
+    assert!(err, "{out}");
+    assert!(out.as_str().unwrap().contains("甲线"), "{out}");
+}
+
+/// 跨账期时改读月度账单：日度表大几十倍，按月拆也用不上日粒度。代价是没有日均和预估，要说明。
+#[tokio::test]
+async fn cost_allocation_over_several_months_reads_the_monthly_table() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &["--bill-alloc", &alloc_file(ALLOC)]).await;
+    fake.respond_to(
+        "GROUP BY _rule, _product, _bucket, _period",
+        concat!(
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-08","period":"2026-08","amount":100}"#,
+            "\n",
+            r#"{"rule":0,"product":"云服务器 ECS","bucket":"2026-09","period":"2026-09","amount":300}"#,
+            "\n",
+        ),
+    );
+    let (err, out) = call_tool(
+        &app,
+        "cost_allocation",
+        json!({ "from": "2026-08", "to": "2026-09", "provider": "alicloud", "line": "甲线" }),
+    )
+    .await;
+    assert!(!err, "{out}");
+    assert_eq!(out["granularity"], "monthly");
+    let line = &out["lines"][0];
+    assert_eq!(line["by_period"]["2026-08"], 100.0);
+    assert_eq!(line["by_period"]["2026-09"], 300.0);
+    assert!(out.get("estimate").is_none(), "{out}");
+    assert!(out["notes"].to_string().contains("只查一个账期"), "{out}");
+
+    let bodies = sql(&fake);
+    let q = bodies.iter().find(|s| s.contains("_rule, _product")).unwrap();
+    assert!(q.contains("alicloud_bill_monthly"), "{q}");
+    // 日度表一眼都不看：连日度 / 月度账单的核对也省掉
+    assert!(!bodies.iter().any(|s| s.contains("alicloud_bill_daily")), "{bodies:?}");
+}
+
+/// 产品对比：默认截止到两朵云都已出账的那天、与前一日比，按变化额排序；只取比对用得到的
+/// 那几天，不像页面那样一次取两个月。
+#[tokio::test]
+async fn cost_compare_ranks_products_by_change() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_bills(&fake, "", &[]).await;
+
+    // 测试不替换时钟，日期按运行当天（默认时区 Asia/Shanghai）推算
+    let today = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Shanghai).date_naive();
+    let ago = |n: u64| (today - chrono::Days::new(n)).format("%Y-%m-%d").to_string();
+    let row = |product: &str, day: &str, amount: f64| {
+        format!(r#"{{"product":"{product}","bucket":"{day}","amount":{amount}}}"#)
+    };
+    fake.respond_to(
+        "any(if(ProductZh != '', ProductZh, Product)) AS _product",
+        [
+            row("云服务器", &ago(3), 100.0),
+            row("云服务器", &ago(2), 150.0),
+            row("云服务器", &ago(1), 90.0),
+        ]
+        .join("\n"),
+    );
+    fake.respond_to(
+        "any(if(product_name != '', product_name, product_code)) AS _product",
+        [row("对象存储", &ago(3), 50.0), row("对象存储", &ago(2), 40.0)].join("\n"),
+    );
+
+    let (err, out) = call_tool(&app, "cost_compare", json!({})).await;
+    assert!(!err, "{out}");
+    // 阿里云只出到前天：默认比前天与大前天，而不是拿昨天去比一朵还没出账的云
+    assert_eq!(out["current"]["from"], ago(2).as_str(), "{out}");
+    assert_eq!(out["previous"]["to"], ago(3).as_str(), "{out}");
+    assert_eq!(out["current"]["total"], 190.0);
+    assert_eq!(out["previous"]["total"], 150.0);
+    assert_eq!(out["delta"], 40.0);
+    assert_eq!(out["rows"][0]["product"], "云服务器");
+    assert_eq!(out["rows"][0]["delta"], 50.0);
+    assert_eq!(out["rows"][0]["change_pct"], 50.0);
+    assert_eq!(out["rows"][1]["delta"], -10.0);
+    assert!(out.get("notes").is_none(), "{out}");
+
+    // 只往回取 9 天（2 天比对 + 7 天出账余量），日期下界进了 SQL 参数
+    let since = ago(8);
+    let q = fake
+        .requests()
+        .into_iter()
+        .find(|r| r.body.contains("GROUP BY _product, _bucket"))
+        .expect("产品逐日的查询");
+    assert!(
+        q.query().iter().any(|(k, v)| k.starts_with("param_") && *v == since),
+        "{:?}",
+        q.query()
+    );
+
+    // 超出 92 天的对比直接拒掉，并指给能查的工具
+    let (err, out) =
+        call_tool(&app, "cost_compare", json!({ "mode": "30d", "end": ago(40) })).await;
+    assert!(err, "{out}");
+    assert!(out.as_str().unwrap().contains("cost_summary"), "{out}");
+}
+
 /// 没部署 goscan：费用工具整组不列，说明里也讲一句。
 #[tokio::test]
 async fn without_bill_tables_the_cost_tools_are_not_offered() {
@@ -566,7 +760,8 @@ async fn without_bill_tables_the_cost_tools_are_not_offered() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"search_logs"), "{names:?}");
-    for gone in ["cost_summary", "cost_breakdown", "cost_detail"] {
+    for gone in ["cost_summary", "cost_breakdown", "cost_detail", "cost_allocation", "cost_compare"]
+    {
         assert!(!names.contains(&gone), "没有账单表，不该列 {gone}: {names:?}");
     }
     let (_, body) = rpc(&app, request(2, "initialize", json!({}))).await;

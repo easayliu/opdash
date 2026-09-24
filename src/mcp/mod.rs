@@ -84,6 +84,12 @@ impl Mcp {
         }
         let msg = value["error"].as_str().unwrap_or("查询失败").to_owned();
         Err(match value["kind"].as_str() {
+            // 账单没有「几分钟」可缩：它按账期查，读量跟着账期数和日度 / 月度表走
+            Some("too_heavy") | Some("timeout") if path.starts_with("/api/bills/") => {
+                format!(
+                    "{msg}。建议：少看几个账期（先看一个），或用 provider / filters 缩小范围再试"
+                )
+            }
             Some("too_heavy") | Some("timeout") => {
                 format!("{msg}。建议：缩小时间范围（先看几分钟）或加上服务 / 级别等筛选条件再试")
             }
@@ -422,9 +428,10 @@ async fn instructions(mcp: &Mcp) -> String {
         match &schema.bills {
             Some(_) => s.push_str(
                 "\n云账单（goscan 同步的火山引擎 / 阿里云账单）用 cost_summary / cost_breakdown / cost_detail：\
-                 时间参数是**账期**（YYYY-MM），不是 from / to 时间戳；金额默认看应付（payable）。",
+                 时间参数是**账期**（YYYY-MM），不是 from / to 时间戳；金额默认看应付（payable）。\
+                 按业务线看、要日均与月度预估用 cost_allocation；问某天 / 某周比之前多花在哪用 cost_compare（按日期比，最近 92 天）。",
             ),
-            None => s.push_str("\n账单表未启用，费用类工具（cost_summary / cost_breakdown / cost_detail）用不了。"),
+            None => s.push_str("\n账单表未启用，费用类工具（cost_*）用不了。"),
         }
     }
     s.push_str(&format!("\n\n现在是 {}。", fmt_time(mcp.state.now_ms(), tz)));

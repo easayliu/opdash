@@ -108,12 +108,22 @@ fn log_filter_props() -> Vec<(&'static str, Value)> {
     ]
 }
 
-/// 账期和筛选参数，三个费用工具共用。账单没有「最近 1 小时」这种说法，时间参数是账期。
-fn bill_props() -> Vec<(&'static str, Value)> {
+/// 账期和筛选参数，按账期查的费用工具共用。账单没有「最近 1 小时」这种说法，时间参数是账期。
+fn bill_props(default_months: u32) -> Vec<(&'static str, Value)> {
+    [
+        vec![
+            ("from", string("起始账期 YYYY-MM，不给就从 to 往前数 months 个")),
+            ("to", string("结束账期 YYYY-MM，默认当前账期")),
+            ("months", integer(&format!("看最近几个账期，默认 {default_months}，上限 36"))),
+        ],
+        bill_filter_props(),
+    ]
+    .concat()
+}
+
+/// 金额口径、云和维度筛选。`cost_compare` 按日期比、不吃账期，只用这一半。
+fn bill_filter_props() -> Vec<(&'static str, Value)> {
     vec![
-        ("from", string("起始账期 YYYY-MM，不给就从 to 往前数 months 个")),
-        ("to", string("结束账期 YYYY-MM，默认当前账期")),
-        ("months", integer("看最近几个账期，默认 6，上限 36")),
         (
             "amount",
             enumeration(
@@ -441,7 +451,7 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool) -> Vec<Value> {
             "云账单按账期的花费，分云给。回答「这几个月花了多少」「这个月比上个月涨了吗」。granularity=day 改成按天。",
             schema(
                 [
-                    bill_props(),
+                    bill_props(DEFAULT_BILL_MONTHS),
                     vec![(
                         "granularity",
                         enumeration("默认 month（按账期）；day = 按天", &["month", "day"]),
@@ -473,7 +483,7 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool) -> Vec<Value> {
                             ],
                         ),
                     )],
-                    bill_props(),
+                    bill_props(DEFAULT_BILL_MONTHS),
                     vec![("limit", integer("默认 20，上限 200"))],
                 ]
                 .concat(),
@@ -489,11 +499,50 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool) -> Vec<Value> {
                         ("provider", enumeration("哪朵云，默认挑一张有的表", &["volcengine", "alicloud"])),
                         ("granularity", enumeration("阿里云专用：monthly（默认）/ daily", &["monthly", "daily"])),
                     ],
-                    bill_props(),
+                    bill_props(DEFAULT_BILL_MONTHS),
                     vec![
                         ("limit", integer("默认 30，上限 1000")),
                         ("offset", integer("翻页")),
                     ],
+                ]
+                .concat(),
+                &[],
+            ),
+        ),
+        tool(
+            "cost_allocation",
+            "按部署方配置的归属规则把账单摊到业务线：各线金额、日均、月度预估、由哪些产品构成，以及没写进规则的钱。回答「哪条业务线最贵」「下个月大概花多少」。没配规则时只给按产品的日均与预估。",
+            schema(
+                [
+                    bill_props(1),
+                    vec![
+                        ("days", integer("日均只按最近 N 天算（1~366），不给 = 所选账期全部")),
+                        ("estimate", string("预估哪个账期 YYYY-MM，默认 to 的下一个月")),
+                        ("line", string("只看这条业务线")),
+                        ("limit", integer("每组列前几个产品，默认 10，上限 100")),
+                    ],
+                ]
+                .concat(),
+                &[],
+            ),
+        ),
+        tool(
+            "cost_compare",
+            "按产品比两段等长日期的花费：某天与前一天、与上周同日，或近 N 天与前 N 天，按变化额排序。回答「昨天为什么贵了」「这周比上周多在哪」。只含有日度账单的云、最近 92 天。",
+            schema(
+                [
+                    vec![
+                        (
+                            "mode",
+                            enumeration(
+                                "默认 day = 与前一日比；week = 与上周同日比；7d / 14d / 30d = 近 N 天与前 N 天",
+                                &["day", "week", "7d", "14d", "30d"],
+                            ),
+                        ),
+                        ("end", string("截止日 YYYY-MM-DD，默认各云都已出账的最后一天")),
+                    ],
+                    bill_filter_props(),
+                    vec![("limit", integer("默认 20，上限 200"))],
                 ]
                 .concat(),
                 &[],
@@ -525,7 +574,7 @@ fn source_of(name: &str) -> &'static str {
         "search_logs" | "log_histogram" | "log_facets" | "log_context" => "日志表",
         "list_metrics" | "query_metric" | "metric_exemplars" | "metric_events" => "指标表",
         "list_attrs" => "span 表 / 指标表",
-        "cost_summary" | "cost_breakdown" | "cost_detail" => "账单表",
+        name if BILL_TOOLS.contains(&name) => "账单表",
         _ => "span 表",
     }
 }
@@ -535,7 +584,11 @@ const METRIC_TOOLS: &[&str] =
     &["list_metrics", "query_metric", "metric_events", "metric_exemplars"];
 
 /// 账单表（goscan）没启用时要拿掉的工具。
-const BILL_TOOLS: &[&str] = &["cost_summary", "cost_breakdown", "cost_detail"];
+const BILL_TOOLS: &[&str] =
+    &["cost_summary", "cost_breakdown", "cost_detail", "cost_allocation", "cost_compare"];
+
+/// 按账期查的费用工具默认看几个账期，与费用页一致。
+const DEFAULT_BILL_MONTHS: u32 = crate::api::bills::DEFAULT_RANGE_MONTHS as u32;
 
 // ---------------------------------------------------------------------------------------------
 // 参数读取
@@ -953,6 +1006,8 @@ pub async fn call(
         "cost_summary" => cost_summary(mcp, &a).await,
         "cost_breakdown" => cost_breakdown(mcp, &a).await,
         "cost_detail" => cost_detail(mcp, &a).await,
+        "cost_allocation" => cost_allocation(mcp, &a).await,
+        "cost_compare" => cost_compare(mcp, &a).await,
         _ => return Err(ToolError::Unknown),
     };
     let value = fit_budget(out.map_err(ToolError::Failed)?, MAX_TOOL_BYTES);
@@ -2184,8 +2239,9 @@ fn current_period(a: &Args<'_>) -> String {
         .to_string()
 }
 
-/// `(from, to)` 两个账期。没给 from 就从 to 往前数 `months` 个（含 to 自己）。
-fn bill_range(a: &Args<'_>) -> R<(String, String)> {
+/// `(from, to)` 两个账期。没给 from 就从 to 往前数 `months` 个（含 to 自己），`months` 也没给
+/// 时数 `default_months` 个。
+fn bill_range(a: &Args<'_>, default_months: u32) -> R<(String, String)> {
     let to = match a.string("to")? {
         Some(v) => crate::query::bills::check_period(&v).map_err(|e| e.user_message())?,
         None => current_period(a),
@@ -2193,25 +2249,39 @@ fn bill_range(a: &Args<'_>) -> R<(String, String)> {
     let from = match a.string("from")? {
         Some(v) => crate::query::bills::check_period(&v).map_err(|e| e.user_message())?,
         None => {
-            let months =
-                a.limit("months", crate::api::bills::DEFAULT_RANGE_MONTHS as u32, 36)? as i32;
+            let months = a.limit("months", default_months, 36)? as i32;
             crate::query::bills::shift_period(&to, -(months - 1)).map_err(|e| e.user_message())?
         }
     };
     Ok((from, to))
 }
 
-/// 账期 + 金额口径 + 云 + 维度筛选，三个费用工具共用的查询串。
+/// 账期 + 金额口径 + 云 + 维度筛选，按账期查的费用工具共用的查询串。
 fn bill_qs(a: &Args<'_>) -> R<Qs> {
-    let (from, to) = bill_range(a)?;
+    let (from, to) = bill_range(a, DEFAULT_BILL_MONTHS)?;
     let mut qs = Qs::new();
-    qs.push("from", &from)
-        .push("to", &to)
-        .push_opt("amount", a.string("amount")?)
-        .push_all("provider", &a.list("provider")?)
-        .push_dims(&a.filters()?)
-        .push_opt("q", a.string("q")?);
+    qs.push("from", &from).push("to", &to);
+    bill_filter_qs(a, &mut qs)?;
     Ok(qs)
+}
+
+/// 金额口径 + 云 + 维度筛选，与 [`bill_filter_props`] 对应。
+fn bill_filter_qs(a: &Args<'_>, qs: &mut Qs) -> R<()> {
+    let dims = a.filters()?;
+    // 账单接口把这几个键当控制参数：写进 filters 会顶掉（或冒充）真正的参数，
+    // 比如 filters.days 会悄悄变成「日均只算最近几天」
+    if let Some((key, _)) =
+        dims.iter().find(|(k, _)| crate::api::bills::CONTROL_KEYS.contains(&k.as_str()))
+    {
+        return Err(format!(
+            "filters 里不能用 {key:?}：它是参数不是维度；维度是 product / item / region / zone / account / instance / project / subscription / currency"
+        ));
+    }
+    qs.push_opt("amount", a.string("amount")?)
+        .push_all("provider", &a.list("provider")?)
+        .push_dims(&dims)
+        .push_opt("q", a.string("q")?);
+    Ok(())
 }
 
 /// 各云的分摊平铺进同一个对象里：`{"volcengine": 1.2, "alicloud": 3.4}` 比嵌一层
@@ -2352,6 +2422,454 @@ async fn cost_detail(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     }))
 }
 
+/// 成本归属：业务线 → 金额 / 日均 / 月度预估 / 产品构成，与费用页的分析视图同一个接口。
+///
+/// 查询开销上的两处取舍：
+///
+/// * 默认只看**一个**账期（其余费用工具默认 6 个）。分析要按天拆，读的是阿里云的日度表，扫描量
+///   与账期数成正比；而「哪条线贵、下个月花多少」看当月就够了。
+/// * 跨账期、又没要「最近 N 天」时改用月度账单（`granularity=monthly`）：日度表的行数是月度表的
+///   几十倍，按月拆本就用不上日粒度，还顺带省掉日度 / 月度账单互相核对的那两条查询。代价是
+///   没有阿里云的日均，预估也就给不出，结果里会注明。
+async fn cost_allocation(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let (from, to) = bill_range(a, 1)?;
+    let days = a.u32("days")?;
+    let estimate = match a.string("estimate")? {
+        Some(v) => crate::query::bills::check_period(&v).map_err(|e| e.user_message())?,
+        None => crate::query::bills::shift_period(&to, 1).map_err(|e| e.user_message())?,
+    };
+    let limit = a.limit("limit", 10, 100)? as usize;
+    let only = a.string("line")?;
+    let multi = from != to;
+    let monthly = multi && days.is_none();
+
+    let mut qs = Qs::new();
+    qs.push("from", &from).push("to", &to);
+    bill_filter_qs(a, &mut qs)?;
+    qs.push_opt("days", days.map(|d| d.to_string()));
+    if monthly {
+        qs.push("granularity", "monthly");
+    }
+    let body = mcp.get("/api/bills/allocation", &qs.finish()).await?;
+
+    let nights = f64::from(crate::api::bills::days_in_period(&estimate));
+    // 月度预估 = 后付费日均 × 目标月天数 + 已摊到该月的预付费，与分析视图同一算法。没有日均时
+    // 不给：只剩摊销的那个数看着像预估，其实缺了大头
+    let project = |v: &Value| -> Option<f64> {
+        let daily = v["daily"].as_f64()?;
+        let amortized = v["amortized_by_period"][estimate.as_str()].as_f64().unwrap_or(0.0);
+        Some(round(daily * nights + amortized, 2))
+    };
+
+    // 月度拆分：同一条业务线在两朵云、两种付费方式下各有一行，这里合成一行。`None` 是没命中
+    // 规则、配置里也没给去处的那部分
+    let mut by_period: BTreeMap<Option<String>, BTreeMap<String, f64>> = BTreeMap::new();
+    if multi {
+        for r in arr(&body["monthly"]) {
+            let line = r["line"].as_str().map(str::to_owned);
+            for (period, v) in r["by_period"].as_object().into_iter().flatten() {
+                *by_period.entry(line.clone()).or_default().entry(period.clone()).or_default() +=
+                    v.as_f64().unwrap_or(0.0);
+            }
+        }
+    }
+
+    // `with_estimate`：没配规则时按产品给预估（日均 × 天数）；业务线里的产品行只列构成，
+    // 预估看业务线那一级
+    let products_of = |items: &Value, with_estimate: bool| -> (Vec<Value>, usize) {
+        let items = arr(items);
+        let rows = items
+            .iter()
+            .take(limit)
+            .map(|i| {
+                let mut row = Map::new();
+                row.insert("product".into(), i["product"].clone());
+                if let Some(rule) = i["rule"].as_str() {
+                    row.insert("rule".into(), json!(rule));
+                }
+                row.insert("amount".into(), json!(round(f64_of(i, "amount"), 2)));
+                if let Some(daily) = i["daily"].as_f64() {
+                    row.insert("daily".into(), json!(round(daily, 2)));
+                    if with_estimate {
+                        row.insert("estimate".into(), json!(round(daily * nights, 2)));
+                    }
+                }
+                if i["prepaid"].as_bool() == Some(true) {
+                    row.insert("prepaid".into(), json!(true));
+                }
+                Value::Object(row)
+            })
+            .collect();
+        (rows, items.len().saturating_sub(limit))
+    };
+    let shape_line = |l: &Value, periods: Option<&BTreeMap<String, f64>>| -> Value {
+        let mut row = Map::new();
+        row.insert("name".into(), l["name"].clone());
+        row.insert("amount".into(), json!(round(f64_of(l, "amount"), 2)));
+        row.insert("share_pct".into(), json!(pct(f64_of(l, "share"))));
+        if let Some(daily) = l["daily"].as_f64() {
+            row.insert("daily".into(), json!(round(daily, 2)));
+        }
+        let amortized = f64_of(l, "amortized");
+        if amortized != 0.0 {
+            row.insert("amortized".into(), json!(round(amortized, 2)));
+        }
+        if let Some(v) = project(l) {
+            row.insert("estimate".into(), json!(v));
+        }
+        if let Some(periods) = periods {
+            let periods: Map<String, Value> =
+                periods.iter().map(|(p, v)| (p.clone(), json!(round(*v, 2)))).collect();
+            row.insert("by_period".into(), Value::Object(periods));
+        }
+        let (products, more) = products_of(&l["items"], false);
+        row.insert("products".into(), json!(products));
+        if more > 0 {
+            row.insert("more_products".into(), json!(more));
+        }
+        Value::Object(row)
+    };
+
+    const UNMATCHED: &str = "未归属";
+    let all_lines = arr(&body["lines"]);
+    if let Some(name) = &only
+        && name != UNMATCHED
+        && !all_lines.iter().any(|l| l["name"] == name.as_str())
+    {
+        let names: Vec<&str> = all_lines.iter().filter_map(|l| l["name"].as_str()).collect();
+        return Err(format!(
+            "没有叫 {name:?} 的业务线（或它在这段时间里没有费用）；有费用的业务线：{}，另有「{UNMATCHED}」",
+            if names.is_empty() { "（无）".to_owned() } else { names.join("、") }
+        ));
+    }
+    let wanted = |name: &str| only.as_deref().is_none_or(|o| o == name);
+    let lines: Vec<Value> = all_lines
+        .iter()
+        .filter(|l| wanted(l["name"].as_str().unwrap_or("")))
+        .map(|l| shape_line(l, by_period.get(&l["name"].as_str().map(str::to_owned))))
+        .collect();
+
+    let configured = body["configured"].as_bool().unwrap_or(false);
+    let prepaid = body["prepaid"].as_bool().unwrap_or(false);
+    let mut out = Map::new();
+    out.insert("from".into(), body["from"].clone());
+    out.insert("to".into(), body["to"].clone());
+    out.insert("amount".into(), body["amount"].clone());
+    out.insert("granularity".into(), body["granularity"].clone());
+    if !body["window_days"].is_null() {
+        out.insert("window_days".into(), body["window_days"].clone());
+    }
+    if body["days_by_provider"].as_object().is_some_and(|m| !m.is_empty()) {
+        out.insert("bill_days".into(), body["days_by_provider"].clone());
+    }
+    out.insert("total".into(), json!(round(f64_of(&body, "total"), 2)));
+    if prepaid {
+        out.insert("postpaid".into(), json!(round(f64_of(&body, "postpaid"), 2)));
+        out.insert("amortized".into(), json!(round(f64_of(&body, "amortized"), 2)));
+    }
+    if let Some(daily) = body["daily"].as_f64() {
+        out.insert("daily".into(), json!(round(daily, 2)));
+    }
+    if let Some(v) = project(&body) {
+        out.insert(
+            "estimate".into(),
+            json!({
+                "period": estimate,
+                "amount": v,
+                "method": if prepaid {
+                    "后付费日均 × 该月天数 + 已摊到该月的预付费；假定用量不变"
+                } else {
+                    "日均 × 该月天数；假定用量不变，不含包年包月的一次性支出"
+                },
+            }),
+        );
+    }
+
+    if configured {
+        out.insert("lines".into(), json!(lines));
+        let unmatched = &body["unmatched"];
+        let into = body["unmatched_into"].as_str();
+        if f64_of(unmatched, "amount") != 0.0 && wanted(UNMATCHED) {
+            // 计入了别的业务线时，月度拆分里分不出它自己的那份
+            let periods = if into.is_some() { None } else { by_period.get(&None) };
+            let mut row = shape_line(unmatched, periods);
+            if let Some(into) = into {
+                row["into"] = json!(into);
+            }
+            out.insert("unmatched".into(), row);
+        }
+        if let Some(into) = into {
+            note(
+                &mut out,
+                format!(
+                    "{UNMATCHED}的钱已按配置计入「{into}」，unmatched 单列只为提示还有多少没写进规则，别再与各业务线相加"
+                ),
+            );
+        }
+    } else {
+        let (products, more) = products_of(&body["products"], true);
+        out.insert("products".into(), json!(products));
+        if more > 0 {
+            out.insert("more_products".into(), json!(more));
+        }
+        note(
+            &mut out,
+            "这个部署没配归属规则（--bill-alloc），没有业务线这一层，只给按产品的日均与预估".into(),
+        );
+    }
+
+    if let Some(c) = body["coverage"].as_object() {
+        let (d, m) = (c["daily"].as_f64().unwrap_or(0.0), c["monthly"].as_f64().unwrap_or(0.0));
+        note(
+            &mut out,
+            format!(
+                "{} 的日度账单合计 {d:.2}，只有月度账单 {m:.2} 的 {:.0}%：日度账单没同步全，上面的合计与各业务线金额偏低；按账期的准数用 cost_summary",
+                c["provider"].as_str().unwrap_or(""),
+                if m > 0.0 { d / m * 100.0 } else { 0.0 }
+            ),
+        );
+    }
+    if body["daily"].is_null() {
+        note(
+            &mut out,
+            if monthly {
+                "跨账期时按月度账单统计（扫描量小得多），没有日均，也就没有预估；要日均与预估请只查一个账期，或给 days".into()
+            } else {
+                "有的云只同步了月度账单，算不出日均，也就没有预估".into()
+            },
+        );
+    }
+    Ok(Value::Object(out))
+}
+
+/// 产品费用对比最多往回看几天，与 `/api/bills/product-days` 的上限一致。
+const MAX_COMPARE_DAYS: i64 = 92;
+
+/// 不给截止日时多取几天。截止日默认是各云都已出账的最后一天，日度账单通常滞后一两天，留一周
+/// 余量基本用不着补查第二次。
+const COMPARE_LAG_DAYS: i64 = 7;
+
+/// 按产品比两段等长的日期，口径与分析视图的「产品费用对比」一致（见 `ui/src/lib/productDays.ts`）。
+///
+/// 查询开销：接口以今天为终点往回取 `days` 天、按「产品 + 日期」汇总，扫描量与天数成正比。
+/// 页面固定取 62 天，这里只取比对真正用得到的那几天——「与前一日比」取 9 天，而不是两个月。
+async fn cost_compare(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
+    let mode = a.string("mode")?.unwrap_or_else(|| "day".to_owned());
+    // （每段几天，对比段往前挪几天）
+    let (width, back): (i64, i64) = match mode.as_str() {
+        "day" => (1, 1),
+        "week" => (1, 7),
+        "7d" => (7, 7),
+        "14d" => (14, 14),
+        "30d" => (30, 30),
+        other => return Err(format!("mode 只能是 day / week / 7d / 14d / 30d，不是 {other:?}")),
+    };
+    let limit = a.limit("limit", 20, 200)? as usize;
+    let today = chrono::DateTime::from_timestamp_millis(a.now_ms)
+        .unwrap_or_else(chrono::Utc::now)
+        .with_timezone(&a.tz)
+        .date_naive();
+    let end = match a.string("end")? {
+        Some(v) => {
+            let d = chrono::NaiveDate::parse_from_str(&v, "%Y-%m-%d")
+                .map_err(|_| format!("end 应为 YYYY-MM-DD，不是 {v:?}"))?;
+            if d > today {
+                return Err(format!("end 不能晚于今天（{today}）"));
+            }
+            Some(d)
+        }
+        None => None,
+    };
+    // 截止到 `end` 时，从对比段第一天到今天一共几天——接口的 days 就是它
+    let span = |end: chrono::NaiveDate| (today - end).num_days() + back + width;
+    let too_far = |need: i64| {
+        format!(
+            "这次对比要用到 {} 天前的账单，逐日对比只支持最近 {MAX_COMPARE_DAYS} 天；更早的请用 cost_summary（granularity=day）或按账期的 cost_breakdown",
+            need - 1
+        )
+    };
+
+    let mut filter_qs = Qs::new();
+    bill_filter_qs(a, &mut filter_qs)?;
+    let filter_qs = filter_qs.finish();
+    let fetch = |days: i64| {
+        let qs = if filter_qs.is_empty() {
+            format!("days={days}")
+        } else {
+            format!("{filter_qs}&days={days}")
+        };
+        async move { mcp.get("/api/bills/product-days", &qs).await }
+    };
+
+    let mut fetched = match end {
+        Some(e) => span(e),
+        None => back + width + COMPARE_LAG_DAYS,
+    };
+    if fetched > MAX_COMPARE_DAYS {
+        return Err(too_far(fetched));
+    }
+    let mut pd = fetch(fetched).await?;
+    let monthly_only: Vec<String> =
+        arr(&pd["monthly_only"]).iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+    let lasts: BTreeMap<String, chrono::NaiveDate> = pd["last_by_provider"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| {
+            let d = chrono::NaiveDate::parse_from_str(v.as_str()?, "%Y-%m-%d").ok()?;
+            Some((k.clone(), d))
+        })
+        .collect();
+
+    let end = match end {
+        Some(e) => e,
+        None => {
+            let (Some(&earliest), Some(&latest)) = (lasts.values().min(), lasts.values().max())
+            else {
+                let mut out = json!({ "mode": mode, "rows": [] });
+                note(
+                    out.as_object_mut().expect("json 对象"),
+                    format!(
+                        "最近 {fetched} 天没有日度账单{}",
+                        if monthly_only.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "；{} 只同步了月度账单，不在逐日对比之列",
+                                monthly_only.join("、")
+                            )
+                        }
+                    ),
+                );
+                return Ok(out);
+            };
+            // 默认截止到各云都已出账、且不是今天的那一天（今天的账单必然没出齐）。某朵云的日度
+            // 账单停在很久以前时退而取最新的一天，出账晚的那朵云记进 pending
+            let yesterday = today - chrono::Days::new(1);
+            let aligned = earliest.min(yesterday);
+            let end =
+                if span(aligned) <= MAX_COMPARE_DAYS { aligned } else { latest.min(yesterday) };
+            if span(end) > MAX_COMPARE_DAYS {
+                return Err(too_far(span(end)));
+            }
+            if span(end) > fetched {
+                fetched = span(end);
+                pd = fetch(fetched).await?;
+            }
+            end
+        }
+    };
+
+    let days: Vec<&str> = arr(&pd["days"]).iter().filter_map(Value::as_str).collect();
+    let offset = (today - end).num_days() as usize;
+    let Some(i) = days.len().checked_sub(1 + offset) else {
+        return Err(format!("接口给回的日期不够（{} 天），比不到 {end}", days.len()));
+    };
+    let (width, back) = (width as usize, back as usize);
+    let Some(cur_start) = (i + 1).checked_sub(width) else {
+        return Err(format!("接口给回的日期不够（{} 天），比不到 {end}", days.len()));
+    };
+    let cur = (cur_start, i);
+    let Some(prev_start) = cur.0.checked_sub(back) else {
+        return Err(format!("接口给回的日期不够（{} 天），比不到 {end}", days.len()));
+    };
+    let prev = (prev_start, cur.1 - back);
+
+    let rows = arr(&pd["rows"]);
+    let amounts: Vec<Vec<f64>> = rows
+        .iter()
+        .map(|r| arr(&r["amounts"]).iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
+        .collect();
+    let sum = |a: &[f64], (s, e): (usize, usize)| a.get(s..=e).map_or(0.0, |x| x.iter().sum());
+    // 一天一分钱账单都没有的日子，多半是那几天的日度账单没同步
+    let gaps = |(s, e): (usize, usize)| -> Vec<&str> {
+        (s..=e)
+            .filter(|&k| amounts.iter().all(|a| a.get(k).is_none_or(|v| *v == 0.0)))
+            .map(|k| days[k])
+            .collect()
+    };
+    let (cur_gaps, prev_gaps) = (gaps(cur), gaps(prev));
+    let cur_days = width - cur_gaps.len();
+    let prev_days = width - prev_gaps.len();
+    // 两段有账单的天数不同时合计没法直接比，改按各自的天数折成日均；单日的比法没有折算的余地
+    let per_day = width > 1 && cur_days > 0 && prev_days > 0 && cur_days != prev_days;
+    let scale = |v: f64, n: usize| if per_day { v / n as f64 } else { v };
+
+    let mut diffs: Vec<(f64, Value)> = rows
+        .iter()
+        .zip(&amounts)
+        .filter_map(|(r, a)| {
+            let c = scale(sum(a, cur), cur_days);
+            let p = scale(sum(a, prev), prev_days);
+            if c == 0.0 && p == 0.0 {
+                return None;
+            }
+            let row = json!({
+                "provider": r["provider"],
+                "product": r["product"],
+                "current": round(c, 2),
+                "previous": round(p, 2),
+                "delta": round(c - p, 2),
+                "change_pct": change_pct(c, p),
+            });
+            Some((c - p, row))
+        })
+        .collect();
+    let current_total: f64 = amounts.iter().map(|a| scale(sum(a, cur), cur_days)).sum();
+    let previous_total: f64 = amounts.iter().map(|a| scale(sum(a, prev), prev_days)).sum();
+    // 按变化额的绝对值排：涨得最多和降得最多的都该排在前面
+    diffs.sort_by(|a, b| b.0.abs().total_cmp(&a.0.abs()));
+    let changed = diffs.len();
+    let shown: Vec<Value> = diffs.into_iter().take(limit).map(|(_, row)| row).collect();
+
+    let range = |(s, e): (usize, usize), total: f64, gaps: &[&str]| {
+        let mut r = json!({ "from": days[s], "to": days[e], "total": round(total, 2) });
+        if !gaps.is_empty() {
+            r["no_bill_days"] = json!(gaps);
+        }
+        r
+    };
+    let mut out = json!({
+        "mode": mode,
+        "amount": pd["amount"],
+        "basis": if per_day { "daily" } else { "total" },
+        "current": range(cur, current_total, &cur_gaps),
+        "previous": range(prev, previous_total, &prev_gaps),
+        "delta": round(current_total - previous_total, 2),
+        "change_pct": change_pct(current_total, previous_total),
+        "rows": shown,
+    });
+    let map = out.as_object_mut().expect("json 对象");
+    if changed > limit {
+        map.insert("more_products".into(), json!(changed - limit));
+    }
+    if per_day {
+        note(
+            map,
+            format!(
+                "两段有账单的天数不同（{cur_days} 天对 {prev_days} 天），total / current / previous 都已折成日均再比"
+            ),
+        );
+    }
+    let pending: Vec<&str> =
+        lasts.iter().filter(|(_, d)| **d < end).map(|(p, _)| p.as_str()).collect();
+    if !pending.is_empty() {
+        let detail: Vec<String> =
+            pending.iter().map(|p| format!("{p} 只出到 {}", lasts[*p])).collect();
+        note(
+            map,
+            format!(
+                "{}：这些云在本段的账单没出齐，它们的产品看上去的「下降」不是真的下降",
+                detail.join("，")
+            ),
+        );
+    }
+    if !monthly_only.is_empty() {
+        note(map, format!("{} 只同步了月度账单，不在逐日对比之列", monthly_only.join("、")));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2393,11 +2911,13 @@ mod tests {
     ///
     /// 上限从 16k 提到 19k 是因为接了第四种数据源（goscan 的云账单，三个 cost_* 工具，约 3.4k
     /// 字符）——**这是给新数据源的额度，不是给形容词的**：没有账单表的部署一个 cost_* 都不会列。
+    /// 再提到 21.5k 同理：费用加了 cost_allocation / cost_compare 两个工具（约 2.3k 字符），
+    /// 对应分析视图的业务线分摊与产品对比，是新能力的额度。
     #[test]
     fn the_tool_catalog_stays_within_its_token_budget() {
         let json = serde_json::to_string(&list(true, true)).unwrap();
         let chars = json.chars().count();
-        assert!(chars < 19_000, "工具目录 {chars} 字符，超预算了（约 {} token）", chars / 2);
+        assert!(chars < 21_500, "工具目录 {chars} 字符，超预算了（约 {} token）", chars / 2);
         // 单个工具别写成小作文
         for t in list(true, true) {
             let n = t["description"].as_str().unwrap().chars().count();
@@ -2422,7 +2942,7 @@ mod tests {
         );
         // 没部署 goscan 的环境同理：费用工具整组消失，别的一个不少
         let no_bills = names(true, false);
-        assert!(with.contains("cost_summary") && with.contains("cost_detail"));
+        assert!(with.contains("cost_summary") && with.contains("cost_compare"));
         assert_eq!(
             with.difference(&no_bills).cloned().collect::<BTreeSet<_>>(),
             BILL_TOOLS.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),

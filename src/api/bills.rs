@@ -60,7 +60,7 @@ const MAX_BREAKDOWN: u32 = 200;
 const DEFAULT_BREAKDOWN: u32 = 20;
 
 /// 查询串里这些键是控制参数，其余的当维度筛选（`product=云服务器`）解释。
-const CONTROL_KEYS: &[&str] = &[
+pub const CONTROL_KEYS: &[&str] = &[
     "from",
     "to",
     "amount",
@@ -1382,7 +1382,7 @@ const COVERAGE_WARN: f64 = 0.95;
 const MAX_SERVICE_MONTHS: u32 = 120;
 
 /// `YYYY-MM` 这个月有几天。
-fn days_in_period(period: &str) -> u32 {
+pub fn days_in_period(period: &str) -> u32 {
     let (Some(y), Some(m)) = (
         period.get(..4).and_then(|v| v.parse::<i32>().ok()),
         period.get(5..7).and_then(|v| v.parse::<u32>().ok()),
