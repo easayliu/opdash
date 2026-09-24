@@ -683,7 +683,9 @@ function ItemTable({ items, nights, compact, max = Math.max(0, ...items.map((i) 
         </thead>
         <tbody>
           {items.map((item) => (
-            <tr key={`${item.product}-${item.rule ?? ''}`} className="border-b border-border/60 last:border-b-0">
+            // 同一产品常有后付费与「预付费摊销」两行，产品名、规则都一样，key 里不带 prepaid 就重复——
+            // 重复的 key 会让 React 在列表变短（筛选、排序）时留下对不上的旧行
+            <tr key={`${item.product}-${item.rule ?? ''}-${item.prepaid ? 'prepaid' : 'postpaid'}`} className="border-b border-border/60 last:border-b-0">
               <td className="max-w-64 truncate px-3 py-1.5">
                 {item.product}
                 {/* 同一个产品可能由几条规则分别归来，标出这一行是怎么来的 */}
