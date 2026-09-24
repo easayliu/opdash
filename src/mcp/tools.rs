@@ -550,7 +550,7 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool, datasources_enabled: boo
         ),
         tool(
             "trace_db_calls",
-            "一条链路里的全部数据库调用（MySQL / Redis / ES 等的 Client span）：语句、耗时、库名、对端地址；JDBC 参数齐全时给 statement_filled（已代入参数，可直接拿去 db_query 做 EXPLAIN），并标出对应的数据源 source。repeated 列出重复执行的语句，用来认 N+1 查询。",
+            "一条链路里的全部数据库调用（MySQL / Redis / ES 等的 Client span）：语句、耗时、库名、对端地址；JDBC 参数齐全时给 statement_filled（已代入参数，可直接拿去 db_query 做 EXPLAIN），并标出对应的数据源 source。Redis 调用的 database 是该应用用的库号，db_query / db_tables 时原样传给 database。repeated 列出重复执行的语句，用来认 N+1 查询。",
             schema(
                 vec![
                     ("trace_id", string("32 位 hex")),
@@ -591,7 +591,7 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool, datasources_enabled: boo
             schema(
                 vec![
                     ("source", string("数据源名，见 db_sources")),
-                    ("database", string("MySQL / ClickHouse：看哪个库，默认数据源配置的库")),
+                    ("database", string("MySQL / ClickHouse 的库名，Redis 的库号；默认数据源配置的库。Redis 结果里的 keyspace 列出各库号的键数")),
                     ("match", string("MySQL / ClickHouse：表名包含的子串；ES：索引通配符（order-*）；Redis：键的 glob（user:*）")),
                     ("limit", integer("默认 200")),
                 ],
@@ -605,19 +605,19 @@ pub fn list(metrics_enabled: bool, bills_enabled: bool, datasources_enabled: boo
                 vec![
                     ("source", string("数据源名")),
                     ("target", string("表名（可写 库.表）/ ES 索引 / Redis 键")),
-                    ("database", string("MySQL / ClickHouse：target 没带库名时用哪个库")),
+                    ("database", string("MySQL / ClickHouse：target 没带库名时用哪个库；Redis：库号")),
                 ],
                 &["source", "target"],
             ),
         ),
         tool(
             "db_query",
-            "在数据源上执行一条只读查询。MySQL / ClickHouse 写 SQL，只接受 SELECT / WITH / SHOW / DESCRIBE / EXPLAIN（MySQL 在只读事务里执行）；Elasticsearch 写查询 DSL（JSON，须给 index）或 ES SQL；Redis 写一条只读命令，如 HGETALL user:1。先 db_describe 看清列名和索引，大表务必带走索引的 WHERE 和 LIMIT。",
+            "在数据源上执行一条只读查询。MySQL / ClickHouse 写 SQL，只接受 SELECT / WITH / SHOW / DESCRIBE / EXPLAIN（MySQL 在只读事务里执行）；Elasticsearch 写查询 DSL（JSON，须给 index）或 ES SQL；Redis 写一条只读命令，如 HGETALL user:1，库号用 database 给（从 trace_db_calls 的 database 或 db_tables 的 keyspace 得知）。先 db_describe 看清列名和索引，大表务必带走索引的 WHERE 和 LIMIT。",
             schema(
                 vec![
                     ("source", string("数据源名")),
                     ("query", string("SQL / DSL / Redis 命令")),
-                    ("database", string("MySQL / ClickHouse：在哪个库执行，默认数据源配置的库")),
+                    ("database", string("MySQL / ClickHouse 的库名，Redis 的库号；默认数据源配置的库")),
                     ("index", string("Elasticsearch 的 DSL 查询：索引名或通配符")),
                     ("limit", integer("最多返回几行，默认 50，上限是数据源的 max_rows")),
                 ],

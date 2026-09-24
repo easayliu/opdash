@@ -40,26 +40,37 @@ const HEAVY_COLUMNS: &[&str] = &[
     "`links.attributes` AS link_attrs",
 ];
 
-/// 数据库调用的一个属性，新旧两版 OTel 语义约定都认：新名字有值就用新的，否则退回旧的
+/// 数据库调用的一个属性，新旧几版 OTel 语义约定都认：按顺序取第一个有值的
 /// （Java agent 1.x 写 `db.statement` / `db.name`，2.x 起写 `db.query.text` / `db.namespace`）。
+fn db_attr_any(keys: &[&str]) -> String {
+    let (last, rest) = keys.split_last().expect("至少一个属性名");
+    rest.iter().rev().fold(format!("toString(span_attributes.`{last}`)"), |fallback, k| {
+        format!(
+            "if(toString(span_attributes.`{k}`) != '', toString(span_attributes.`{k}`), {fallback})"
+        )
+    })
+}
+
 fn db_attr(new: &str, old: &str) -> String {
-    format!(
-        "if(toString(span_attributes.`{new}`) != '', toString(span_attributes.`{new}`), toString(span_attributes.`{old}`))"
-    )
+    db_attr_any(&[new, old])
 }
 
 /// 数据库调用要取的几列（不含语句本身，语句要截断，单独拼）。
+///
+/// 库名那一列对 Redis 来说是**库号**：新版约定写在 `db.namespace`，老版写在
+/// `db.redis.database_index`。一个 Redis 实例常被不同应用分到不同库号，数据源配置里不固定
+/// 库号，模型就是从这里得知该应用用的是几号库，再原样传给 `db_query` 的 database。
 static DB_COLUMNS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
     [
-        ("db.system.name", "db.system", "db_system"),
-        ("db.namespace", "db.name", "db_name"),
-        ("db.operation.name", "db.operation", "db_operation"),
-        ("db.collection.name", "db.sql.table", "db_collection"),
-        ("server.address", "net.peer.name", "db_server"),
-        ("server.port", "net.peer.port", "db_port"),
+        (&["db.system.name", "db.system"][..], "db_system"),
+        (&["db.namespace", "db.name", "db.redis.database_index"][..], "db_name"),
+        (&["db.operation.name", "db.operation"][..], "db_operation"),
+        (&["db.collection.name", "db.sql.table"][..], "db_collection"),
+        (&["server.address", "net.peer.name"][..], "db_server"),
+        (&["server.port", "net.peer.port"][..], "db_port"),
     ]
     .iter()
-    .map(|(new, old, alias)| format!("{} AS {alias}", db_attr(new, old)))
+    .map(|(keys, alias)| format!("{} AS {alias}", db_attr_any(keys)))
     .collect()
 });
 
@@ -140,6 +151,16 @@ pub struct DbCallRow {
     pub sample_span: String,
     #[serde(deserialize_with = "num::de")]
     pub sample_ms: i64,
+}
+
+#[cfg(test)]
+#[test]
+fn db_attr_falls_back_in_order() {
+    assert_eq!(
+        db_attr_any(&["a", "b", "c"]),
+        "if(toString(span_attributes.`a`) != '', toString(span_attributes.`a`), \
+         if(toString(span_attributes.`b`) != '', toString(span_attributes.`b`), toString(span_attributes.`c`)))"
+    );
 }
 
 /// JDBC 参数的子对象 `{"0":"12","1":"abc"}` → 按下标排好的值。下标不是数字的（别的埋点）

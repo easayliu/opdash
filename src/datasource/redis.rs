@@ -11,7 +11,7 @@
 //! 每次操作单独建一条连接：排障时的调用频率很低，不值得维护一个会断、会过期的长连接。
 
 use redis::aio::MultiplexedConnection;
-use redis::{AsyncConnectionConfig, Client, IntoConnectionInfo, Value as RValue};
+use redis::{AsyncConnectionConfig, Client, ConnectionInfo, IntoConnectionInfo, Value as RValue};
 use serde_json::{Value, json};
 
 use super::{Ctx, Resolved, SlowOpts, Source, Table, bytes_to_json, clip};
@@ -85,7 +85,8 @@ const READ_COMMANDS: &[(&str, &[&str])] = &[
 ];
 
 pub struct Redis {
-    client: Client,
+    /// 连接信息（含默认库号）。按次指定库号时从它改出一份新的，见 [`Redis::conn`]
+    info: ConnectionInfo,
     address: String,
 }
 
@@ -110,15 +111,28 @@ impl Redis {
         }
         info = info.set_redis_settings(settings);
         let address = info.addr().to_string();
-        let client = Client::open(info).map_err(|e| format!("Redis 连接串无效: {e}"))?;
-        Ok(Self { client, address })
+        Client::open(info.clone()).map_err(|e| format!("Redis 连接串无效: {e}"))?;
+        Ok(Self { info, address })
     }
 
-    async fn conn(&self, src: &Source) -> Result<MultiplexedConnection> {
+    /// 建一条连接。`db` 给了就连到这个库号，否则用配置里的默认库号。
+    ///
+    /// 业务上常把不同用途的数据分到不同库号里（线上一个实例用了十几个），`SELECT` 又不在
+    /// 只读白名单里——它会改连接状态，而连接是按次新建的，改了也带不到下一条命令——所以
+    /// 库号作为参数随每次调用给出。
+    async fn conn(&self, src: &Source, db: Option<&str>) -> Result<MultiplexedConnection> {
+        let mut info = self.info.clone();
+        if let Some(db) = db.map(str::trim).filter(|d| !d.is_empty()) {
+            let n: i64 = db.parse().ok().filter(|n| (0..=1024).contains(n)).ok_or_else(|| {
+                Error::bad_request(format!("Redis 的 database 应是库号（0、1、12……），不是 {db:?}"))
+            })?;
+            info = info.clone().set_redis_settings(info.redis_settings().clone().set_db(n));
+        }
+        let client = Client::open(info).map_err(|e| self.err(src, e))?;
         let cfg = AsyncConnectionConfig::new()
             .set_connection_timeout(Some(super::CONNECT_TIMEOUT))
             .set_response_timeout(Some(src.timeout));
-        self.client
+        client
             .get_multiplexed_async_connection_with_config(&cfg)
             .await
             .map_err(|e| self.err(src, e))
@@ -157,9 +171,15 @@ impl Redis {
         cmd.query_async::<RValue>(conn).await.map_err(|e| self.err(src, e))
     }
 
-    pub async fn tables(&self, src: &Source, pattern: Option<&str>, limit: u32) -> Result<Value> {
+    pub async fn tables(
+        &self,
+        src: &Source,
+        database: Option<&str>,
+        pattern: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
         let pattern = pattern.filter(|p| !p.is_empty()).unwrap_or("*");
-        let mut conn = self.conn(src).await?;
+        let mut conn = self.conn(src, database).await?;
         let mut keys: Vec<String> = Vec::new();
         let mut cursor = "0".to_owned();
         let mut rounds = 0;
@@ -213,7 +233,23 @@ impl Redis {
         }
         table.truncated = truncated;
         let dbsize = self.run(src, &mut conn, &["DBSIZE".into()]).await.ok().map(|v| to_json(&v));
-        let mut out = json!({ "pattern": pattern, "keys": table, "dbsize": dbsize });
+        // 各库号有多少键：当前库是空的、数据在别的库号里时，模型看这个就知道该给哪个 database
+        let keyspace = match self.run(src, &mut conn, &["INFO".into(), "keyspace".into()]).await {
+            Ok(v) => parse_keyspace(&value_text(&v)),
+            Err(_) => Table::new(&["database", "keys", "expires"]),
+        };
+        let current = database
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.info.redis_settings().db().to_string());
+        let mut out = json!({
+            "database": current,
+            "pattern": pattern,
+            "keys": table,
+            "dbsize": dbsize,
+            "keyspace": keyspace,
+        });
         if cursor != "0" && !truncated {
             out["note"] = json!(format!(
                 "SCAN 翻了 {rounds} 轮还没翻完整个库，只列出了已经扫到的键；换一个更具体的 match（如 order:123:*）"
@@ -222,8 +258,8 @@ impl Redis {
         Ok(out)
     }
 
-    pub async fn describe(&self, src: &Source, key: &str) -> Result<Value> {
-        let mut conn = self.conn(src).await?;
+    pub async fn describe(&self, src: &Source, key: &str, database: Option<&str>) -> Result<Value> {
+        let mut conn = self.conn(src, database).await?;
         let key_s = key.to_owned();
         let ty = value_text(&self.run(src, &mut conn, &["TYPE".into(), key_s.clone()]).await?);
         if ty == "none" {
@@ -296,10 +332,10 @@ impl Redis {
         }))
     }
 
-    pub async fn query(&self, src: &Source, line: &str) -> Result<Value> {
+    pub async fn query(&self, src: &Source, line: &str, database: Option<&str>) -> Result<Value> {
         let args = split_command(line).map_err(Error::bad_request)?;
         check_command(&args).map_err(Error::bad_request)?;
-        let mut conn = self.conn(src).await?;
+        let mut conn = self.conn(src, database).await?;
         guard_size(self, src, &mut conn, &args).await?;
         tracing::debug!(source = %src.name, command = %clip(line, 300), "数据源查询");
         let v = self.run(src, &mut conn, &args).await?;
@@ -307,7 +343,8 @@ impl Redis {
     }
 
     pub async fn slow(&self, src: &Source, opts: &SlowOpts, ctx: Ctx) -> Result<Value> {
-        let mut conn = self.conn(src).await?;
+        // 慢日志和命令统计是整个实例的，与库号无关
+        let mut conn = self.conn(src, None).await?;
         let mut notes: Vec<String> = Vec::new();
         let mut slowlog = Table::new(&["id", "time", "duration_ms", "command", "client"]);
         match self.run(src, &mut conn, &["SLOWLOG".into(), "GET".into(), "128".into()]).await {
@@ -481,6 +518,26 @@ pub fn check_command(args: &[String]) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// `INFO keyspace` 的 `db12:keys=178599,expires=50847,avg_ttl=…` → 每个库号一行。
+fn parse_keyspace(text: &str) -> Table {
+    let mut t = Table::new(&["database", "keys", "expires"]);
+    for line in text.lines() {
+        let Some((db, rest)) = line.trim().strip_prefix("db").and_then(|l| l.split_once(':'))
+        else {
+            continue;
+        };
+        let field = |k: &str| {
+            rest.split(',')
+                .find_map(|kv| kv.strip_prefix(k)?.strip_prefix('='))
+                .and_then(|v| v.parse::<u64>().ok())
+        };
+        if let Ok(n) = db.parse::<u32>() {
+            t.rows.push(vec![json!(n), json!(field("keys")), json!(field("expires"))]);
+        }
+    }
+    t
+}
+
 /// `INFO commandstats` 的 `cmdstat_get:calls=10,usec=35,usec_per_call=3.50,…` →
 /// (命令, 次数, 每次微秒, 总毫秒)。
 fn parse_commandstats(text: &str) -> Vec<(String, u64, f64, f64)> {
@@ -584,6 +641,17 @@ mod tests {
         assert!(check_command(&args(&["MEMORY", "PURGE"])).is_err());
         assert!(check_command(&args(&["CLIENT", "KILL", "x"])).is_err());
         assert!(check_command(&args(&["OBJECT"])).is_err());
+    }
+
+    #[test]
+    fn parses_keyspace() {
+        let t = parse_keyspace(
+            "# Keyspace\r\ndb0:keys=3,expires=1,avg_ttl=5\r\ndb12:keys=178599,expires=50847,avg_ttl=49828244\r\n",
+        );
+        assert_eq!(
+            t.rows,
+            vec![vec![json!(0), json!(3), json!(1)], vec![json!(12), json!(178599), json!(50847)]]
+        );
     }
 
     #[test]

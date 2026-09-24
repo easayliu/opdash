@@ -285,7 +285,7 @@ impl Source {
         self.timed(async {
             match &self.backend {
                 Backend::Mysql(b) => b.tables(self, database, pattern, limit).await,
-                Backend::Redis(b) => b.tables(self, pattern, limit).await,
+                Backend::Redis(b) => b.tables(self, database, pattern, limit).await,
                 Backend::Elastic(b) => b.tables(self, pattern, limit).await,
                 Backend::ClickHouse(b) => b.tables(self, database, pattern, limit).await,
             }
@@ -301,7 +301,7 @@ impl Source {
         self.timed(async {
             match &self.backend {
                 Backend::Mysql(b) => b.describe(self, target, database).await,
-                Backend::Redis(b) => b.describe(self, target).await,
+                Backend::Redis(b) => b.describe(self, target, database).await,
                 Backend::Elastic(b) => b.describe(self, target).await,
                 Backend::ClickHouse(b) => b.describe(self, target, database).await,
             }
@@ -320,7 +320,7 @@ impl Source {
             .timed(async {
                 match &self.backend {
                     Backend::Mysql(b) => b.query(self, query, &opts).await,
-                    Backend::Redis(b) => b.query(self, query).await,
+                    Backend::Redis(b) => b.query(self, query, opts.database.as_deref()).await,
                     Backend::Elastic(b) => b.query(self, query, &opts).await,
                     Backend::ClickHouse(b) => b.query(self, query, &opts).await,
                 }
