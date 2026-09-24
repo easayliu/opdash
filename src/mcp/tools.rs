@@ -1067,11 +1067,17 @@ pub struct ToolOutput {
     pub empty: bool,
 }
 
-/// 结果里一条记录都没有：顶层至少有一个列表，而且所有列表都是空的。
+/// 结果里一条记录都没有：顶层至少有一个列表，所有列表都是空的，而且没有非空的对象。
+///
+/// 对象也要看：`get_span` 的内容在 `attributes` 里，events / links 两个列表常常是空的，
+/// 只看列表会把一个带着几十个属性的 span 记成「空结果」，统计就失真了。
 fn is_empty_result(v: &Value) -> bool {
     let Some(map) = v.as_object() else {
         return false;
     };
+    if map.values().any(|x| x.as_object().is_some_and(|o| !o.is_empty())) {
+        return false;
+    }
     let mut lists = map.values().filter_map(Value::as_array).peekable();
     lists.peek().is_some() && lists.all(Vec::is_empty)
 }
@@ -3279,6 +3285,15 @@ mod tests {
 
     fn a(map: &Map<String, Value>) -> Args<'_> {
         Args { map, now_ms: NOW, tz: chrono_tz::Asia::Shanghai }
+    }
+
+    #[test]
+    fn a_span_with_attributes_is_not_an_empty_result() {
+        let span = json!({ "attributes": { "db.system": "mysql" }, "events": [], "links": [] });
+        assert!(!is_empty_result(&span));
+        assert!(is_empty_result(&json!({ "attributes": {}, "events": [], "links": [] })));
+        assert!(is_empty_result(&json!({ "from": "x", "groups": [] })));
+        assert!(!is_empty_result(&json!({ "groups": [1] })));
     }
 
     #[test]
