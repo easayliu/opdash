@@ -383,6 +383,22 @@ async fn clickhouse_source_runs_read_only_with_limits() {
 }
 
 #[tokio::test]
+async fn clickhouse_source_stops_reading_an_oversized_result() {
+    let fake = FakeClickhouse::start().await;
+    let biz = FakeClickhouse::start().await;
+    let file = datasource_file(&sources(biz.endpoint(), "http://127.0.0.1:1"));
+    let app = app_with_schema(&fake, &["--datasources", &file]).await;
+    // 库没照 max_result_bytes 截断（比如设置被改掉了）时，opdash 自己也不能把结果全吃进内存
+    let big = "x".repeat(70 << 20);
+    biz.respond(format!(r#"{{"meta":[{{"name":"s","type":"String"}}],"data":[["{big}"]]}}"#));
+    let (err, out) =
+        call_tool(&app, "db_query", json!({ "source": "biz-ck", "query": "SELECT s FROM t" }))
+            .await;
+    assert!(err, "{out}");
+    assert!(out.as_str().unwrap().contains("MB 上限"), "{out}");
+}
+
+#[tokio::test]
 async fn elasticsearch_source_caps_size_and_only_hits_read_endpoints() {
     let fake = FakeClickhouse::start().await;
     let es = FakeClickhouse::start().await;

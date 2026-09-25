@@ -13,7 +13,9 @@
 //! * 任何位置都不能出现写入类关键字（`WITH … DELETE`、`EXPLAIN ANALYZE UPDATE` 这类靠它拦）；
 //! * 不能调用会越出这个库的函数（ClickHouse 的 `url()` / `file()` / `remote()`，MySQL 的
 //!   `LOAD_FILE()`）或拿锁的函数（`GET_LOCK()`）；
-//! * 不能有 MySQL 的可执行注释 `/*! … */`——那里面的内容 MySQL 会照样执行。
+//! * 不能有 MySQL 的可执行注释 `/*! … */`——那里面的内容 MySQL 会照样执行；
+//! * ClickHouse 的语句里不能带 `SETTINGS` 子句——它能把 opdash 附在请求上的 `max_result_rows`、
+//!   `max_result_bytes`、`max_execution_time` 改掉（`readonly=2` 允许改设置）。
 
 /// 允许的语句开头。
 const LEADING: &[&str] = &["SELECT", "WITH", "SHOW", "DESC", "DESCRIBE", "EXPLAIN"];
@@ -50,11 +52,20 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "odbc",
     "executable",
     "input",
+    "hive",
+    "ytsaurus",
+    "arrowflight",
+    "cosn",
+    "oss",
     "load_file",
     "get_lock",
     "release_lock",
     "release_all_locks",
 ];
+
+/// 按前缀拒绝的函数名：数据湖的表函数一族（`icebergS3`、`deltaLakeAzure`、`hudiCluster`……）每个版本
+/// 都在添新成员，逐个列举总会漏。没有普通函数以这些词开头，不会误伤。
+const FORBIDDEN_FUNCTION_PREFIXES: &[&str] = &["iceberg", "deltalake", "hudi", "paimon"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -223,11 +234,23 @@ pub fn check_read_only(sql: &str, dialect: Dialect) -> Result<String, String> {
         if WRITE_WORDS.contains(&upper.as_str()) && !(upper == "REPLACE" && call) {
             return Err(format!("只读查询里不能出现 {upper}"));
         }
-        if call && FORBIDDEN_FUNCTIONS.contains(&w.to_ascii_lowercase().as_str()) {
+        let lower = w.to_ascii_lowercase();
+        if call
+            && (FORBIDDEN_FUNCTIONS.contains(&lower.as_str())
+                || FORBIDDEN_FUNCTION_PREFIXES.iter().any(|p| lower.starts_with(p)))
+        {
             return Err(format!("不允许调用 {w}()：它会读取这个库以外的数据或占用锁"));
         }
         if dialect == Dialect::ClickHouse && upper == "FORMAT" && !call {
             return Err("请移除 FORMAT 子句，结果格式由 opdash 指定".to_owned());
+        }
+        // `SETTINGS 名字 = 值` 才是子句；`SELECT Settings FROM system.query_log` 里它是列名，放行
+        if dialect == Dialect::ClickHouse
+            && upper == "SETTINGS"
+            && matches!(tokens.get(i + 1), Some(Token::Word(_) | Token::Quoted(_)))
+            && tokens.get(i + 2) == Some(&Token::Punct('='))
+        {
+            return Err("请移除 SETTINGS 子句，查询设置由 opdash 指定".to_owned());
         }
     }
     Ok(strip_trailing(sql))
@@ -432,6 +455,24 @@ mod tests {
         assert!(ch("SELECT * FROM s3('x')").is_err());
         assert!(ch("SELECT * FROM remote('h', db.t)").is_err());
         assert!(ch("SELECT 1 FORMAT CSV").unwrap_err().contains("FORMAT"));
+        for q in [
+            "SELECT * FROM numbers(10) SETTINGS max_result_bytes = 0",
+            "SELECT 1 settings max_execution_time=0, max_result_rows=0",
+            "SELECT * FROM (SELECT 1 SETTINGS `max_result_rows` = 0)",
+        ] {
+            assert!(ch(q).unwrap_err().contains("SETTINGS"), "{q}");
+        }
+        ch("SELECT Settings FROM system.query_log LIMIT 1").unwrap();
+        ch("SELECT Settings['max_threads'] AS t FROM system.query_log WHERE Settings != map()")
+            .unwrap();
+        for q in [
+            "SELECT * FROM icebergS3('http://10.0.0.1/t')",
+            "SELECT * FROM deltaLakeAzure('x')",
+            "SELECT * FROM hudiCluster('c', 'x')",
+            "SELECT * FROM hive('thrift://10.0.0.1:9083', 'db', 't', 'a String', 'a')",
+        ] {
+            assert!(ch(q).is_err(), "{q}");
+        }
         assert!(ch("ALTER TABLE t DELETE WHERE 1").is_err());
         assert!(ch("SYSTEM STOP MERGES").is_err());
         assert!(ch("OPTIMIZE TABLE t FINAL").is_err());

@@ -14,6 +14,12 @@ use crate::error::{Error, Result, ch_code, trim_ch_message};
 /// 行数，宽表的一块也可能很大，字节再兜一层。
 const MAX_RESULT_BYTES: u64 = 32 << 20;
 
+/// 响应体最多读多少字节。上面的 `max_result_bytes` 是发给库的设置，库照不照做不由 opdash 说了算
+/// （语句里的 `SETTINGS max_result_bytes = 0` 就能把它改掉，[`sql::check_read_only`] 拦了，这里再兜
+/// 一层）；`resp.bytes()` 不设上限的话，结果有多大 opdash 就吃进多少内存。设置量的是块的内存大小，
+/// JSON 文本一般比它大，按块截断还会多出最后一块，所以放宽到两倍。
+const MAX_BODY_BYTES: usize = 2 * MAX_RESULT_BYTES as usize;
+
 pub struct Ch {
     client: Client,
     cluster: Option<String>,
@@ -84,7 +90,21 @@ impl Ch {
         }
         let resp =
             self.client.send(&query, Some("JSONCompact")).await.map_err(|e| Self::err(src, e))?;
-        let body = resp.bytes().await.map_err(|e| Self::err(src, e.into()))?;
+        let mut resp = resp;
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| Self::err(src, e.into()))? {
+            if body.len() + chunk.len() > MAX_BODY_BYTES {
+                // 丢掉 resp 就断开连接，库那边按 cancel_http_readonly_queries_on_client_close 取消查询
+                return Err(Error::Source {
+                    status: 400,
+                    message: format!(
+                        "查询结果超过 {} MB 上限。建议：减少返回的列，或添加 LIMIT",
+                        MAX_BODY_BYTES >> 20
+                    ),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
         let v: Value = serde_json::from_slice(&body)
             .map_err(|e| Error::internal(format!("ClickHouse 的 JSONCompact 结果解析失败：{e}")))?;
         let columns: Vec<String> = v["meta"]
