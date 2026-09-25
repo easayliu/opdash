@@ -102,7 +102,7 @@ function QuickJump() {
       <Input
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder="trace id 直达，或输入关键字搜日志"
+        placeholder="输入 Trace ID 查看链路，或输入关键字检索日志"
         className="pl-9"
         aria-label="快速跳转"
       />

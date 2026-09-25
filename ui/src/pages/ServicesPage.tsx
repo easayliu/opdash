@@ -48,7 +48,7 @@ const ORDERS = [
   { value: 'rps', label: '按请求量' },
   { value: 'error', label: '按错误率' },
   { value: 'p95change', label: '按 P95 变化' },
-  { value: 'name', label: '按名字' },
+  { value: 'name', label: '按名称' },
 ] as const
 type Order = (typeof ORDERS)[number]['value']
 
@@ -63,7 +63,7 @@ export function ErrorRate({ rate }: { rate: number }) {
   )
 }
 
-const HEALTH_LABEL: Record<Health, string> = { ok: '正常', warn: '需要看一眼', bad: '异常' }
+const HEALTH_LABEL: Record<Health, string> = { ok: '正常', warn: '需关注', bad: '异常' }
 
 /**
  * 健康度的那个点：绿圆 / 黄菱 / 红方，hover 看原因。
@@ -71,7 +71,7 @@ const HEALTH_LABEL: Record<Health, string> = { ok: '正常', warn: '需要看一
  * 两处不合规范，都在这八个像素上：
  *
  * 一是**只有颜色在说话**（WCAG 1.4.1）。红绿色觉障碍的人看这一列只能看出「有个点」，而这一页
- * 的主问题就是「谁不对」。所以三档各给一个形状：正常是圆、需要看一眼是菱形、异常是方块——
+ * 的主问题就是「谁不对」。所以三档各给一个形状：正常是圆、需关注是菱形、异常是方块——
  * 尺寸不变，密度不变，不看颜色也分得开。
  *
  * 二是**读屏什么都听不到**。原来 Hint 会把解释当 `aria-label` 挂到这个裸 `<span>` 上，但
@@ -162,7 +162,7 @@ function QuickLinks({ service, win, logDim, hasMetrics, className }: { service: 
  * 数据由 [`ServicesPage`] 一条查询问回来再按服务分（见 `useServiceOperations`），这里只负责
  * 挑一行显示：以前是每张卡自己 `useOperations`，十几个服务同时报警就是十几条查询。
  *
- * `hot` 是把这个服务顶进「需要看一眼」的那个接口（见 `latencyHotspot`）：它已经写在上面的原因
+ * `hot` 是把这个服务顶进「需关注」的那个接口（见 `latencyHotspot`）：它已经写在上面的原因
  * 行里了，这里就换下一个说——同一句话在一张卡上出现两遍，比少说一句更糟。而且只补同样是坏消息
  * 的那种（出错、变慢、接口没了）：警告卡上写「某个接口变快了 75%」「某个接口次数涨了 49%」，
  * 读的人得先想一下这跟警告有什么关系。剩不下别的就不说。
@@ -351,7 +351,7 @@ export function ServicesPage() {
   }, [errs.data])
 
   // 接口明细：全部服务都问，按流量降序（要切才切量最小的）。以前只问已经判为异常的服务，
-  // 那是个死循环——接口级的变化因此永远没机会把一个服务顶进「需要看一眼」。和上面的错误分组、
+  // 那是个死循环——接口级的变化因此永远没机会把一个服务顶进「需关注」。和上面的错误分组、
   // 重启事件一个路子：一次问完再按服务分。不按搜索框过滤，打字不重新发查询
   const services = useMemo(() => q.data?.services ?? [], [q.data])
   const contributorNames = useMemo(
@@ -374,7 +374,7 @@ export function ServicesPage() {
   }, [contributors.operations])
 
   // 服务级的三条规则（`serviceHealth`）之外再看一眼接口表：整个服务的数字没动、某一个接口
-  // 自己慢了几倍且多耗的时间可观，也要进「需要看一眼」（见 `latencyHotspot`）。接口表比服务表
+  // 自己慢了几倍且多耗的时间可观，也要进「需关注」（见 `latencyHotspot`）。接口表比服务表
   // 晚一步回来，所以这类服务是过一会儿才冒出来的
   const all = useMemo(() => {
     const windowMs = win.toMs - win.fromMs
@@ -432,9 +432,9 @@ export function ServicesPage() {
           </Button>
           <span className="relative">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
-            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="搜服务" className="h-8 w-full pl-8 text-xs md:w-36" aria-label="搜服务" />
+            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="搜索服务" className="h-8 w-full pl-8 text-xs md:w-36" aria-label="搜索服务" />
           </span>
-          <Hint text="所有变化和哪一段时间比" asChild>
+          <Hint text="所有变化的对比时段" asChild>
             <Select value={compare} onChange={(e) => set({ cmp: e.target.value === DEFAULT_COMPARE ? null : e.target.value })} className="h-8 w-full text-xs md:w-auto">
               {COMPARE.map((c) => (
                 <option key={c.value} value={c.value}>
@@ -478,21 +478,21 @@ export function ServicesPage() {
             <Spinner />
           </div>
         )}
-        {q.data && !all.length && <EmptyState title="这个时间范围内没有入口 span" hint="tracepipe 是不是还没接上？或者试试放宽时间范围。" />}
+        {q.data && !all.length && <EmptyState title="当前时间范围内没有入口 span" hint="请确认 tracepipe 已接入，或尝试放宽时间范围。" />}
         {q.data && all.length > 0 && (
           <>
             <Summary data={q.data} all={all} restarts={events.data?.events.filter((e) => e.kind === 'restart').length ?? 0} cmpShort={cmpShort} />
-            {!shown.length && <EmptyState title={onlyBad ? '没有异常的服务' : '没有匹配的服务'} hint={onlyBad ? (opsPending ? '接口明细还在查，可能还会有服务冒出来。' : '错误率都在 1% 以下，服务和单个接口的 P95 也没比对比窗口明显变差。') : undefined} />}
+            {!shown.length && <EmptyState title={onlyBad ? '没有异常的服务' : '没有匹配的服务'} hint={onlyBad ? (opsPending ? '接口明细仍在查询中，结果可能增加。' : '所有服务的错误率均低于 1%，服务及各接口的 P95 与对比时段相比均无明显恶化。') : undefined} />}
 
             {/* 分区外面也要一层：最后一张卡被过滤掉时，整段（标题 + 网格）是淡出的，不是瞬间消失 */}
             <AnimatePresence initial={false}>
             {view === 'cards' && bad.length > 0 && (
               <m.section key="bad" {...FADE} className="mb-5">
                 <h2 className="mb-2 flex flex-wrap items-baseline gap-x-2 text-sm font-semibold">
-                  需要看一眼
+                  需关注
                   {/* 判定口径有三条，写全了是一行半的小字。标题只留一句人话，口径收进气泡 */}
                   <InfoHint
-                    text={`错误率 ≥ 1%，或服务 P95 比${cmpShort}高 1.5 倍以上（两个窗口都至少 300 次请求才比），或某一个接口 P95 翻倍、多耗的时间够长`}
+                    text={`错误率 ≥ 1%，或服务 P95 比${cmpShort}高 1.5 倍以上（两个时段均至少有 300 次请求才参与比较），或某个接口的 P95 翻倍且增加的耗时足够显著`}
                     className="text-2xs font-normal text-muted-fg"
                   >
                     {bad.length} 个<span className="hidden sm:inline"> · 错误率、服务延迟，或单个接口明显变慢</span>
@@ -500,7 +500,7 @@ export function ServicesPage() {
                   <AnimatePresence initial={false}>
                     {opsPending && (
                       <m.span key="ops-pending" {...FADE} className="text-2xs font-normal text-muted-fg">
-                        · 接口明细还在查，可能还会多
+                        · 接口明细仍在查询中，数量可能增加
                       </m.span>
                     )}
                   </AnimatePresence>
@@ -771,7 +771,7 @@ const Row = memo(function Row({ s, health, win, compare, events, logDim, hasMetr
       <span className="flex items-baseline gap-1.5 tabular-nums">
         {pct(s.error_rate)} <Delta delta={change(s.error_rate, s.prev?.error_rate)} upIs="bad" />
       </span>
-      <Hint text={latencyOk ? undefined : '入口 span 几乎不耗时（消费确认类），延迟没意义'}>
+      <Hint text={latencyOk ? undefined : '入口 span 几乎不耗时（如消费确认），延迟不具参考意义'}>
         <span className={cn('flex items-baseline gap-1.5 tabular-nums', !latencyOk && 'text-muted-fg')}>
           {latencyOk ? formatDurationMs(s.p95_ms) : '—'}
           {latencyOk && <Delta delta={change(s.p95_ms, s.prev?.p95_ms)} upIs="bad" />}

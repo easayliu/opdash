@@ -24,7 +24,7 @@ interface Props {
   dims: string[]
   /** facet 查询用的时间范围参数 */
   rangeParams: Params
-  /** 按 id 查时这一趟有没有按当前时间范围裁（点了「不限时间再找一次」就是 false），
+  /** 按 id 查时这一趟有没有按当前时间范围裁（点了「不限时间重新查找」就是 false），
    *  chip 上要如实写出来——扫 30 天和扫一小时差着两个数量级 */
   scoped?: boolean
   onChange: (next: LogFilterState) => void
@@ -93,7 +93,7 @@ export function LogFilters({ state, dims, rangeParams, scoped, onChange }: Props
         {state.trace_id ? `trace ${state.trace_id.slice(0, 12)}…` : `span ${state.span_id}`}
         {scoped === false && '（不限时间）'}
       </span>
-      <Hint text="去掉" asChild>
+      <Hint text="移除" asChild>
         <button type="button" className="shrink-0" onClick={() => onChange({ ...state, trace_id: '', span_id: '' })}>
           <XIcon className="size-3.5" />
         </button>
@@ -150,10 +150,9 @@ export function LogFilters({ state, dims, rangeParams, scoped, onChange }: Props
       {idChip && !mobileOpen && <div className="flex md:hidden">{idChip}</div>}
       {help && (
         <div className="rounded-md border border-border bg-muted/50 px-4 py-2.5 text-xs leading-6 text-muted-fg">
-          关键字模式（不分大小写）：空格分隔的词全部要命中；<Kbd>a OR b</Kbd> 任一命中；<Kbd>-词</Kbd> / <Kbd>NOT 词</Kbd> 排除；<Kbd>"带 空格"</Kbd> 当一个整体；
-          <Kbd>( )</Kbd> 分组，如 <Kbd>(timeout OR refused) -重试</Kbd>。<Kbd>AND</Kbd> / <Kbd>OR</Kbd> / <Kbd>NOT</Kbd> 全大写才是操作符，小写的 or 是普通词。
-          正则模式（<Kbd>.*</Kbd>）：ClickHouse <code>match()</code>，RE2 语法，区分大小写，<Kbd>(?i)</Kbd> 忽略大小写。message
-          没有索引，扫的是时间范围内的全部日志——先选服务 / pod、缩小时间范围，查询更快。
+          关键字模式（不区分大小写）：以空格分隔的词须全部命中；<Kbd>a OR b</Kbd> 任一命中；<Kbd>-词</Kbd> / <Kbd>NOT 词</Kbd> 排除；<Kbd>"带 空格"</Kbd> 视为一个整体；
+          <Kbd>( )</Kbd> 分组，如 <Kbd>(timeout OR refused) -重试</Kbd>。<Kbd>AND</Kbd> / <Kbd>OR</Kbd> / <Kbd>NOT</Kbd> 仅全大写时视为操作符，小写的 or 按普通词处理。正则模式（<Kbd>.*</Kbd>）：ClickHouse <code>match()</code>，RE2 语法，区分大小写，<Kbd>(?i)</Kbd> 忽略大小写。message
+          没有索引，查询会扫描时间范围内的全部日志；先选定服务或 pod 并缩小时间范围，可加快查询。
         </div>
       )}
       <div className={cn('flex flex-wrap items-center gap-2', !mobileOpen && 'hidden md:flex')}>

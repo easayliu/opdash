@@ -30,10 +30,10 @@ function truncatedHint(d: TraceDetailResponse, max = 5000): string {
     d.window_from_ms != null && d.window_to_ms != null
       ? `${formatTs(d.window_from_ms, { ms: false })} ~ ${formatTs(d.window_to_ms, { ms: false, date: false })}`
       : ''
-  const pinned = d.pinned_span ? `；链接指名的 ${d.pinned_span} 不在这一段里，已单独取回来钉在图上` : ''
+  const pinned = d.pinned_span ? `；链接指定的 ${d.pinned_span} 不在此区间内，已单独获取并固定显示在图中` : ''
   return d.narrowed
-    ? `这条 trace 的 span 超过 ${max} 个，只显示 ${span} 这一段（从进来的时刻往后尽量长）${pinned}`
-    : `超过 ${max} 个 span，按时间只显示最早的这些${pinned}`
+    ? `此链路的 span 超过 ${max} 个，仅显示 ${span} 区间（自请求进入时刻起尽量向后延伸）${pinned}`
+    : `span 超过 ${max} 个，按时间仅显示最早的部分${pinned}`
 }
 
 /** 这一行是否过得了各列的筛选；`except` 那一列不算（给它自己算下拉选项时用） */
@@ -247,7 +247,7 @@ export function TraceDetailPage() {
           </h1>
           <div className="mono mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-muted-fg">
             <span className="truncate">{traceId}</span>
-            <CopyButton text={traceId} title="复制 trace id" />
+            <CopyButton text={traceId} title="复制 Trace ID" />
             <CopyButton text={() => window.location.href} title="复制本页链接（带当前选中的 span）" className="ml-2" label="复制链接" />
           </div>
         </div>
@@ -271,7 +271,7 @@ export function TraceDetailPage() {
                 {spans.length}
                 {detail.data.truncated && (
                   <Hint text={truncatedHint(detail.data, meta.data?.limits.max_trace_spans)} className="ml-1">
-                    <Badge tone="warn">{detail.data.narrowed ? '只显示这一段' : '已截断'}</Badge>
+                    <Badge tone="warn">{detail.data.narrowed ? '仅显示部分区间' : '已截断'}</Badge>
                   </Hint>
                 )}
               </dd>
@@ -341,10 +341,10 @@ export function TraceDetailPage() {
               className={linkClass}
               onClick={() => set({ at: null }, { replace: true })}
             >
-              查全部时间
+              查询全部时间
             </button>
           )}
-          {detail.data?.windowed && <InfoHint text="只查了开始时间前 1 小时到后 24 小时的 span；怀疑有遗漏时可查全部时间（较慢）" />}
+          {detail.data?.windowed && <InfoHint text="仅查询了开始时间前 1 小时至后 24 小时内的 span；如怀疑有遗漏，可查询全部时间（较慢）" />}
         </div>
       </header>
       <div className="flex min-h-0 flex-1">
@@ -358,10 +358,10 @@ export function TraceDetailPage() {
             )}
             {detail.data && !spans.length && (
               <EmptyState
-                title="没有这条 trace 的 span"
+                title="未找到此链路的 span"
                 hint={
                   <>
-                    可能还没入库（采集有几秒延迟）、被采样掉了，或者已经超过 30 天。可以看看有没有<Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className={linkClass}>这个 trace id 的日志</Link>。
+                    可能尚未入库（采集存在数秒延迟）、已被采样丢弃，或已超过 30 天。可查看<Link to={`/logs?trace_id=${traceId}${logsRangeQuery}`} className={linkClass}>此 Trace ID 的日志</Link>。
                   </>
                 }
               />
@@ -379,9 +379,9 @@ export function TraceDetailPage() {
               )}
               {logs.data?.truncated && (
                 <Hint
-                  text={`库里带这个 trace id 的日志有 ${logs.data.total ?? '?'} 条，只取了最早的 ${logs.data.rows.length} 条。这么多多半是 trace id 被复用了（常驻消费者一直用同一个 id），剩下的多半跟这次请求无关——要全看去日志页`}
+                  text={`带有此 Trace ID 的日志共 ${logs.data.total ?? '?'} 条，仅显示最早的 ${logs.data.rows.length} 条。数量较多通常是因为 Trace ID 被复用（如常驻消费者始终沿用同一 ID），其余日志大多与本次请求无关；如需查看全部，请前往日志页`}
                 >
-                  <Badge tone="warn">只取了前 {logs.data.rows.length} 条</Badge>
+                  <Badge tone="warn">仅显示前 {logs.data.rows.length} 条</Badge>
                 </Hint>
               )}
               {showLogs && selected && (
@@ -427,11 +427,11 @@ export function TraceDetailPage() {
                     emptyText={
                       <span>
                         {dimFiltered
-                          ? '这个筛选下没有日志。'
-                          : `没有带这个 trace id 的日志。${selected && logsOnlySpan ? '试试取消「只看选中 span」。' : '日志里要打 [TID:…] 才能关联；Go / nginx 这类不打 TID 的服务这里看不到。'}`}
+                          ? '当前筛选条件下没有日志。'
+                          : `没有带此 Trace ID 的日志。${selected && logsOnlySpan ? '可尝试取消「只看选中 span」。' : '日志中须输出 [TID:…] 才能关联；Go、nginx 等未输出 TID 的服务无法在此显示。'}`}
                         {dimFiltered && (
                           <button type="button" className={linkClass} onClick={() => set(Object.fromEntries(filterDims.map((d) => [`log_${d}`, null])), { replace: true })}>
-                            清掉列上的筛选
+                            清除列筛选
                           </button>
                         )}
                       </span>

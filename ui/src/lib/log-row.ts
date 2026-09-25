@@ -40,5 +40,5 @@ export function messageTruncated(row: LogRow): boolean {
 /** 「只取了前 16,384 字，完整 41,149,053 字」 */
 export function truncationNote(row: LogRow): string {
   const n = (v: number) => v.toLocaleString('zh-CN')
-  return `只取了前 ${n(row.message.length)} 字，这条日志完整有 ${n(row.message_len ?? 0)} 字`
+  return `仅显示前 ${n(row.message.length)} 字，此条日志共 ${n(row.message_len ?? 0)} 字`
 }

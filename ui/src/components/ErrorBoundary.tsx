@@ -40,12 +40,12 @@ export class ErrorBoundary extends Component<Props, State> {
     if (!error) return this.props.children
     return (
       <EmptyState
-        title="这一页画不出来了"
+        title="本页无法显示"
         hint={
           <>
             <span className="mono break-all">{error.message || String(error)}</span>
             <br />
-            换个页签还能继续用；重试一次多半就好了，老是这样请带上这句话提个 issue。
+            其他页签不受影响。请先重试；若问题反复出现，请附上上述错误信息提交 issue。
           </>
         }
         action={

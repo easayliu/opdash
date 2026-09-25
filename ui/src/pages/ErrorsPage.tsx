@@ -23,9 +23,9 @@ import { usePageTitle } from '@/lib/title'
  * Client 的 404，而入口错误一共才 194 条 13 组。
  */
 const KINDS = [
-  { value: 'entry', label: '入口错误', hint: '这个服务自己对外返回的错误（Server / Consumer），和服务总览上的错误率同一口径' },
-  { value: 'client', label: '下游调用', hint: '这个服务调别人时失败的（Client / Producer）' },
-  { value: 'all', label: '全部', hint: '两样都看；下游 HTTP 404 通常会占满列表' },
+  { value: 'entry', label: '入口错误', hint: '本服务对外返回的错误（Server / Consumer），与服务总览的错误率口径一致' },
+  { value: 'client', label: '下游调用', hint: '本服务调用下游时发生的失败（Client / Producer）' },
+  { value: 'all', label: '全部', hint: '包含以上两类；下游的 HTTP 404 往往占据列表的大部分' },
 ] as const
 type Kind = (typeof KINDS)[number]['value']
 
@@ -48,7 +48,7 @@ export function ErrorsPage() {
   const { params, set } = useUrlState()
   const kind = (KINDS.find((k) => k.value === params.get('kind'))?.value ?? 'entry') as Kind
   const service = params.get('service') ?? ''
-  // 从服务详情页选中某个接口点过来、从「同接口的其它报错」点过来时带的。**必须传给查询**，
+  // 从服务详情页选中某个接口点过来、从「同接口的其他报错」点过来时带的。**必须传给查询**，
   // 不然人以为在看这一个接口的错，看到的却是整个服务的，而页面上一点提示都没有
   const spanName = params.get('span_name') ?? ''
   const opened = params.get('g') ?? ''
@@ -86,14 +86,14 @@ export function ErrorsPage() {
         {spanName ? (
           <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1 text-xs text-accent">
             <span className="truncate">{spanName}</span>
-            <Hint text="看整个服务的错误" asChild>
+            <Hint text="查看整个服务的错误" asChild>
               <button type="button" onClick={() => set({ span_name: null, g: null })}>
                 ✕
               </button>
             </Hint>
           </span>
         ) : (
-          <span className="hidden text-xs text-muted-fg xl:inline">同一种报错归一组，按次数排</span>
+          <span className="hidden text-xs text-muted-fg xl:inline">同类报错归为一组，按次数排序</span>
         )}
         {q.isFetching && <Spinner className="size-4 max-md:hidden" />}
         <span className="flex w-full flex-wrap items-center gap-2 md:ml-auto md:w-auto">
@@ -137,7 +137,7 @@ export function ErrorsPage() {
           />
           <span className="relative max-md:min-w-0 max-md:flex-1">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-fg" />
-            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="筛报错" className="h-8 w-full pl-8 text-xs md:w-36" aria-label="筛报错" />
+            <Input value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="筛选报错" className="h-8 w-full pl-8 text-xs md:w-36" aria-label="筛选报错" />
           </span>
         </span>
       </header>
@@ -151,8 +151,8 @@ export function ErrorsPage() {
         )}
         {q.data && !q.data.groups.length && (
           <EmptyState
-            title={service ? `${spanName || service} 这段时间没有${kind === 'client' ? '失败的下游调用' : '错误'}` : '这段时间没有错误'}
-            hint={kind === 'entry' ? '这里只看入口 span（Server / Consumer）。服务调下游失败但自己兜住了的，切到「下游调用」看。' : undefined}
+            title={service ? `${spanName || service} 在此时段没有${kind === 'client' ? '失败的下游调用' : '错误'}` : '此时段没有错误'}
+            hint={kind === 'entry' ? '此处仅统计入口 span（Server / Consumer）。调用下游失败但已由服务自身处理的，请切换至「下游调用」查看。' : undefined}
           />
         )}
         {q.data && q.data.groups.length > 0 && (
@@ -214,7 +214,7 @@ function GroupRow({ g, win, open, onToggle, logDim }: { g: ErrorGroup; win: Wind
             </Hint>
             {g.exception && g.http_status && <Badge tone="muted">HTTP {g.http_status}</Badge>}
             {!hasDetail(g) && (
-              <Hint text="这些 span 上没有 exception 事件——异常多半被全局异常处理器接住了。展开看日志里的堆栈。">
+              <Hint text="这些 span 上没有 exception 事件，异常通常已被全局异常处理器捕获。展开后可查看日志中的堆栈。">
                 <Badge tone="warn">无异常信息</Badge>
               </Hint>
             )}
@@ -292,7 +292,7 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
       )}
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from} className={buttonClass({ size: 'xs', variant: 'primary' })}>
-          看最近这一条链路
+          查看最近一条链路
         </Link>
         <Link to={tracesHref({ service: g.service, spanName: g.span_name, errorOnly: true }, win)} className={buttonClass({ size: 'xs' })}>
           这个接口的全部错误链路
@@ -318,7 +318,7 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
         {logs.isError && <ErrorBox error={logs.error} />}
         {logs.data && !rows.length && (
           <div className="px-2.5 py-2 text-2xs text-muted-fg">
-            这条链路没有 ERROR / WARN 日志。日志里要打 [TID:…] 才能按 trace id 关联；Go / nginx 这类不打 TID 的服务这里看不到。
+            这条链路没有 ERROR / WARN 日志。日志中须输出 [TID:…] 才能按 Trace ID 关联；Go、nginx 等未输出 TID 的服务无法在此显示。
           </div>
         )}
         {rows.map((r, i) => (
@@ -341,10 +341,10 @@ function GroupDetail({ g, win, logDim }: { g: ErrorGroup; win: Window; logDim: s
       </div>
       <div className="mt-2 text-2xs text-muted-fg">
         样本链路 <Link to={traceHref(g.sample_trace, g.last_ms, g.sample_span)} state={from} className={cn('mono', linkClass)}>{g.sample_trace}</Link>
-        <CopyButton text={g.sample_trace} title="复制样本 trace id" size="xs" className="mx-1 align-text-bottom" />
-        ，点进去会直接选中报错的那个 span。这一组还有{' '}
+        <CopyButton text={g.sample_trace} title="复制样本 Trace ID" size="xs" className="mx-1 align-text-bottom" />
+        ，打开后将自动选中报错的 span。本组另有{' '}
         <Link to={errorsHref({ service: g.service, spanName: g.span_name }, win)} className={linkClass}>
-          同接口的其它报错
+          同接口的其他报错
         </Link>
         。
       </div>

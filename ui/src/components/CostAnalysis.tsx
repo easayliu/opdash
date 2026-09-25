@@ -122,8 +122,7 @@ export function CostAnalysis({
         <div role="alert" className="rounded-lg border border-warn/40 bg-warn-soft px-4 py-3 text-xs leading-5 text-fg">
           <div className="font-medium text-warn">{PROVIDER_LABELS[data.coverage.provider]}的日度账单不完整</div>
           <div className="mt-1 text-muted-fg">
-            所选账期内，日度账单合计 {formatMoney(data.coverage.daily)}，月度账单合计 {formatMoney(data.coverage.monthly)}，
-            日度仅覆盖其 {((data.coverage.daily / data.coverage.monthly) * 100).toFixed(1)}%。日均依现有的
+            所选账期内，日度账单合计 {formatMoney(data.coverage.daily)}，月度账单合计 {formatMoney(data.coverage.monthly)}，日度仅覆盖其 {((data.coverage.daily / data.coverage.monthly) * 100).toFixed(1)}%。日均依现有的{' '}
             {data.days_by_provider[data.coverage.provider] ?? 0} 天账单求得，仍可参考；所选账期合计与各业务线金额则明显偏低。
             {bills.sync ? '可点击右上角「同步账单」，以日度粒度补齐这些账期。' : '请在 goscan 中以日度粒度补齐这些账期。'}
           </div>
@@ -242,10 +241,7 @@ export function CostAnalysis({
             title="尚未配置成本归属规则"
             hint={
               <>
-                账单只记录产品与实例；机器归属哪条业务线、共用服务按何比例分摊，须由部署方给出。
-                以启动参数 <code className="mono">--bill-alloc rules.toml</code> 指向一份规则文件即可，
-                写法参见仓库中的 <code className="mono">examples/bill-alloc.toml</code>。
-                在此之前，下方「按产品」的日均与月度预估仍可照常使用。
+                账单只记录产品与实例；机器归属哪条业务线、共用服务按何比例分摊，须由部署方给出。以启动参数 <code className="mono">--bill-alloc rules.toml</code> 指向一份规则文件即可，写法参见仓库中的 <code className="mono">examples/bill-alloc.toml</code>。在此之前，下方「按产品」的日均与月度预估仍可照常使用。
               </>
             }
           />
@@ -950,8 +946,8 @@ function ProductCompare({ base, ready, prepaid }: { base: Record<string, string 
             onChange={(v) => setMode(v as CompareMode)}
             options={isMobile ? COMPARE_MODES.map((m) => ({ value: m.value, label: MODE_SHORT[m.value], note: m.label })) : COMPARE_MODES}
             clearable={false}
-            searchPlaceholder="筛比法…"
-            title="比法"
+            searchPlaceholder="筛选对比方式…"
+            title="对比方式"
             size="sm"
             className="w-40 min-w-0 max-md:w-auto"
           />
@@ -979,7 +975,7 @@ function ProductCompare({ base, ready, prepaid }: { base: Record<string, string 
       ) : !cmp ? (
         <div className="px-4 py-6 text-center text-xs text-muted-fg">
           {data.rows.length
-            ? `近 ${data.days.length} 天的日度账单不足以「${COMPARE_MODES.find((m) => m.value === mode)?.label}」，请换一种比法。`
+            ? `近 ${data.days.length} 天的日度账单不足以「${COMPARE_MODES.find((m) => m.value === mode)?.label}」，请选择其他对比方式。`
             : '近期没有日度账单，无法按天对比。'}
         </div>
       ) : (
@@ -1019,7 +1015,7 @@ function CompareSummary({ cmp, prepaid }: { cmp: Comparison; prepaid: boolean })
       <span className="whitespace-nowrap">
         <span className="text-muted-fg">
           {!isMobile && `${rangeLabel(cmp.current)} `}
-          {prepaid ? <InfoHint text="仅含后付费：预付费（包年包月）在购买当天一次性出账，逐日比较只会冒出一根尖刺">{noun}</InfoHint> : noun}{' '}
+          {prepaid ? <InfoHint text="仅含后付费：预付费（包年包月）在购买当天一次性出账，逐日对比时会形成单日尖峰">{noun}</InfoHint> : noun}{' '}
         </span>
         <span className="font-semibold tabular-nums">{formatMoney(cmp.currentTotal)}</span>
         <span className="text-muted-fg">，</span>
@@ -1047,7 +1043,7 @@ function CompareNotes({ cmp, data }: { cmp: Comparison; data: BillProductDaysRes
   const notes: string[] = []
   if (cmp.pending.length) {
     notes.push(
-      `${cmp.pending.map((p) => `${PROVIDER_LABELS[p]}的日度账单截至 ${dayTick(data.last_by_provider[p] ?? '')}`).join('，')}，本段不含该云其后的费用，其产品的「下降」并非实际下降。`,
+      `${cmp.pending.map((p) => `${PROVIDER_LABELS[p]}的日度账单截至 ${dayTick(data.last_by_provider[p] ?? '')}`).join('，')}，本段不含该云厂商此后的费用，其产品显示的「下降」并非实际下降。`,
     )
   }
   const gaps = [...cmp.previous.gaps, ...cmp.current.gaps]
@@ -1367,7 +1363,7 @@ function DayDrill({
             <span className={cn('tabular-nums', changeTone(delta))}>
               {formatDelta(delta)}（{formatChange(changeRatio(data.current, data.previous))}）
             </span>
-            <span className="ml-auto text-2xs text-muted-fg">仅含后付费 · 点「明细」查看该产品当天的逐行账单</span>
+            <span className="ml-auto text-2xs text-muted-fg">仅含后付费 · 点击「明细」可查看该产品当天的逐行账单</span>
           </div>
           {data.unmatched_into && data.unmatched.current + data.unmatched.previous > 0 && byLine && (
             <p className="border-b border-border px-4 py-2 text-2xs text-muted-fg">

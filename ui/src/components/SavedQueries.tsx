@@ -111,7 +111,7 @@ export function SavedQueries() {
                 <SaveForm view={view} onSave={save} />
               )
             ) : (
-              <p className="text-xs leading-5 text-muted-fg">这一页不能收藏：链路详情是一条具体的 trace，不是查询。到日志 / 链路 / 错误 / 指标页设好条件再来。</p>
+              <p className="text-xs leading-5 text-muted-fg">本页不支持收藏：链路详情对应一条具体的链路，而非查询条件。请在日志、链路、错误或指标页设置条件后再收藏。</p>
             )}
           </div>
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -125,7 +125,7 @@ export function SavedQueries() {
               {list.isFetching && <Spinner className="size-3" />}
               <Hint text={me.data?.user?.email ?? undefined}>
                 <span className="ml-auto truncate">
-                  {authed ? `归在 ${me.data?.user?.name} 名下` : me.data?.mode === 'none' ? '没开认证，所有人共用' : ''}
+                  {authed ? `归在 ${me.data?.user?.name} 名下` : me.data?.mode === 'none' ? '未启用认证，所有人共用' : ''}
                 </span>
               </Hint>
             </div>
@@ -133,7 +133,7 @@ export function SavedQueries() {
             {list.isError && <p className="px-3 py-2 text-xs text-danger">{(list.error as Error).message}</p>}
             {list.data && queries.length === 0 && (
               <p className="m-3 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs leading-5 text-muted-fg">
-                还没有收藏。在日志 / 链路 / 错误 / 指标页设好筛选条件，回到这里点「收藏」，下次一步打开。
+                暂无收藏。在日志、链路、错误或指标页设置筛选条件后，点击「收藏」即可保存，之后可一键打开。
               </p>
             )}
             {groups.map(([label, items]) => (
@@ -187,7 +187,7 @@ function SaveForm({ view, onSave }: { view: View; onSave: (name: string, view: V
         {/* 浮层刚打开、焦点就该落在这个框里（人点「收藏」就是来起名字的）。
             no-autofocus 防的是页面一加载就抢焦点，浮层内部的初始焦点是另一回事 */}
         {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
-        <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder={suggested} className="h-8 text-xs" aria-label="收藏的名字" autoFocus />
+        <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder={suggested} className="h-8 text-xs" aria-label="收藏名称" autoFocus />
         <Button type="submit" variant="primary" size="sm" disabled={busy}>
           <BookmarkIcon className="size-3.5" />
           收藏
@@ -200,7 +200,7 @@ function SaveForm({ view, onSave }: { view: View; onSave: (name: string, view: V
           {words.length === 0 && ' · 没有筛选条件'}
         </p>
       </Hint>
-      <p className="text-2xs text-muted-fg/80">收藏的是筛选条件；时间范围不记，打开时用顶栏当前的范围。</p>
+      <p className="text-2xs text-muted-fg/80">收藏仅保存筛选条件，不保存时间范围；打开时沿用顶栏当前的时间范围。</p>
     </form>
   )
 }
@@ -255,7 +255,7 @@ function Row({
         <div className="flex min-w-0 flex-1 items-center gap-1 py-1 pl-1.5">
           {/* 点了「改名」，焦点直接进框里 */}
           {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
-          <Input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onKey} maxLength={64} className="h-7 text-xs" aria-label="新名字" autoFocus />
+          <Input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onKey} maxLength={64} className="h-7 text-xs" aria-label="新名称" autoFocus />
           <Button size="xs" variant="ghost" className="px-1.5" onClick={commit} title="保存 (Enter)">
             <CheckIcon className="size-3.5" />
           </Button>
@@ -286,11 +286,11 @@ function Row({
             <PencilIcon className="size-3.5" />
           </Button>
           {canOverwrite && (
-            <Button size="xs" variant="ghost" className="px-1.5" onClick={onOverwrite} title="把这条改成当前页面的条件">
+            <Button size="xs" variant="ghost" className="px-1.5" onClick={onOverwrite} title="以当前页面的条件覆盖此收藏">
               <RefreshCwIcon className="size-3.5" />
             </Button>
           )}
-          <Button size="xs" variant={arm ? 'danger' : 'ghost'} className="px-1.5" onClick={() => (arm ? onDelete() : setArm(true))} title={arm ? '再点一下就删了' : '删除'}>
+          <Button size="xs" variant={arm ? 'danger' : 'ghost'} className="px-1.5" onClick={() => (arm ? onDelete() : setArm(true))} title={arm ? '再次点击以确认删除' : '删除'}>
             <Trash2Icon className="size-3.5" />
             {arm && '确认'}
           </Button>

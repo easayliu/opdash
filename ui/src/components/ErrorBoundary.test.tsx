@@ -15,7 +15,7 @@ describe('ErrorBoundary', () => {
         <Boom />
       </ErrorBoundary>,
     )
-    expect(screen.getByText('这一页画不出来了')).toBeInTheDocument()
+    expect(screen.getByText('本页无法显示')).toBeInTheDocument()
     expect(screen.getByText('后端少给了一个字段')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /重试/ })).toBeInTheDocument()
     quiet.mockRestore()

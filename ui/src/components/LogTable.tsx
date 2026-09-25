@@ -169,7 +169,7 @@ export function HeaderFilter({ col, filter, label = col }: { col: string; filter
     searchPlaceholder: `搜索${label === col ? ` ${col}` : label}…`,
     className: 'min-w-0 flex-1',
     title: picked.length
-      ? `只看${name}= ${picked.join('、')}，${filter.multiple ? '点击增减' : '点击换一个'}`
+      ? `只看${name}= ${picked.join('、')}，${filter.multiple ? '点击增减' : '点击切换'}`
       : `按${name}筛选`,
   }
   const clear = () => (filter.multiple ? filter.onChange([]) : filter.onChange(''))
@@ -616,14 +616,14 @@ export function ExpandedRow({ row, dims, highlight, onPivot }: { row: LogRow; di
     <div className="space-y-3">
       {messageTruncated(row) && (
         <div className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-2xs text-warn">
-          {truncationNote(row)}。整条发给浏览器会把页面卡死（线上真有 41 MB 一条的），要全文请用日志页的「导出」——导出不截。
+          {truncationNote(row)}。完整内容过大时会使页面失去响应（线上曾出现单条 41 MB 的日志）；如需全文，请使用日志页的「导出」，导出内容不截断。
         </div>
       )}
       <div>
         <div className="mb-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
           <span className="font-medium">message</span>
           <CopyButton text={row.message} title="复制整条日志正文" size="xs" />
-          {messageTruncated(row) && <span className="text-warn">（复制的也是截断后的）</span>}
+          {messageTruncated(row) && <span className="text-warn">（复制的内容同样经过截断）</span>}
         </div>
         <pre className="mono max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-3 text-xs leading-5 whitespace-pre-wrap break-all">
           <Highlight text={row.message} terms={highlight} />

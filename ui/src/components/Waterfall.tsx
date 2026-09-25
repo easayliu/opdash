@@ -556,7 +556,7 @@ const SpanRow = memo(function SpanRow({ node: n, top, isSel, isTabStop, isCollap
       onClick={() => onSelect(s.span_id, isSel)}
     >
       <div className="flex shrink-0 items-center gap-1.5 overflow-hidden pr-3" style={{ width: leftW, paddingLeft: 8 + n.depth * (isMobile ? 10 : 16) }}>
-        <Hint text={isCollapsed ? '展开' : '折叠（也可以按左右方向键）'} asChild>
+        <Hint text={isCollapsed ? '展开' : '折叠（也可使用左右方向键）'} asChild>
           <button
             type="button"
             tabIndex={-1}
@@ -576,7 +576,7 @@ const SpanRow = memo(function SpanRow({ node: n, top, isSel, isTabStop, isCollap
         </span>
         {isErr && <AlertTriangleIcon className="size-4 shrink-0 text-danger" aria-label="错误" />}
         {n.orphan && (
-          <Hint text={`父 span ${s.parent_span_id} 不在结果里（采样或未入库）`}>
+          <Hint text={`父 span ${s.parent_span_id} 不在结果中（已被采样丢弃或尚未入库）`}>
             <Badge tone="warn">父缺失</Badge>
           </Hint>
         )}
@@ -631,7 +631,7 @@ function FilledSql({ sql, dbSystem }: { sql: string; dbSystem?: AttrValue }) {
   return (
     <div className="border-b border-border/60 px-4 py-3">
       <div className="mb-1.5 flex items-center gap-1.5 text-2xs text-muted-fg">
-        <span className="font-medium">填参后的 SQL</span>
+        <span className="font-medium">代入参数后的 SQL</span>
         <CopyButton text={() => pretty} title="复制 SQL" size="xs" />
       </div>
       <pre className="mono max-h-96 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-2xs leading-[1.125rem] whitespace-pre-wrap break-all">{pretty}</pre>
@@ -799,7 +799,7 @@ export function SpanPanel({
         <div className="mono mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-2xs text-muted-fg">
           <span className="flex items-center gap-1.5 whitespace-nowrap">
             span {span.span_id}
-            <CopyButton text={span.span_id} title="复制 span id" size="xs" />
+            <CopyButton text={span.span_id} title="复制 Span ID" size="xs" />
           </span>
           <span className="ml-auto flex items-center gap-1">
             {metricsLink && (
@@ -832,7 +832,7 @@ export function SpanPanel({
           </button>
         ))}
         {/* 一屏几十条属性，问人「这个 span 长啥样」时要的是一整坨，不是一条条点 */}
-        {tabCount > 0 && <CopyButton text={tabJson} title={`把当前页签的 ${tabCount} 条复制成 JSON`} size="xs" className="mr-3 ml-auto text-2xs" label="复制全部" />}
+        {tabCount > 0 && <CopyButton text={tabJson} title={`将当前页签的 ${tabCount} 条复制为 JSON`} size="xs" className="mr-3 ml-auto text-2xs" label="复制全部" />}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {/* 属性是点开这个 span 才去查的，转一下比先渲染一屏空的好 */}
@@ -891,8 +891,8 @@ export function SpanPanel({
                   >
                     {l.trace_id} / {l.span_id}
                   </Link>
-                  <CopyButton text={l.trace_id} title="复制 trace id" size="xs" className="h-5" />
-                  <CopyButton text={l.span_id} title="复制 span id" size="xs" className="h-5" />
+                  <CopyButton text={l.trace_id} title="复制 Trace ID" size="xs" className="h-5" />
+                  <CopyButton text={l.span_id} title="复制 Span ID" size="xs" className="h-5" />
                 </div>
                 <KV entries={Object.entries(l.attributes)} />
               </div>

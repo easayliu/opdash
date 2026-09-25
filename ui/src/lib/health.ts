@@ -57,7 +57,7 @@ export function serviceHealth(s: ServiceStat): { level: Health; reasons: string[
   // 对比时段没错、现在开始出错：哪怕比例还没到 1% 也值得看一眼
   if (s.prev && s.prev.errors === 0 && s.errors > 0 && s.error_rate >= 0.002) {
     bump('warn')
-    reasons.push('对比时段没有错误，现在开始出错')
+    reasons.push('对比时段无错误，当前时段出现错误')
   }
   return { level, reasons }
 }

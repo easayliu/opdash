@@ -11,7 +11,7 @@ import { formatTs } from '@/lib/time'
  */
 export function chartSummary(kind: string, fromMs: number, toMs: number, body: string): string {
   const span = `${formatTs(fromMs, { ms: false })} 到 ${formatTs(toMs, { ms: false })}`
-  return body ? `${kind}，${span}，${body}` : `${kind}，${span}，这段时间没有数据`
+  return body ? `${kind}，${span}，${body}` : `${kind}，${span}，此时段没有数据`
 }
 
 /** 系列多的时候只念前几条，剩下的报个数——念二十条没人听得完 */

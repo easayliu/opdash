@@ -73,7 +73,7 @@ function aggOptions(info?: MetricInfo): AggOption[] {
     case 'Sum':
       return info.monotonic
         ? [
-            opt('rate', 'value', '每秒增量', 'Cumulative 的按时间线相减，进程重启认得出来'),
+            opt('rate', 'value', '每秒增量', 'Cumulative 类型按时间线逐点相减，可识别进程重启'),
             opt('increase', 'value', '增量（每步长）'),
             opt('last', 'value', '累计值'),
           ]
@@ -191,7 +191,7 @@ export function MetricsPage() {
         {/* 手机上步长与服务排满一行，服务下拉占剩下的宽度 */}
         <span className="flex w-full items-center gap-2 py-2 md:ml-auto md:w-auto">
           {view === 'board' && (
-            <Hint text="每个点多长时间" asChild>
+            <Hint text="每个数据点代表的时长" asChild>
               <Select value={params.get('step') ?? ''} onChange={(e) => set({ step: e.target.value || null })} className="shrink-0">
                 {STEPS.map((s) => (
                   <option key={s.value} value={s.value}>
@@ -209,7 +209,7 @@ export function MetricsPage() {
             searchPlaceholder="筛服务名…"
             emptyText="没有匹配的服务"
             className="w-44 max-md:w-auto max-md:min-w-0 max-md:flex-1"
-            title="看哪个服务的指标"
+            title="选择要查看指标的服务"
           />
           {catalog.isFetching && <Spinner className="size-3.5" />}
         </span>
@@ -292,8 +292,8 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
   if (!service) {
     return (
       <EmptyState
-        title="先选一个服务"
-        hint={allServices.length ? '上面的下拉里是最近有上报指标的服务。' : '这段时间没有任何服务上报指标。'}
+        title="请先选择服务"
+        hint={allServices.length ? '上方下拉列表中为近期上报过指标的服务。' : '此时段没有任何服务上报指标。'}
       />
     )
   }
@@ -307,15 +307,15 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
   if (!sections.length) {
     return (
       <EmptyState
-        title={`${service} 没有看板能认出来的指标`}
+        title={`${service} 没有看板可识别的指标`}
         hint={
           metrics.length
-            ? `它上报了 ${metrics.length} 个指标，但都不是语义约定里的那几套（HTTP / JVM / 数据库连接池 / Kafka / Go）。去「全部指标」里挑。`
-            : '这段时间它一个指标都没报。'
+            ? `该服务上报了 ${metrics.length} 个指标，但均不属于看板支持的语义约定（HTTP、JVM、数据库连接池、Kafka、Go）。请在「全部指标」中选择。`
+            : '该服务在此时段未上报任何指标。'
         }
         action={
           <Button size="sm" onClick={() => set({ view: 'all' })}>
-            去全部指标
+            前往全部指标
           </Button>
         }
       />
@@ -328,11 +328,11 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
       <CrossLinks service={service} rangeParams={rangeParams} attrs={pageAttrs} />
       {pageAttrs.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="text-2xs text-muted-fg">整页只看</span>
+          <span className="text-2xs text-muted-fg">整页仅显示</span>
           {pageAttrs.map((a) => (
             <span key={a} className="mono inline-flex h-7 items-center gap-1.5 rounded-md bg-accent-soft px-2 text-xs text-accent">
               {a}
-              <Hint text="去掉这个条件" asChild>
+              <Hint text="移除此条件" asChild>
                 <button type="button" onClick={() => setAttrs(pageAttrs.filter((x) => x !== a))}>
                   <XIcon className="size-3.5" />
                 </button>
@@ -348,23 +348,23 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
         <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-fg">
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block h-3 w-0 border-l border-dashed border-warn" />
-            这段时间
+            此时段内
             {eventsQ.data!.events.filter((e) => e.kind === 'restart').length > 0 && (
               <b className="font-semibold text-warn">{eventsQ.data!.events.filter((e) => e.kind === 'restart').length} 次进程重启</b>
             )}
             {eventsQ.data!.events.filter((e) => e.kind === 'start').length > 0 && (
-              <b className="font-semibold text-fg">{eventsQ.data!.events.filter((e) => e.kind === 'start').length} 个 pod 新起</b>
+              <b className="font-semibold text-fg">{eventsQ.data!.events.filter((e) => e.kind === 'start').length} 个新 pod 启动</b>
             )}
-            ，图上的虚线就是那一刻
+            ，图中虚线标出了对应时刻
           </span>
           {eventsQ.data!.events.slice(0, 6).map((e) => (
             <Hint text={e.pod}>
               <span key={`${e.kind}${e.t_ms}${e.pod}`} className="mono">
-                {formatTs(e.t_ms, { ms: false, date: false })} {e.kind === 'restart' ? '重启' : '新起'} {e.pod.replace(/^.*?-(?=[0-9a-f]{6,}-)/, '…-')}
+                {formatTs(e.t_ms, { ms: false, date: false })} {e.kind === 'restart' ? '重启' : '启动'} {e.pod.replace(/^.*?-(?=[0-9a-f]{6,}-)/, '…-')}
               </span>
             </Hint>
           ))}
-          {eventsQ.data!.events.length > 6 && <span>还有 {eventsQ.data!.events.length - 6} 次</span>}
+          {eventsQ.data!.events.length > 6 && <span>另有 {eventsQ.data!.events.length - 6} 次</span>}
         </div>
       )}
       <Overview service={service} rangeParams={rangeParams} sections={sections} step={step} pageAttrs={pageAttrs} />
@@ -398,11 +398,11 @@ function MetricDashboard({ service, rangeParams, allServices }: { service: strin
       ))}
       {uncovered > 0 && (
         <div className="pb-2 text-2xs text-muted-fg">
-          这个服务还有 {uncovered} 个指标看板没画（Kafka 的细项、SDK 自己的导出指标之类），在
+          本服务另有 {uncovered} 个指标未纳入看板（如 Kafka 的细分指标、SDK 自身的导出指标），可在
           <button type="button" className={cn('mx-1', linkClass)} onClick={() => set({ view: 'all' })}>
             全部指标
           </button>
-          里。
+          中查看。
         </div>
       )}
     </div>
@@ -428,8 +428,7 @@ function CrossLinks({ service, rangeParams, attrs = [] }: { service: string; ran
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2">
       <span className="text-2xs text-muted-fg">
-        图上<b className="font-semibold text-fg">点一个点</b>能带着那一格的时间和那条线的标签跳过去；
-        横向拖一段是缩小时间范围。整段跳：
+        点击图上<b className="font-semibold text-fg">任意数据点</b>，可带着该时间段与曲线标签跳转；横向拖选可缩小时间范围。跳转整个时间范围：
       </span>
       {/* 手机上五个按钮排成一行横向滑，不折成两行 */}
       <span className="-mx-3 flex w-[calc(100%+1.5rem)] items-center gap-2 overflow-x-auto px-3 [scrollbar-width:none] md:contents [&>*]:shrink-0">
@@ -638,7 +637,7 @@ function DashboardPanel({
       ref={ref}
       className={cn('flex flex-col', wide && 'lg:col-span-2')}
       title={
-        <Hint text={`${v.metric}　点开在「全部指标」里继续拆`} asChild>
+        <Hint text={`${v.metric}　点击可在「全部指标」中进一步拆分`} asChild>
           <button
             type="button"
             className="flex min-w-0 items-baseline gap-2 text-left hover:text-accent"
@@ -669,7 +668,7 @@ function DashboardPanel({
         <ErrorBox error={data.error} onRetry={() => data.refetch()} />
       ) : data.data && !hasPoints && !data.isFetching ? (
         // 一条线都没有，或者有线但整段全是空洞（比如这段时间一次 GC 都没发生）
-        <div className="px-4 py-8 text-center text-xs text-muted-fg">这段时间没有数据点</div>
+        <div className="px-4 py-8 text-center text-xs text-muted-fg">此时段没有数据点</div>
       ) : (
         // relative：点选下钻的弹层按图上的坐标绝对定位
         <div className="relative flex flex-1 flex-col px-2 pt-2 pb-1">
@@ -723,7 +722,7 @@ function DashboardPanel({
             hidden={hidden}
             onToggle={toggle}
             bars={v.kind === 'bars'}
-            more={data.data?.truncated ? '时间线不止这些，只画了量最大的几条；点标题去「全部指标」里拆' : undefined}
+            more={data.data?.truncated ? '仅绘制了量最大的几条时间线；点击标题可在「全部指标」中进一步拆分' : undefined}
           />
           )}
           {drill && data.data && (
@@ -769,7 +768,7 @@ function TopTable({
     .filter((x) => x.r.labels.length)
     .sort((a, b) => b.v - a.v)
   const total = list.reduce((n, x) => n + x.v, 0)
-  if (!list.length) return <div className="px-2 py-8 text-center text-xs text-muted-fg">这段时间没有数据点</div>
+  if (!list.length) return <div className="px-2 py-8 text-center text-xs text-muted-fg">此时段没有数据点</div>
   return (
     <table className="w-full table-fixed border-collapse text-xs">
       <tbody>
@@ -783,7 +782,7 @@ function TopTable({
               key={r.name}
               className={cn('row-hover border-b border-border/60 last:border-b-0', onPick && 'cursor-pointer', active && 'row-selected')}
               onClick={() => onPick?.(item)}
-              title={onPick ? `${item}\n点一下整页只看它` : item}
+              title={onPick ? `${item}\n点击后整页仅显示此项` : item}
             >
               <td className="w-1/2 truncate py-1.5 pl-1.5 pr-2">
                 <span className="mr-2 inline-block size-2 rounded-sm align-middle" style={{ background: colors[i]?.color }} />
@@ -873,7 +872,7 @@ function DrillPopover({
   const links: { to: string; label: string; title?: string }[] = [
     {
       to: tracesHref({ service: svc, attrs: ctx.traceAttrs, spanName: ctx.spanName, errorOnly: ctx.errorOnly, sort: 'duration' }, win),
-      label: '这一格的链路',
+      label: '该时间段的链路',
     },
   ]
   if (minMs != null && minMs > 0) {
@@ -885,7 +884,7 @@ function DrillPopover({
   if (errGroups.length > 0) {
     links.push({
       to: errorsHref({ service: svc, spanName: ctx.spanName }, win),
-      label: `这一格的报错 · ${errGroups.length} 种`,
+      label: `该时间段的报错 · ${errGroups.length} 种`,
       title: errGroups
         .slice(0, 3)
         .map((g) => `${errorTitle(g)}${g.message ? `: ${g.message}` : ''}（${g.count} 次）`)
@@ -894,7 +893,7 @@ function DrillPopover({
   }
   links.push({
     to: logsHref({ dim: logDim, service: svc, dims: ctx.logDims, levels: 'ERROR,WARN' }, win),
-    label: '这一格的错误日志',
+    label: '该时间段的错误日志',
   })
   links.push({ to: logsHref({ dim: logDim, service: svc, dims: ctx.logDims }, win), label: '全部日志' })
 
@@ -930,14 +929,14 @@ function DrillPopover({
           ))}
         </div>
         {errs.isSuccess && errGroups.length === 0 && (
-          <Hint text="这一格里这个服务没有出错的入口 span（Server / Consumer）">
+          <Hint text="该时间段内，本服务没有出错的入口 span（Server / Consumer）">
             <div className="mt-1.5 text-2xs text-muted-fg">
-              这一格没有报错<span className="hidden sm:inline">——尖的是耗时不是错误</span>
+              该时间段没有报错<span className="hidden sm:inline">，尖峰来自耗时而非错误</span>
             </div>
           </Hint>
         )}
         {!ctx.useful && ctx.label === '' && (
-          <div className="mt-1.5 text-2xs text-muted-fg">这个面板没有能带过去的标签，只按服务和这一格的时间筛</div>
+          <div className="mt-1.5 text-2xs text-muted-fg">此面板没有可携带的标签，仅按服务与该时间段筛选</div>
         )}
       </div>
     </>
@@ -985,7 +984,7 @@ function PanelLegend({
       {shown.map((s, i) => {
         const off = hidden?.has(s.name)
         return (
-          <Hint key={s.name} text={onToggle ? `${s.name}（点一下只摘掉 / 加回这条线）` : s.name} asChild>
+          <Hint key={s.name} text={onToggle ? `${s.name}（点击可隐藏或恢复此曲线）` : s.name} asChild>
             <button
               type="button"
               disabled={!onToggle}
@@ -1084,7 +1083,7 @@ function useChartData(data: MetricQueryResponse | undefined, { percent = false, 
         ...all.slice(0, SERIES_SLOTS),
         {
           labels: [],
-          name: `其它 ${tail.length} 条`,
+          name: `其他 ${tail.length} 条`,
           values,
           min: present.length ? Math.min(...present) : null,
           max: present.length ? Math.max(...present) : null,
@@ -1183,7 +1182,7 @@ function MetricExplorer({
   const markers: ChartMarker[] = (exemplars.data?.exemplars ?? []).map((e) => ({
     t_ms: e.t_ms,
     value: e.value,
-    title: `${formatTs(e.t_ms, { ms: false })}  ${format(e.value)}  ${e.service} — 点开看这次请求`,
+    title: `${formatTs(e.t_ms, { ms: false })}  ${format(e.value)}  ${e.service} — 点击查看此次请求`,
     onClick: () => navigate(traceHref(e.trace_id, e.t_ms), { state: from }),
   }))
 
@@ -1220,7 +1219,7 @@ function MetricExplorer({
             onChange={pick}
             options={shown.map((m) => ({ value: m.name, note: m.type }))}
             placeholder={`选择指标${loading ? '' : `（${shown.length}）`}`}
-            searchPlaceholder="搜指标名…"
+            searchPlaceholder="搜索指标名…"
             emptyText="没有匹配的指标"
             loading={loading}
             mono
@@ -1236,11 +1235,11 @@ function MetricExplorer({
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {!metric ? (
           <EmptyState
-            title="选一个指标"
+            title="请选择指标"
             hint={
               shown.length === 0
-                ? '这段时间里没有指标数据。metricpipe 起来了吗？OTLP 指标发到它的 4317 / 4318 端口。'
-                : 'counter 默认看每秒增量，直方图默认看分位数。想看成套的面板去「服务看板」。'
+                ? '此时段没有指标数据。请确认 metricpipe 已启动，且 OTLP 指标已发送至其 4317 / 4318 端口。'
+                : 'counter 默认显示每秒增量，直方图默认显示分位数。如需成套面板，请前往「服务看板」。'
             }
           />
         ) : (
@@ -1255,7 +1254,7 @@ function MetricExplorer({
                 {info && <Badge tone={typeTone(info.type)}>{info.type}</Badge>}
                 {info?.unit && info.unit !== '1' && <Badge>{info.unit}</Badge>}
                 {info?.temporality === 'Cumulative' && (
-                  <Hint text="存的是累计值，速率是查询时相减出来的">
+                  <Hint text="存储的是累计值，速率由查询时相减得出">
                     <Badge>累计</Badge>
                   </Hint>
                 )}
@@ -1292,7 +1291,7 @@ function MetricExplorer({
                       ))}
                     </span>
                   )}
-                  <Hint text="每个点多长时间" asChild>
+                  <Hint text="每个数据点代表的时长" asChild>
                     <Select value={step} onChange={(e) => set({ step: e.target.value || null })}>
                       {STEPS.map((s) => (
                         <option key={s.value} value={s.value}>
@@ -1304,7 +1303,7 @@ function MetricExplorer({
                   <Button size="md" active={showExemplars} onClick={() => set({ ex: showExemplars ? '0' : null })}>
                     exemplar
                   </Button>
-                  <InfoHint text="指标上挂的 trace id：点图上的圆点直接跳到那次请求" />
+                  <InfoHint text="指标上关联的 Trace ID：点击图上的圆点可查看对应请求的链路" />
                 </span>
               </div>
               <GroupBy metric={metric} rangeParams={rangeParams} by={by} onChange={(v) => setList('by', v)} />
@@ -1357,12 +1356,12 @@ function MetricExplorer({
                 )}
                 {data.data?.truncated && (
                   <div className="border-t border-border px-4 py-2 text-2xs text-muted-fg">
-                    时间线太多，只画了最大的 {rows.length} 条——加个过滤条件，或者少选一个分组维度。
+                    时间线过多，仅绘制了最大的 {rows.length} 条；请添加过滤条件，或减少分组维度。
                   </div>
                 )}
                 {data.data && rows.length === 0 && !data.isFetching && (
                   <div className="border-t border-border px-4 py-6 text-center text-xs text-muted-fg">
-                    这段时间没有数据点。换个时间范围，或者去掉过滤条件试试。
+                    此时段没有数据点。请调整时间范围，或移除过滤条件后重试。
                   </div>
                 )}
               </Card>
@@ -1401,7 +1400,7 @@ function MetricExplorer({
 
               {showExemplars && !!exemplars.data?.exemplars.length && (
                 <div className="mt-2 text-2xs text-muted-fg">
-                  图上 {exemplars.data.exemplars.length} 个圆点是 exemplar（指标上挂的 trace id），点一下跳到那次请求的链路。
+                  图上 {exemplars.data.exemplars.length} 个圆点是 exemplar（指标上关联的 Trace ID），点击可查看对应请求的链路。
                 </div>
               )}
             </div>
@@ -1436,7 +1435,7 @@ function MetricList({
       <div className="border-b border-border p-2.5">
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-fg" />
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`搜指标名（${metrics.length}）`} className="pl-9" aria-label="搜指标" />
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`搜索指标名（${metrics.length}）`} className="pl-9" aria-label="搜索指标" />
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
@@ -1495,7 +1494,7 @@ function GroupBy({ metric, rangeParams, by, onChange }: { metric: string; rangeP
       {by.map((k) => (
         <span key={k} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
           {k}
-          <Hint text="去掉这个维度" asChild>
+          <Hint text="移除此维度" asChild>
             <button type="button" onClick={() => onChange(by.filter((x) => x !== k))}>
               <XIcon className="size-3.5" />
             </button>
@@ -1556,7 +1555,7 @@ function LabelFilters({ metric, rangeParams, attrs, onChange }: { metric: string
       {attrs.map((a) => (
         <span key={a} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
           {a}
-          <Hint text="去掉" asChild>
+          <Hint text="移除" asChild>
             <button type="button" onClick={() => onChange(attrs.filter((x) => x !== a))}>
               <XIcon className="size-3.5" />
             </button>
@@ -1569,7 +1568,7 @@ function LabelFilters({ metric, rangeParams, attrs, onChange }: { metric: string
         value={value}
         onChange={(e) => setValue(e.target.value)}
         list="metric-label-values"
-        placeholder="值（留空 = 只要有这个标签）"
+        placeholder="值（留空表示只要求存在该标签）"
         className="mono h-8 min-w-0 flex-1 text-xs md:w-56 md:flex-none"
         aria-label="标签值"
         onKeyDown={(e) => {
@@ -1586,7 +1585,7 @@ function LabelFilters({ metric, rangeParams, attrs, onChange }: { metric: string
       </datalist>
       <Button size="sm" onClick={add} disabled={!key.trim()}>
         <PlusIcon className="size-4" />
-        加条件
+        添加条件
       </Button>
     </div>
   )

@@ -106,7 +106,7 @@ export function TracesPage() {
       <TraceFilters state={filter} rangeParams={{ from: range.fromMs, to: range.toMs }} onChange={setFilter} />
       {filter.service && (
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 md:px-4">
-          <span className="text-2xs text-muted-fg">{filter.service} 这段时间的</span>
+          <span className="text-2xs text-muted-fg">{filter.service} 在此时段的</span>
           {meta.data?.metrics && (
             <Link to={metricsHref(filter.service, { fromMs: range.fromMs, toMs: range.toMs })} className={buttonClass({ size: 'xs' })}>
               指标看板
@@ -145,11 +145,11 @@ export function TracesPage() {
         />
         <div className="mt-1 flex items-center justify-between gap-2 text-2xs text-muted-fg">
           <span>
-            <span className="hidden md:inline">纵轴为耗时（对数刻度），每格是一个时间桶里落在这一档的{heatSubject}数：</span>
+            <span className="hidden md:inline">纵轴为耗时（对数刻度），每格表示一个时间桶内落在该耗时区间的{heatSubject}数：</span>
             <span className="mx-0.5 inline-block size-2.5 rounded-sm align-middle" style={{ background: 'var(--chart-1)' }} /> 越深越多，
             <span className="mx-0.5 inline-block size-2.5 rounded-sm align-middle" style={{ background: 'var(--level-error)' }} /> 偏红表示错误占比高
             {heat.data && `；共 ${heat.data.total.toLocaleString('zh-CN')} 个`}
-            <span className="hidden md:inline">。拖一段缩小时间，点一格只看这一档。</span>
+            <span className="hidden md:inline">。拖选可缩小时间范围，点击某格可只看该耗时区间。</span>
           </span>
           <StatsLine stats={heat.data?.stats} className="hidden text-2xs text-muted-fg sm:inline" />
         </div>
@@ -160,7 +160,7 @@ export function TracesPage() {
           {search.isFetching && !search.data
             ? '查询中…'
             : search.data
-              ? `${traces.length} 条链路${traces.length >= limit ? `（只取前 ${limit} 条，${filter.sort === 'duration' ? '最慢在前' : '最新在前'}）` : ''}`
+              ? `${traces.length} 条链路${traces.length >= limit ? `（仅显示前 ${limit} 条，${filter.sort === 'duration' ? '最慢在前' : '最新在前'}）` : ''}`
               : ''}
         </span>
         {search.data && <StatsLine stats={search.data.stats} className="hidden text-2xs text-muted-fg sm:inline" />}
@@ -192,8 +192,8 @@ export function TracesPage() {
             title="没有匹配的链路"
             hint={
               filter.service
-                ? '试试放宽时间范围、去掉耗时 / 属性条件；如果刚发生，采集有几秒延迟。'
-                : '不选服务时只能查最近 6 小时内的链路；选一个服务可以查更长的范围。'
+                ? '可尝试放宽时间范围、移除耗时或属性条件；如果问题刚刚发生，请注意采集存在数秒延迟。'
+                : '未选择服务时仅能查询最近 6 小时内的链路；选择服务后可查询更长的范围。'
             }
           />
         )}
@@ -219,7 +219,7 @@ export function TracesPage() {
                 <div className="mt-1 flex items-center gap-2 text-2xs text-muted-fg">
                   {t.error_count > 0 && <Badge tone="danger">{t.error_count} 错误</Badge>}
                   {t.root_missing && (
-                    <Hint text="没找到根 span，显示的是最早的那个 span">
+                    <Hint text="未找到根 span，此处显示最早的 span">
                       <Badge tone="warn">根缺失</Badge>
                     </Hint>
                   )}
@@ -231,7 +231,7 @@ export function TracesPage() {
                   </Hint>
                   <span className="mono flex shrink-0 items-center gap-1 text-accent">
                     {t.trace_id.slice(0, 8)}…
-                    <CopyButton text={t.trace_id} title="复制完整 trace id" size="xs" />
+                    <CopyButton text={t.trace_id} title="复制完整 Trace ID" size="xs" />
                   </span>
                 </div>
               </li>
@@ -251,7 +251,7 @@ export function TracesPage() {
                 <th className="w-20 px-3 py-2 text-right font-medium">span</th>
                 <th className="w-20 px-3 py-2 text-right font-medium">错误</th>
                 <th className="w-80 px-3 py-2 text-left font-medium">涉及服务</th>
-                <th className="w-36 px-3 py-2 text-left font-medium">trace id</th>
+                <th className="w-36 px-3 py-2 text-left font-medium">Trace ID</th>
               </tr>
             </thead>
             <tbody>
@@ -261,7 +261,7 @@ export function TracesPage() {
                   <td className="truncate px-3 py-2">
                     <span className="text-muted-fg">{t.root_service}</span> <span className="font-medium">{t.root_name}</span>
                     {t.root_missing && (
-                      <Hint text="没找到根 span，显示的是最早的那个 span" className="ml-1">
+                      <Hint text="未找到根 span，此处显示最早的 span" className="ml-1">
                         <Badge tone="warn">根缺失</Badge>
                       </Hint>
                     )}
@@ -279,7 +279,7 @@ export function TracesPage() {
                       <Link to={traceHref(t)} state={from} className={linkClass} onClick={(e) => e.stopPropagation()}>
                         {t.trace_id.slice(0, 12)}…
                       </Link>
-                      <CopyButton text={t.trace_id} title="复制完整 trace id" size="xs" reveal />
+                      <CopyButton text={t.trace_id} title="复制完整 Trace ID" size="xs" reveal />
                     </span>
                   </td>
                 </tr>

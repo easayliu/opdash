@@ -46,7 +46,7 @@ function Pager({ offset, limit, atEnd, hitCap, maxOffset, onPage }: PagerProps) 
       <Button
         size="sm"
         disabled={atEnd || hitCap}
-        title={hitCap ? `最多翻到第 ${formatNumber(maxOffset)} 条，请缩小范围` : atEnd ? '已经是最后一页' : undefined}
+        title={hitCap ? `最多可翻至第 ${formatNumber(maxOffset)} 条，请缩小查询范围` : atEnd ? '已是最后一页' : undefined}
         onClick={() => onPage(offset + limit)}
       >
         下一页
@@ -108,7 +108,7 @@ export function LogsPage() {
 
   const byId = !!(filter.trace_id || filter.span_id)
   /**
-   * 按 id 查时要不要裁时间。**一律要裁**，除非人自己点了「不限时间再找一次」。
+   * 按 id 查时要不要裁时间。**一律要裁**，除非人自己点了「不限时间重新查找」。
    *
    * span_id 上没有任何索引，trace_id 的 bloom filter 也只剪掉九成七，两条路不带时间范围都是
    * 几十 GB 的全表扫描：2026-09-21 线上实测（关掉 query condition cache）span 点查 31.3 G 行 /
@@ -118,7 +118,7 @@ export function LogsPage() {
    * 以前这里只认 URL 上字面写着的 `from` / `to`，`range=1h` 这种相对范围不算数，于是
    * `logs?span_id=…&range=1h` 每打开一次就是一次 38 GB 的扫描，App.tsx 里粘 span id 跳过来
    * 带的 `range=7d` 也白带。现在页面当前是什么范围就按什么范围裁，查不到再点空状态上的
-   * 「不限时间再找一次」兜底（见下面的 EmptyState）。
+   * 「不限时间重新查找」兜底（见下面的 EmptyState）。
    *
    * 代价是跳进来的链接得自己带上合适的时间窗，不然会撞上 1 小时的默认值——拼链接的地方
    * 都收在 `lib/links.ts` 的 `logsHref` 里，手上有确定时刻的调用方传 `around(ts)`。
@@ -243,7 +243,7 @@ export function LogsPage() {
           {stale
             ? '查询中…'
             : follow
-              ? `${TAIL_LABEL[tail.status]} · 已收 ${formatNumber(rows.length)} 行`
+              ? `${TAIL_LABEL[tail.status]} · 已接收 ${formatNumber(rows.length)} 行`
               : total !== undefined
                 ? `共 ${formatNumber(total)} 条${total > limit ? `，显示第 ${formatNumber(offset + 1)} ~ ${formatNumber(Math.min(offset + limit, total))} 条` : ''}`
                 : search.data
@@ -253,11 +253,11 @@ export function LogsPage() {
         {(search.isFetching || (follow && tail.status !== 'live')) && <Spinner className="size-4" />}
         {/* 整词模式是后端按词长自动切的，不提示的话「搜 id 的前半截搜不到」会很费解 */}
         {!stale && !!search.data?.token_terms?.length && (
-          <Hint text={`${search.data.token_terms.join('、')}：够长的标识符按整词匹配，走 message 上的 token 索引，快很多。要搜片段请用正则模式（.*）。`}>
+          <Hint text={`${search.data.token_terms.join('、')}：足够长的标识符按整词匹配，可利用 message 的 token 索引，查询明显更快。如需匹配片段，请使用正则模式（.*）。`}>
             <span
               className="text-2xs text-muted-fg"
             >
-              按整词匹配 · 已走索引
+              按整词匹配 · 已使用索引
             </span>
           </Hint>
         )}
@@ -269,7 +269,7 @@ export function LogsPage() {
               active={follow}
               disabled={!range.relative}
               // 只在按钮不可用时说明原因；可用时「跟随」二字已经说清楚
-              title={range.relative ? undefined : '只有相对时间范围（最近 N 分钟）才能跟随'}
+              title={range.relative ? undefined : '仅相对时间范围（最近 N 分钟）支持跟随'}
               onClick={() => set({ follow: follow ? null : '1', order: null, offset: null })}
             >
               {follow ? <PauseIcon className="size-4" /> : <PlayIcon className="size-4" />}
@@ -336,7 +336,7 @@ export function LogsPage() {
               highlight={highlight}
               onContext={setContextRow}
               onPivot={onPivot}
-              emptyText={<EmptyState title="等待新日志…" hint="新的行会一条条打在下面。往上滚可以停住不跟，滚回底部又接上。" />}
+              emptyText={<EmptyState title="等待新日志…" hint="新日志将逐行追加在下方。向上滚动可暂停跟随，滚回底部后自动恢复。" />}
             />
           ) : (
             <LogTable
@@ -347,23 +347,23 @@ export function LogsPage() {
               onPivot={onPivot}
               emptyText={
                 <EmptyState
-                  title={follow ? '等待新日志…' : '这个范围内没有匹配的日志'}
+                  title={follow ? '等待新日志…' : '当前范围内没有匹配的日志'}
                   hint={
                     byId ? (
                       <>
-                        这个 trace / span 没有对应的日志：可能是采集延迟（等几秒再刷新），或者这个服务没有打 TID。
+                        此 trace / span 没有对应的日志：可能是采集存在延迟（请稍候数秒后刷新），或该服务未输出 TID。
                         {scoped && (
                           <>
-                            {' '}也可能它不在当前时间范围里——
+                            {' '}也可能不在当前时间范围内——
                             <button type="button" className={linkClass} onClick={() => setUnscoped(true)}>
-                              不限时间再找一次
+                              不限时间重新查找
                             </button>
-                            （要把 30 天的分区全过一遍，实测约 38 GB、十几秒）。
+                            （需扫描全部 30 天的分区，实测约 38 GB、耗时十余秒）。
                           </>
                         )}
                       </>
                     ) : (
-                      '试试放宽时间范围、去掉一个筛选条件，或者检查关键字是否写在了 message 里（logger / thread 有单独的框）。'
+                      '可尝试放宽时间范围、移除部分筛选条件，或确认关键字位于 message 中（logger 与 thread 有单独的输入框）。'
                     )
                   }
                 />
@@ -374,19 +374,19 @@ export function LogsPage() {
           <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-3 text-xs text-muted-fg md:px-4">
             {follow ? (
               <span>
-                新日志由服务端推送（每 {(tail.hello?.interval_ms ?? 1000) / 1000} 秒查一次增量，回看 {(tail.hello?.lookback_ms ?? 60_000) / 1000} 秒兜住晚到的行）；
-                {terminal ? '正序打在下面，往上滚可以停住；' : ''}最多保留 {formatNumber(TAIL_MAX_ROWS)} 行，更早的会被丢掉
+                新日志由服务端推送（每 {(tail.hello?.interval_ms ?? 1000) / 1000} 秒查询一次增量，并回溯 {(tail.hello?.lookback_ms ?? 60_000) / 1000} 秒以补齐延迟到达的日志）；
+                {terminal ? '按时间正序追加在下方，向上滚动可暂停；' : ''}最多保留 {formatNumber(TAIL_MAX_ROWS)} 行，更早的日志将被移除
               </span>
             ) : byId ? (
-              <span>{rows.length >= limit ? `只显示了前 ${formatNumber(limit)} 条，可以把「每页」调大` : `共 ${formatNumber(rows.length)} 条，已经到底了`}</span>
+              <span>{rows.length >= limit ? `仅显示前 ${formatNumber(limit)} 条，可调大「每页」条数` : `共 ${formatNumber(rows.length)} 条，已全部显示`}</span>
             ) : (
               <>
                 <span>
-                  {pager.atEnd ? '已经到底了 · ' : ''}
+                  {pager.atEnd ? '已全部显示 · ' : ''}
                   {total !== undefined
                     ? `第 ${formatNumber(offset + 1)} ~ ${formatNumber(offset + rows.length)} 条，共 ${formatNumber(total)} 条`
                     : `第 ${formatNumber(offset + 1)} ~ ${formatNumber(offset + rows.length)} 条`}
-                  {pager.hitCap && '；已到翻页上限，再往后请缩小时间范围或加筛选'}
+                  {pager.hitCap && '；已达翻页上限，如需查看后续内容，请缩小时间范围或添加筛选'}
                 </span>
                 <Pager {...pager} />
               </>
@@ -407,7 +407,7 @@ function CrossLinks({ service, win, hasMetrics }: { service?: string; win: { fro
   if (!service) return null
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-1.5 md:px-4">
-      <span className="text-2xs text-muted-fg">{service} 这段时间的</span>
+      <span className="text-2xs text-muted-fg">{service} 在此时段的</span>
       {hasMetrics && (
         <Link to={metricsHref(service, win)} className={buttonClass({ size: 'xs' })}>
           指标看板

@@ -88,7 +88,7 @@ export function useLogTail(params: Params, enabled: boolean): TailState {
 
     source.onerror = () => {
       if (source.readyState === EventSource.CLOSED) {
-        setState((s) => ({ ...s, status: 'failed', error: s.error ?? '跟随连接断了，点一下「跟随」重开' }))
+        setState((s) => ({ ...s, status: 'failed', error: s.error ?? '实时跟随已断开，请点击「跟随」重新连接' }))
         return
       }
       setState((s) => ({ ...s, status: 'reconnecting' }))

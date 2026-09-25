@@ -97,8 +97,8 @@ function moverFor(op: OperationStat): Mover | null {
       op,
       kind: 'gone',
       better: false,
-      detail: `${formatNumber(prev.requests)} 次 → 一次都没有`,
-      impact: '接口不见了',
+      detail: `${formatNumber(prev.requests)} 次 → 0 次`,
+      impact: '本时段无调用',
       tone: 'warn',
       score: prev.requests,
     }
@@ -139,7 +139,7 @@ function moverFor(op: OperationStat): Mover | null {
       kind: 'latency',
       better: !slower,
       detail: `P95 ${formatDurationMs(prev.p95_ms)} → ${formatDurationMs(op.p95_ms)}（${formatChange(ratio - 1)}）`,
-      impact: `${slower ? '多' : '少'}耗 ${formatDurationMs(Math.abs(extraMs))}`,
+      impact: `耗时${slower ? '增加' : '减少'} ${formatDurationMs(Math.abs(extraMs))}`,
       tone: slower ? (ratio >= 2 ? 'danger' : 'warn') : 'ok',
       score: Math.abs(extraMs),
     }

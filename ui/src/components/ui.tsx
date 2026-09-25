@@ -489,7 +489,7 @@ export function ErrorBox({ error, onRetry }: { error: unknown; onRetry?: () => v
     <div className="m-4 rounded-md border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
       <div className="font-medium">{e?.status === 401 ? '需要登录' : '查询失败'}</div>
       <div className="mt-0.5 break-all font-normal opacity-90">{e?.message ?? String(error)}</div>
-      {e?.tooHeavy && <div className="mt-1 opacity-80">建议：缩小时间范围，或先加一个服务 / pod / 级别的筛选再查。</div>}
+      {e?.tooHeavy && <div className="mt-1 opacity-80">建议缩小时间范围，或先添加服务、pod 或级别筛选后再查询。</div>}
       {onRetry && (
         <Button size="xs" className="mt-2" onClick={onRetry}>
           重试
@@ -923,7 +923,7 @@ export function Combobox(props: ComboboxProps) {
           </div>
           {shown.length > capped.length && (
             <div className="border-t border-border px-2.5 py-1.5 text-2xs text-muted-fg">
-              还有 {shown.length - capped.length} 项没列出来，继续输入缩小范围
+              另有 {shown.length - capped.length} 项未列出，请继续输入以缩小范围
             </div>
           )}
         </div>

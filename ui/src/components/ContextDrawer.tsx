@@ -53,17 +53,17 @@ export function ContextDrawer({ row, dims, onClose }: { row: LogRow; dims: strin
         </header>
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2 text-xs text-muted-fg md:px-4">
           <span className="min-w-0">
-            锚点 {formatTs(row.ts_ms)}；前后各最多找 {q.data ? Math.round(q.data.window_ms / 60_000) : 60} 分钟
-            {q.data && q.data.before.length < before && ' · 往前已到头'}
-            {q.data && q.data.after.length < after && ' · 往后已到头'}
-            {q.data && !hasAnchor && ' · 锚点行不在结果里（同一毫秒内的行顺序不定）'}
+            锚点 {formatTs(row.ts_ms)}；前后各查找至多 {q.data ? Math.round(q.data.window_ms / 60_000) : 60} 分钟
+            {q.data && q.data.before.length < before && ' · 之前没有更多日志'}
+            {q.data && q.data.after.length < after && ' · 之后没有更多日志'}
+            {q.data && !hasAnchor && ' · 锚点行不在结果中（同一毫秒内的日志顺序不固定）'}
           </span>
           <span className="flex shrink-0 gap-1.5">
             <Button size="xs" onClick={() => setBefore((n) => Math.min(500, n + 100))} disabled={!q.data || q.data.before.length < before}>
-              往前 +100
+              向前 +100
             </Button>
             <Button size="xs" onClick={() => setAfter((n) => Math.min(500, n + 100))} disabled={!q.data || q.data.after.length < after}>
-              往后 +100
+              向后 +100
             </Button>
           </span>
         </div>

@@ -160,7 +160,7 @@ function AttrFilters({ attrs, service, rangeParams, onChange, className }: { att
       {attrs.map((a) => (
         <span key={a} className="mono inline-flex h-8 items-center gap-1.5 rounded-md bg-accent-soft px-2.5 text-xs text-accent">
           {a}
-          <Hint text="去掉" asChild>
+          <Hint text="移除" asChild>
             <button type="button" onClick={() => onChange(attrs.filter((x) => x !== a))}>
               <XIcon className="size-3.5" />
             </button>
@@ -189,7 +189,7 @@ function AttrFilters({ attrs, service, rangeParams, onChange, className }: { att
         onChange={(e) => setValue(e.target.value)}
         list="attr-values"
         disabled={!service}
-        placeholder="值（留空 = 只要有这个属性）"
+        placeholder="值（留空表示只要求存在该属性）"
         className="mono h-8 min-w-0 flex-1 text-xs md:w-72 md:flex-none"
         aria-label="属性值"
         onKeyDown={(e) => {
@@ -206,7 +206,7 @@ function AttrFilters({ attrs, service, rangeParams, onChange, className }: { att
       </datalist>
       <Button size="sm" onClick={add} disabled={!key.trim()}>
         <PlusIcon className="size-4" />
-        加条件
+        添加条件
       </Button>
     </div>
   )

@@ -53,12 +53,12 @@ export interface SectionSpec {
 const HTTP_SERVER: SectionSpec = {
   key: 'http_server',
   title: 'HTTP 服务端',
-  hint: '这个服务收到的请求',
+  hint: '本服务接收的请求',
   panels: [
     {
       key: 'http_server_rate',
       title: '请求量（按状态码）',
-      hint: '每秒请求数，按 HTTP 状态码分开；5xx 那条就是在报错',
+      hint: '每秒请求数，按 HTTP 状态码区分；5xx 曲线即服务端错误',
       variants: [
         { metric: 'http.server.request.duration', agg: 'rate', field: 'count', by: ['http.response.status_code'], kind: 'bars' },
         { metric: 'http.server.duration', agg: 'rate', field: 'count', by: ['http.status_code'], kind: 'bars' },
@@ -70,7 +70,7 @@ const HTTP_SERVER: SectionSpec = {
     {
       key: 'http_server_latency',
       title: '延迟分位',
-      hint: '从直方图的原始桶合并出来的，不是对各实例的分位数取平均',
+      hint: '由直方图的原始桶合并计算，而非对各实例的分位数取平均',
       variants: [
         { metric: 'http.server.request.duration', agg: 'quantile', q: '0.5,0.95,0.99' },
         { metric: 'http.server.duration', agg: 'quantile', q: '0.5,0.95,0.99' },
@@ -80,7 +80,7 @@ const HTTP_SERVER: SectionSpec = {
     {
       key: 'http_route_rate',
       title: 'Top 接口（请求量）',
-      hint: '点一行，整页只看这个接口',
+      hint: '点击某行，整页仅显示该接口',
       variants: [
         { metric: 'http.server.request.duration', agg: 'rate', field: 'count', by: ['http.route'], kind: 'top' },
         { metric: 'http.server.duration', agg: 'rate', field: 'count', by: ['http.route'], kind: 'top' },
@@ -90,7 +90,7 @@ const HTTP_SERVER: SectionSpec = {
     {
       key: 'http_route_p95',
       title: '按接口的 P95',
-      hint: '哪个接口在拖后腿',
+      hint: '定位耗时最高的接口',
       variants: [
         { metric: 'http.server.request.duration', agg: 'quantile', q: '0.95', by: ['http.route'] },
         { metric: 'http.server.duration', agg: 'quantile', q: '0.95', by: ['http.route'] },
@@ -108,12 +108,12 @@ const HTTP_SERVER: SectionSpec = {
 const HTTP_CLIENT: SectionSpec = {
   key: 'http_client',
   title: 'HTTP 客户端',
-  hint: '这个服务打出去的请求',
+  hint: '本服务发出的请求',
   panels: [
     {
       key: 'http_client_rate',
       title: 'Top 下游（调用量）',
-      hint: '点一行，整页只看打给这个地址的调用',
+      hint: '点击某行，整页仅显示发往该地址的调用',
       variants: [
         { metric: 'http.client.request.duration', agg: 'rate', field: 'count', by: ['server.address'], kind: 'top' },
         { metric: 'http.client.duration', agg: 'rate', field: 'count', kind: 'bars' },
@@ -139,7 +139,7 @@ const JVM: SectionSpec = {
     {
       key: 'jvm_memory',
       title: '内存占用（按区）',
-      hint: 'heap 一路涨到 limit 附近又掉不下来，就该看 GC 了',
+      hint: '堆内存持续逼近上限且回收后不回落时，应排查 GC',
       variants: [
         { metric: 'jvm.memory.used', agg: 'last', by: ['jvm.memory.type'] },
         { metric: 'process.runtime.jvm.memory.usage', agg: 'last', by: ['type'] },
@@ -188,17 +188,17 @@ const DB_POOL: SectionSpec = {
     {
       key: 'db_conn',
       title: '连接数（按状态）',
-      hint: 'used 顶到 max 就是池子不够用了',
+      hint: 'used 达到 max 时，说明连接池容量不足',
       variants: [{ metric: 'db.client.connections.usage', agg: 'last', by: ['state'] }],
     },
     {
       key: 'db_pending',
-      title: '等待拿连接的请求',
+      title: '等待获取连接的请求',
       variants: [{ metric: 'db.client.connections.pending_requests', agg: 'last' }],
     },
     {
       key: 'db_wait',
-      title: '拿连接耗时 P95',
+      title: '获取连接耗时 P95',
       variants: [{ metric: 'db.client.connections.wait_time', agg: 'quantile', q: '0.95' }],
     },
     {
@@ -220,7 +220,7 @@ const KAFKA: SectionSpec = {
     {
       key: 'kafka_lag',
       title: '消费堆积（按 topic）',
-      hint: 'records_lag_max：还没消费的消息数，一路涨就是消费跟不上',
+      hint: 'records_lag_max：尚未消费的消息数；持续上升说明消费速度低于生产速度',
       variants: [
         { metric: 'kafka.consumer.records_lag_max', agg: 'max', by: ['topic'] },
         { metric: 'kafka.consumer.records_lag', agg: 'max', by: ['topic'] },
@@ -229,7 +229,7 @@ const KAFKA: SectionSpec = {
     {
       key: 'kafka_consume',
       title: 'Top topic（消费速率）',
-      hint: '点一行，整页只看这个 topic',
+      hint: '点击某行，整页仅显示该 topic',
       variants: [{ metric: 'kafka.consumer.records_consumed_rate', agg: 'avg', by: ['topic'], kind: 'top' }],
     },
     {
@@ -259,7 +259,7 @@ const GO: SectionSpec = {
     { key: 'go_heap', title: '堆内存', variants: [{ metric: 'process.runtime.go.mem.heap_inuse', agg: 'last' }] },
     {
       key: 'go_gc',
-      title: 'GC 暂停 P95',
+      title: 'GC 停顿 P95',
       variants: [{ metric: 'process.runtime.go.gc.pause_ns', agg: 'quantile', q: '0.95' }],
     },
   ],

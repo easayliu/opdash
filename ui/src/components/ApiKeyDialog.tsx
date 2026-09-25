@@ -122,12 +122,12 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
           <KeyRoundIcon className="mt-0.5 size-4 shrink-0 text-muted-fg" />
           <div className="min-w-0 flex-1">
             <h2 id="api-key-title" className="text-sm font-semibold">
-              API key · 给 AI 助手和脚本用
+              API 密钥 · 供 AI 助手与脚本使用
             </h2>
             {user && (
               <Hint text={user.email ?? undefined}>
                 <p className="mt-0.5 truncate text-2xs text-muted-fg">
-                  当前登录 <span className="font-medium text-fg">{user.name}</span> —— key 归在你名下，只有你自己看得到
+                  当前登录 <span className="font-medium text-fg">{user.name}</span> · 密钥归属于你本人，仅你自己可见
                 </p>
               </Hint>
             )}
@@ -139,14 +139,13 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto p-4">
           <p className="text-2xs leading-5 text-muted-fg">
-            key 代表你本人，能看的和你登录后能看的一样。Claude Code 这类 MCP 客户端不会跳浏览器登录，所以靠 key 接{' '}
-            <span className="mono">/mcp</span>；curl / 脚本也能拿它当 <span className="mono">Authorization: Bearer</span>。
-            服务端只存哈希，key 只在生成时显示一次；不要了随时吊销，立刻失效。
+            密钥代表你本人，访问权限与你登录后相同。Claude Code 等 MCP 客户端无法通过浏览器登录，需凭密钥接入{' '}
+            <span className="mono">/mcp</span>；curl 与脚本也可将其用作 <span className="mono">Authorization: Bearer</span>。服务端仅保存哈希值，密钥只在生成时显示一次；不再使用时可随时吊销，吊销后立即失效。
           </p>
 
           <form onSubmit={submit} className="flex flex-wrap items-end gap-2 rounded-md border border-border bg-muted/40 p-3">
             <label className="flex min-w-40 flex-1 flex-col gap-1 text-2xs text-muted-fg">
-              名字（只是标签，方便以后认出是哪台机器 / 哪个客户端）
+              名称（仅作标识，便于日后区分机器或客户端）
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -167,29 +166,29 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
               </Select>
             </label>
             <Button type="submit" variant="primary" size="sm" disabled={busy || !name.trim()}>
-              {busy ? '生成中…' : '生成新 key'}
+              {busy ? '生成中…' : '生成新密钥'}
             </Button>
           </form>
 
           {created && (
             <div className="flex flex-col gap-3 rounded-md border border-brand/50 bg-card p-3">
               <p className="text-xs leading-5">
-                <span className="font-medium">现在就复制。</span>
+                <span className="font-medium">请立即复制。</span>
                 <span className="text-muted-fg">
-                  「{created.name}」只显示这一次，关掉后看不到了；丢了就吊销再生成一把。有效期 {created.expires_in}，到{' '}
+                  「{created.name}」仅显示一次，关闭后无法再次查看；如有遗失，请吊销后重新生成。有效期 {created.expires_in}，将于{' '}
                   {fmt(created.expires_at)} 失效。
                 </span>
               </p>
-              <Secret label="API key" value={created.key} />
-              <Secret label="接入 Claude Code（Streamable HTTP，装过的会换成这把 key）" value={mcpCommand} />
-              <Secret label="接入 Codex（写进 ~/.codex/config.toml，已有的同名段落整段替换）" value={codexConfig} />
+              <Secret label="API 密钥" value={created.key} />
+              <Secret label="接入 Claude Code（Streamable HTTP，已接入的将改用此密钥）" value={mcpCommand} />
+              <Secret label="接入 Codex（写入 ~/.codex/config.toml，替换已有的同名段落）" value={codexConfig} />
               <p className="text-2xs leading-5 text-muted-fg">
-                其它 MCP 客户端填地址 <span className="mono">{created.mcp_url}</span>，请求头{' '}
-                <span className="mono">Authorization: Bearer &lt;key&gt;</span>；之前接过的把旧 key 改掉就行。
+                其他 MCP 客户端请填写地址 <span className="mono">{created.mcp_url}</span>，请求头{' '}
+                <span className="mono">Authorization: Bearer &lt;key&gt;</span>；已接入的客户端替换旧密钥即可。
               </p>
               <div className="flex justify-end">
                 <Button size="xs" onClick={() => setCreated(null)}>
-                  复制好了，收起
+                  已复制，收起
                 </Button>
               </div>
             </div>
@@ -201,11 +200,11 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
 
           <section className="flex min-w-0 flex-col gap-1.5">
             <div className="flex items-center gap-2 text-xs text-muted-fg">
-              <span className="font-medium text-fg">我的 key</span>
+              <span className="font-medium text-fg">我的密钥</span>
               {keys.length > 0 && (
                 <span>
-                  {live} 把在用
-                  {keys.length > live && ` · ${keys.length - live} 把已过期`}
+                  {live} 个有效
+                  {keys.length > live && ` · ${keys.length - live} 个已过期`}
                 </span>
               )}
               {list.isFetching && <Spinner className="size-3" />}
@@ -213,7 +212,7 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
             {list.isError && <p className="text-xs text-danger">{(list.error as Error).message}</p>}
             {list.data && keys.length === 0 && (
               <p className="rounded-md border border-dashed border-border px-3 py-8 text-center text-xs text-muted-fg">
-                还没有 key，上面生成一把
+                暂无密钥，可在上方生成
               </p>
             )}
             {keys.length > 0 && (
@@ -221,7 +220,7 @@ export function ApiKeyDialog({ me, onClose }: { me: AuthMe; onClose: () => void 
                 <table className="w-full min-w-[34rem] text-xs">
                   <thead className="bg-muted/60 text-left text-2xs text-muted-fg">
                     <tr>
-                      <th className="px-2.5 py-1.5 font-medium">名字</th>
+                      <th className="px-2.5 py-1.5 font-medium">名称</th>
                       <th className="px-2.5 py-1.5 font-medium">key</th>
                       <th className="px-2.5 py-1.5 font-medium">到期</th>
                       <th className="hidden px-2.5 py-1.5 font-medium sm:table-cell">最近使用</th>
@@ -262,7 +261,7 @@ function KeyRow({ k, highlight, onRevoke }: { k: ApiKeyInfo; highlight: boolean;
         </Hint>
       </td>
       <td className="mono px-2.5 py-1.5 text-2xs text-muted-fg">
-        <Hint text="key 的前半段，后半段服务端也没存">
+        <Hint text="密钥前缀；其余部分服务端不保存">
           <span>{k.prefix}…</span>
         </Hint>
       </td>
@@ -278,8 +277,8 @@ function KeyRow({ k, highlight, onRevoke }: { k: ApiKeyInfo; highlight: boolean;
         </Hint>
       </td>
       <td className="hidden px-2.5 py-1.5 whitespace-nowrap text-muted-fg sm:table-cell">
-        <Hint text={k.last_used_at ? `最近使用 ${fmt(k.last_used_at)}` : '签出来之后一次都没用过'}>
-          <span>{k.last_used_at ? rel(k.last_used_at) : '从没用过'}</span>
+        <Hint text={k.last_used_at ? `最近使用 ${fmt(k.last_used_at)}` : '生成后尚未使用'}>
+          <span>{k.last_used_at ? rel(k.last_used_at) : '未使用'}</span>
         </Hint>
       </td>
       <td className="px-1.5 py-1.5 text-right">
@@ -288,7 +287,7 @@ function KeyRow({ k, highlight, onRevoke }: { k: ApiKeyInfo; highlight: boolean;
           variant={arm ? 'danger' : 'ghost'}
           className="px-1.5"
           onClick={() => (arm ? onRevoke() : setArm(true))}
-          title={arm ? '再点一下就真的吊销了' : '吊销后立刻失效'}
+          title={arm ? '再次点击以确认吊销' : '吊销后立即失效'}
         >
           <Trash2Icon className="size-3.5" />
           {arm && '确认'}
