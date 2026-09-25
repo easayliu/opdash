@@ -263,6 +263,20 @@ async fn revoke_key(
     }
 }
 
+/// 登录后跳回的地址只认站内路径，别让登录链接把人带去别的站。
+///
+/// 光挡 `//` 不够：浏览器解析 Location 时把 `\` 当 `/`、丢掉 TAB 和换行，`/\evil.example`、
+/// `/<TAB>/evil.example` 都会变成 `//evil.example`。所以路径部分（`?` 之前）不许有 `\`，整串不许有
+/// 空白和控制字符。页面拼 next 用的是 `location.pathname + location.search`，这些字符在里面都已经
+/// 编码过，正常跳转不受影响；查询串里的 `\`（正则关键字）碍不着 origin，放行。
+fn is_local_next(next: &str) -> bool {
+    let path = next.split(['?', '#']).next().unwrap_or("");
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.contains('\\')
+        && !next.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 #[derive(Deserialize)]
 struct LoginQuery {
     next: Option<String>,
@@ -279,9 +293,7 @@ async fn login(
     };
     let base = auth.public_base(&headers);
     let redirect_uri = format!("{base}/api/auth/callback");
-    // 只接受站内路径，别让登录链接把人带去别的站
-    let next =
-        q.next.filter(|n| n.starts_with('/') && !n.starts_with("//")).unwrap_or_else(|| "/".into());
+    let next = q.next.filter(|n| is_local_next(n)).unwrap_or_else(|| "/".into());
     match oidc.begin(redirect_uri, next).await {
         Ok((ticket, url)) => {
             let sealed = oidc.seal_ticket(auth.sealer(), &ticket);
@@ -339,7 +351,9 @@ async fn callback(
         Ok(session) => {
             tracing::info!(user = %session.name, sub = %session.sub, "登录成功");
             // 两个 Set-Cookie：数组形式的 IntoResponse 是 insert，第二个会顶掉第一个，得 append
-            let mut resp = Redirect::to(&ticket.next).into_response();
+            // 登录票是签过名的，按说只会是 login 放进去的值；再核一遍，免得哪天那边的校验被改松
+            let next = if is_local_next(&ticket.next) { ticket.next.as_str() } else { "/" };
+            let mut resp = Redirect::to(next).into_response();
             resp.headers_mut().append(header::SET_COOKIE, auth.session_cookie(&session, secure));
             resp.headers_mut().append(header::SET_COOKIE, clear_ticket);
             resp
@@ -392,4 +406,32 @@ h1{{font-size:18px}}p{{color:#595959}}a{{color:#2f7bbf}}</style>
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_next;
+
+    #[test]
+    fn next_must_stay_on_this_site() {
+        for ok in
+            ["/", "/logs", "/logs?q=timeout&level=ERROR", "/logs?regex=1&q=%5Cd%2B", "/logs?q=a\\d"]
+        {
+            assert!(is_local_next(ok), "{ok}");
+        }
+        for bad in [
+            "https://evil.example",
+            "//evil.example",
+            "/\\evil.example",
+            "/\\/evil.example",
+            "/\tevil.example",
+            "/\t/evil.example",
+            "/\n/evil.example",
+            "/ /evil.example",
+            "logs",
+            "",
+        ] {
+            assert!(!is_local_next(bad), "{bad:?}");
+        }
+    }
 }

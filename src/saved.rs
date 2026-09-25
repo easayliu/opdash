@@ -293,7 +293,8 @@ fn default_name(path: &str, query: &str) -> String {
     s
 }
 
-/// 站内路径：`/` 开头、不是 `//`（那是协议相对地址，会跳去别的站）、不带 `?` / `#`、没有空白和控制字符。
+/// 站内路径：`/` 开头、不是 `//`（那是协议相对地址，会跳去别的站）、不带 `?` / `#` / `\`（浏览器把 `\`
+/// 当 `/`，`/\evil.example` 也是协议相对地址）、没有空白和控制字符。
 fn clean_path(raw: &str) -> Result<String, SaveError> {
     let s = raw.trim();
     if s.is_empty() || !s.starts_with('/') || s.starts_with("//") {
@@ -302,9 +303,9 @@ fn clean_path(raw: &str) -> Result<String, SaveError> {
     if s.len() > PATH_MAX {
         return Err(SaveError::Invalid(format!("path 太长（最多 {PATH_MAX} 字节）")));
     }
-    if s.chars().any(|c| c == '?' || c == '#' || c.is_whitespace() || c.is_control()) {
+    if s.chars().any(|c| matches!(c, '?' | '#' | '\\') || c.is_whitespace() || c.is_control()) {
         return Err(SaveError::Invalid(
-            "path 中不能包含 ?、#、空白或控制字符，查询串请放在 query 中".into(),
+            "path 中不能包含 ?、#、\\、空白或控制字符，查询串请放在 query 中".into(),
         ));
     }
     Ok(s.to_owned())
@@ -438,7 +439,15 @@ mod tests {
     fn rejects_bad_addresses_and_caps_names() {
         let path = temp_path("validate");
         let store = SavedQueryStore::open(&path).unwrap();
-        for bad in ["", "logs", "//evil.example.com/x", "/logs?q=1", "/logs#x", "/lo gs"] {
+        for bad in [
+            "",
+            "logs",
+            "//evil.example.com/x",
+            "/logs?q=1",
+            "/logs#x",
+            "/lo gs",
+            "/\\evil.example.com/x",
+        ] {
             assert!(
                 matches!(store.create("a", "n", bad, ""), Err(SaveError::Invalid(_))),
                 "{bad:?}"
