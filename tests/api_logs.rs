@@ -141,3 +141,20 @@ async fn facets_answer_every_dimension_in_one_query() {
     .await;
     assert_eq!(status, 400, "一个维度都不给也是 400: {body}");
 }
+
+#[tokio::test]
+async fn deeply_nested_keywords_are_rejected_before_any_query() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+
+    // 解析器曾经不限深度：几千个 `(`（URL 编码是 %28）就递归到栈溢出、整个进程 abort
+    let q = "%28".repeat(100);
+    let (status, body) = get_json(
+        &app,
+        &format!("/api/logs/search?from={MIDNIGHT_MS}&to={}&q={q}a", MIDNIGHT_MS + HOUR_MS),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_string().contains("嵌套"), "{body}");
+    assert!(log_sql(&fake).is_empty(), "拒绝了就不该再查库");
+}

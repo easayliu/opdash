@@ -151,7 +151,7 @@ export function LogFilters({ state, dims, rangeParams, scoped, onChange }: Props
       {help && (
         <div className="rounded-md border border-border bg-muted/50 px-4 py-2.5 text-xs leading-6 text-muted-fg">
           关键字模式（不区分大小写）：以空格分隔的词须全部命中；<Kbd>a OR b</Kbd> 任一命中；<Kbd>-词</Kbd> / <Kbd>NOT 词</Kbd> 排除；<Kbd>"带 空格"</Kbd> 视为一个整体；
-          <Kbd>( )</Kbd> 分组，如 <Kbd>(timeout OR refused) -重试</Kbd>。<Kbd>AND</Kbd> / <Kbd>OR</Kbd> / <Kbd>NOT</Kbd> 仅全大写时视为操作符，小写的 or 按普通词处理。正则模式（<Kbd>.*</Kbd>）：ClickHouse <code>match()</code>，RE2 语法，区分大小写，<Kbd>(?i)</Kbd> 忽略大小写。message
+          <Kbd>( )</Kbd> 分组，如 <Kbd>(timeout OR refused) -重试</Kbd>。<Kbd>AND</Kbd> / <Kbd>OR</Kbd> / <Kbd>NOT</Kbd> 仅全大写时视为操作符，小写的 or 按普通词处理。关键字不超过 4096 字节，括号与 <Kbd>NOT</Kbd> 最多嵌套 32 层。正则模式（<Kbd>.*</Kbd>）：ClickHouse <code>match()</code>，RE2 语法，区分大小写，<Kbd>(?i)</Kbd> 忽略大小写，不超过 1024 字节。message
           没有索引，查询会扫描时间范围内的全部日志；先选定服务或 pod 并缩小时间范围，可加快查询。
         </div>
       )}

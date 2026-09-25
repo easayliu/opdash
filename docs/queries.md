@@ -45,6 +45,8 @@
 
 关键字语法见 [README](../README.md#日志检索的关键字语法)。每个词翻译为 `positionCaseInsensitiveUTF8(message, ...)`；全部由词组成的 OR 合并为一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])`，一次扫描完成。`message` 本身没有索引，扫描的是时间范围内的全部行，只有下面「token 索引」一节所述的情形例外。
 
+关键字语法由递归下降解析，每层括号或 `NOT` 占用一层调用栈。解析不设深度上限时，约 5000 个 `(` 就会压满 tokio worker 线程 2 MiB 的栈；Rust 的栈溢出会让整个进程 abort，而不只是这一个请求失败。因此嵌套上限定为 32 层（手写查询用不到这么深），超出的部分在解析时直接跳过，`LogFilter::validate` 同时返回 400；关键字另限 4096 字节，以控制拼出的 SQL 长度。
+
 ### token 索引
 
 `app_log_local` 上有 `INDEX idx_message_tokens lower(message) TYPE tokenbf_v1(131072, 3, 0) GRANULARITY 1`。关键字按与 tokenizer 相同的规则切分（非字母数字的 ASCII 字符均为分隔符，下划线也算），**足够长（≥ 16 位）的 token** 才作为 needle 使用：

@@ -304,9 +304,21 @@ fn tokenize(q: &str) -> Vec<Token> {
     tokens
 }
 
+/// 括号和 NOT 最多嵌套几层。解析是递归下降，每层吃掉几百字节的栈：不设上限的话，`q` 里
+/// 放五千个 `(` 就能把 2 MiB 的 worker 线程栈压爆，而 Rust 栈溢出是整个进程 abort，不是
+/// 这一个请求失败。32 层手写的查询永远用不到。
+const MAX_DEPTH: usize = 32;
+
+/// 关键字语法的 `q` 最长多少字节。词越多拼出来的 SQL 越长，贴一大段报错进来也该先截一截。
+const MAX_QUERY_LEN: usize = 4096;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
+    /// 碰到过超过 [`MAX_DEPTH`] 的嵌套：超出的那层当放错位置的操作符跳过，[`LogFilter::validate`]
+    /// 据此回 400
+    too_deep: bool,
 }
 
 impl Parser {
@@ -348,7 +360,22 @@ impl Parser {
 
     /// unary := ("NOT" | "-") unary | "(" or ")" | word | phrase
     fn parse_unary(&mut self) -> Option<Expr> {
-        match self.bump()? {
+        let token = self.bump()?;
+        if !matches!(token, Token::Not | Token::LParen) {
+            return self.parse_leaf(token);
+        }
+        if self.depth >= MAX_DEPTH {
+            self.too_deep = true;
+            return None;
+        }
+        self.depth += 1;
+        let expr = self.parse_leaf(token);
+        self.depth -= 1;
+        expr
+    }
+
+    fn parse_leaf(&mut self, token: Token) -> Option<Expr> {
+        match token {
             Token::Not => self.parse_unary().map(|e| match e {
                 Expr::Not(inner) => *inner,
                 other => Expr::Not(Box::new(other)),
@@ -369,7 +396,12 @@ impl Parser {
 
 /// 把关键字串解析成表达式；只有空白 / 只有操作符时是 `None`。
 pub fn parse_query(q: &str) -> Option<Expr> {
-    let mut p = Parser { tokens: tokenize(q), pos: 0 };
+    parse(q).0
+}
+
+/// 解析，顺带告诉调用方有没有嵌套超限。
+fn parse(q: &str) -> (Option<Expr>, bool) {
+    let mut p = Parser { tokens: tokenize(q), pos: 0, depth: 0, too_deep: false };
     let mut parts = Vec::new();
     while p.peek().is_some() {
         let before = p.pos;
@@ -382,7 +414,7 @@ pub fn parse_query(q: &str) -> Option<Expr> {
             p.bump();
         }
     }
-    Expr::and(parts)
+    (Expr::and(parts), p.too_deep)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -447,6 +479,16 @@ impl LogFilter {
         }
         if self.regex && self.q.len() > 1024 {
             return Err(Error::bad_request("正则表达式过长"));
+        }
+        if !self.regex {
+            if self.q.len() > MAX_QUERY_LEN {
+                return Err(Error::bad_request(format!("关键字过长：上限为 {MAX_QUERY_LEN} 字节")));
+            }
+            if parse(&self.q).1 {
+                return Err(Error::bad_request(format!(
+                    "括号与 NOT 的嵌套层数过多：上限为 {MAX_DEPTH} 层"
+                )));
+            }
         }
         Ok(())
     }
@@ -846,6 +888,31 @@ mod tests {
 
     fn not(e: Expr) -> Expr {
         Expr::Not(Box::new(e))
+    }
+
+    #[test]
+    fn deep_nesting_does_not_overflow_the_stack() {
+        // 没有深度上限时五千个 `(` 就能让进程 abort；测试线程也只有 2 MiB 栈
+        for q in ["(".repeat(100_000) + "a", "-".repeat(100_000) + "a", "NOT ".repeat(50_000) + "a"]
+        {
+            let (_, too_deep) = parse(&q);
+            assert!(too_deep);
+        }
+        let nested = "(".repeat(MAX_DEPTH) + "a" + &")".repeat(MAX_DEPTH);
+        assert_eq!(parse(&nested), (Some(term("a")), false));
+    }
+
+    #[test]
+    fn rejects_overlong_or_overnested_keywords() {
+        let filter = |q: String| LogFilter { q, trace_id: Some("ab".into()), ..Default::default() };
+        let msg = |f: LogFilter| f.validate().unwrap_err().to_string();
+        assert!(msg(filter("(".repeat(MAX_DEPTH + 1) + "a")).contains("嵌套"));
+        assert!(msg(filter("a ".repeat(MAX_QUERY_LEN))).contains("过长"));
+        filter("(a OR b) NOT (c d)".into()).validate().unwrap();
+        // 正则不走这套语法，括号再多也不是嵌套
+        LogFilter { regex: true, ..filter("(".repeat(100) + ")".repeat(100).as_str()) }
+            .validate()
+            .unwrap();
     }
 
     #[test]

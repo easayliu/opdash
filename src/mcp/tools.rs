@@ -89,7 +89,7 @@ fn log_filter_props() -> Vec<(&'static str, Value)> {
         (
             "q",
             string(
-                "关键字。空格分隔 = AND，`a OR b`，`-word` 排除，引号括短语；默认子串、不分大小写",
+                "关键字。空格分隔 = AND，`a OR b`，`-word` 排除，引号括短语，`( )` 分组；默认子串、不分大小写。上限 4096 字节、括号与 NOT 嵌套不超过 32 层（正则 1024 字节），超出返回 400",
             ),
         ),
         ("regex", boolean("q 按 RE2 正则解释")),
