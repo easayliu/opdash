@@ -79,8 +79,8 @@ fn serve_index() -> Response<Body> {
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
             .body(Body::from(
-                "前端还没构建：在 ui/ 目录执行 `pnpm install && pnpm build`，然后重新 cargo build。\n\
-                 API 不受影响，可以直接访问 /api/health。",
+                "前端尚未构建：请在 ui/ 目录执行 `pnpm install && pnpm build`，然后重新执行 cargo build。\n\
+                 API 不受影响，可直接访问 /api/health。",
             ))
             .expect("build response"),
     }

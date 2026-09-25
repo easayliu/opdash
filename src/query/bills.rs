@@ -312,7 +312,7 @@ impl Dimension {
         DIMENSIONS.iter().find(|(name, _, _)| *name == raw.trim()).map(|(_, d, _)| *d).ok_or_else(
             || {
                 Error::bad_request(format!(
-                    "不认识的维度 {raw:?}；可用: {}",
+                    "不支持的维度 {raw:?}；可用：{}",
                     DIMENSIONS.iter().map(|(n, _, _)| *n).collect::<Vec<_>>().join(", ")
                 ))
             },
@@ -435,7 +435,7 @@ pub fn check_period(raw: &str) -> Result<String> {
     }
     let month: u32 = raw[5..].parse().unwrap_or(0);
     if !(1..=12).contains(&month) {
-        return Err(Error::bad_request(format!("账期的月份不合法: {raw:?}")));
+        return Err(Error::bad_request(format!("账期的月份不合法：{raw:?}")));
     }
     Ok(raw.to_owned())
 }
@@ -458,7 +458,7 @@ fn period_from_index(index: i32) -> Option<String> {
 pub fn shift_period(period: &str, months: i32) -> Result<String> {
     month_index(period)
         .and_then(|i| period_from_index(i + months))
-        .ok_or_else(|| Error::bad_request(format!("账期超出范围: {period} {months:+}")))
+        .ok_or_else(|| Error::bad_request(format!("账期超出范围：{period} {months:+}")))
 }
 
 /// 一次账单查询的筛选条件。
@@ -1172,7 +1172,7 @@ impl DetailSort {
             Some(name) if !name.is_empty() => SortKey::Raw(name.to_owned()),
             _ => SortKey::Fixed(DETAIL_SORT_KEYS.iter().find(|k| **k == raw).ok_or_else(|| {
                 Error::bad_request(format!(
-                    "sort 不认识 {raw:?}；可用: {}，或 raw:<字段名>",
+                    "不支持的 sort：{raw:?}；可用：{}，或 raw:<字段名>",
                     DETAIL_SORT_KEYS.join(", ")
                 ))
             })?),

@@ -63,7 +63,7 @@ pub(super) fn build_filter(state: &AppState, schema: &Schema, p: &Params) -> Res
         }
         if !dim_columns.contains(&key) {
             return Err(Error::bad_request(format!(
-                "不认识的筛选列 {key:?}；日志表可用的筛选列: {}",
+                "不支持的筛选列 {key:?}；日志表可用的筛选列：{}",
                 dim_columns.join(", ")
             )));
         }
@@ -113,7 +113,7 @@ async fn search(State(state): State<AppState>, p: Params) -> Result<Json<SearchR
     let offset = p.get_u32("offset")?.unwrap_or(0);
     if offset > state.config.max_offset {
         return Err(Error::bad_request(format!(
-            "最多翻到第 {} 条，再往后请缩小时间范围或加筛选条件",
+            "最多可翻至第 {} 条；如需继续，请缩小时间范围或添加筛选条件",
             state.config.max_offset
         )));
     }
@@ -277,7 +277,7 @@ async fn facets(State(state): State<AppState>, p: Params) -> Result<Json<FacetsR
         return Err(Error::bad_request("缺少参数 field"));
     }
     if fields.len() > MAX_FACET_FIELDS {
-        return Err(Error::bad_request(format!("一次最多问 {MAX_FACET_FIELDS} 个维度")));
+        return Err(Error::bad_request(format!("一次最多查询 {MAX_FACET_FIELDS} 个维度")));
     }
     let filter = build_filter(&state, &schema, &p)?;
     // 默认给 500：以前是 50，线上一小时里就有 89 个服务、126 个 pod，排在 50 名以后的（每小时

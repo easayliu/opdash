@@ -443,10 +443,10 @@ impl LogFilter {
 
     pub fn validate(&self) -> Result<()> {
         if self.range.is_none() && self.trace_id.is_none() && self.span_id.is_none() {
-            return Err(Error::bad_request("需要时间范围（from / to），或者 trace_id / span_id"));
+            return Err(Error::bad_request("需要时间范围（from / to），或提供 trace_id / span_id"));
         }
         if self.regex && self.q.len() > 1024 {
-            return Err(Error::bad_request("正则太长"));
+            return Err(Error::bad_request("正则表达式过长"));
         }
         Ok(())
     }

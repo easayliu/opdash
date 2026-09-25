@@ -313,7 +313,7 @@ async fn rejects_bad_id_token_and_missing_role() {
     let (status, headers, body) = callback(&app, &ticket, &q["state"]).await;
     assert_eq!(status, 403, "{}", String::from_utf8_lossy(&body));
     assert!(cookie_pair(&headers, "opdash_session").is_none(), "没权限不该发会话");
-    assert!(String::from_utf8_lossy(&body).contains("换个账号登录"));
+    assert!(String::from_utf8_lossy(&body).contains("使用其他账号登录"));
 
     // 角色在 client 角色里也认
     let (ticket, q) = begin(&app).await;
@@ -402,7 +402,7 @@ async fn api_keys_without_oidc_and_their_edges() {
     let app = app_with_schema(&fake, &[]).await;
     let (status, body) = post_json(&app, "/api/auth/keys", "{}", &[]).await;
     assert_eq!(status, 400, "{body}");
-    assert!(body["error"].as_str().unwrap().contains("不需要 API key"));
+    assert!(body["error"].as_str().unwrap().contains("无需 API 密钥"));
     let (_, me) = get_json(&app, "/api/auth/me").await;
     assert!(me["api_keys"].is_null());
 }

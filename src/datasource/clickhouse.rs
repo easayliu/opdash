@@ -34,7 +34,7 @@ impl Ch {
         if let Some(c) = &r.cluster
             && !crate::config::is_plain_identifier(c)
         {
-            return Err(format!("cluster 只能包含字母、数字、下划线: {c:?}"));
+            return Err(format!("cluster 只能包含字母、数字、下划线：{c:?}"));
         }
         Ok(Self { client, cluster: r.cluster.clone() })
     }
@@ -49,18 +49,18 @@ impl Ch {
                     _ => 400,
                 };
                 let hint = match status {
-                    504 => "。建议：加上命中排序键的 WHERE 条件、缩小时间范围或加 LIMIT",
+                    504 => "。建议：添加命中排序键的 WHERE 条件、缩小时间范围或添加 LIMIT",
                     _ if code == ch_code::READONLY => "。数据源只允许只读查询",
                     _ => "",
                 };
                 Error::Source {
                     status,
-                    message: format!("ClickHouse 错误 {code}: {}{hint}", trim_ch_message(&message)),
+                    message: format!("ClickHouse 错误 {code}：{}{hint}", trim_ch_message(&message)),
                 }
             }
             Error::Unavailable(m) => Error::Source {
                 status: 502,
-                message: format!("ClickHouse 数据源 {} 不可用: {m}", src.name),
+                message: format!("ClickHouse 数据源 {} 不可用：{m}", src.name),
             },
             other => other,
         }
@@ -86,7 +86,7 @@ impl Ch {
             self.client.send(&query, Some("JSONCompact")).await.map_err(|e| Self::err(src, e))?;
         let body = resp.bytes().await.map_err(|e| Self::err(src, e.into()))?;
         let v: Value = serde_json::from_slice(&body)
-            .map_err(|e| Error::internal(format!("ClickHouse 的 JSONCompact 结果解析失败: {e}")))?;
+            .map_err(|e| Error::internal(format!("ClickHouse 的 JSONCompact 结果解析失败：{e}")))?;
         let columns: Vec<String> = v["meta"]
             .as_array()
             .map(Vec::as_slice)
@@ -128,7 +128,9 @@ impl Ch {
                      FROM system.tables\nWHERE database NOT IN {SYSTEM} AND NOT is_temporary\n\
                      GROUP BY database\nORDER BY database\nLIMIT {{limit:UInt32}}"
                 )),
-                Some("没有指定库，只列出了库；给 database 列这个库的表，或给 match 跨库按表名搜"),
+                Some(
+                    "未指定库，仅列出了库名；指定 database 可列出该库的表，指定 match 可跨库按表名搜索",
+                ),
             )
         } else if db.is_empty() {
             (
@@ -255,9 +257,7 @@ impl Ch {
             "按 normalized_query_hash 归并（同一条语句换了参数算一种），sample 是其中一条原文；只统计 SELECT",
         ];
         if self.cluster.is_none() {
-            notes.push(
-                "没有配置 cluster：集群部署时只读到了恰好接到这次请求的那一个节点的 query_log",
-            );
+            notes.push("未配置 cluster：集群部署时，仅读取到了处理本次请求的单个节点的 query_log");
         }
         Ok(json!({ "queries": table, "notes": notes }))
     }

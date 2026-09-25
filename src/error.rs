@@ -17,19 +17,19 @@ pub enum Error {
     #[error("{0}")]
     BadRequest(String),
     /// ClickHouse 返回了非 2xx。`code` 是 `DB::Exception` 的错误码（`X-ClickHouse-Exception-Code`）。
-    #[error("ClickHouse 错误 {code}: {message}")]
+    #[error("ClickHouse 错误 {code}：{message}")]
     ClickHouse { code: i32, message: String },
     /// 请求根本没到 ClickHouse，或者中途断了。
-    #[error("ClickHouse 不可用: {0}")]
+    #[error("ClickHouse 不可用：{0}")]
     Unavailable(String),
     /// 我们自己的问题：结果解析不了、配置对不上等。
     #[error("{0}")]
     Internal(String),
     /// 同时在跑的查询太多，排队也没等到名额。
-    #[error("查询太多，请稍后再试")]
+    #[error("当前查询过多，请稍后再试")]
     Busy,
     /// 同时跟随的连接太多（每条都在按 `--tail-interval` 轮库）。
-    #[error("同时跟随的人太多（上限 {0}），请稍后再试或先停掉别的跟随")]
+    #[error("同时进行的实时跟随已达上限（{0} 个），请稍后再试，或先停止其他跟随")]
     TooManyTails(usize),
     /// goscan（账单同步服务）拒绝了这次拉取，或者根本连不上。
     /// `status` 是它回的 HTTP 状态码，0 表示请求没发出去 / 没等到回应。
@@ -143,23 +143,23 @@ impl Error {
         match self {
             Error::ClickHouse { code, message } => match *code {
                 TIMEOUT_EXCEEDED | TOO_SLOW => {
-                    "查询超时，请缩小时间范围或加更多筛选条件".to_owned()
+                    "查询超时，请缩小时间范围或添加更多筛选条件".to_owned()
                 }
                 TOO_MANY_ROWS | TOO_MANY_BYTES | TOO_MANY_ROWS_OR_BYTES => {
-                    "查询要读的数据太多，请缩小时间范围或加更多筛选条件".to_owned()
+                    "查询需读取的数据量过大，请缩小时间范围或添加更多筛选条件".to_owned()
                 }
                 MEMORY_LIMIT_EXCEEDED => "查询内存超限，请缩小时间范围".to_owned(),
-                CANNOT_COMPILE_REGEXP => format!("正则表达式无效: {}", trim_regex_message(message)),
+                CANNOT_COMPILE_REGEXP => format!("正则表达式无效：{}", trim_regex_message(message)),
                 AUTHENTICATION_FAILED | REQUIRED_PASSWORD => {
                     "ClickHouse 认证失败，请检查 opdash 的账号密码配置".to_owned()
                 }
                 UNKNOWN_TABLE | UNKNOWN_DATABASE => {
-                    format!("ClickHouse 里没有配置的库表: {}", trim_ch_message(message))
+                    format!("ClickHouse 中不存在所配置的库表：{}", trim_ch_message(message))
                 }
                 UNKNOWN_IDENTIFIER => {
-                    format!("表结构和预期不一致（可能缺列）: {}", trim_ch_message(message))
+                    format!("表结构与预期不一致（可能缺少列）：{}", trim_ch_message(message))
                 }
-                _ => format!("ClickHouse 错误 {code}: {}", trim_ch_message(message)),
+                _ => format!("ClickHouse 错误 {code}：{}", trim_ch_message(message)),
             },
             other => other.to_string(),
         }
@@ -271,7 +271,7 @@ mod tests {
         let e = Error::ClickHouse { code: ch_code::CANNOT_COMPILE_REGEXP, message: raw.into() };
         assert_eq!(
             e.user_message(),
-            "正则表达式无效: cannot compile re2: (unclosed, error: missing ): (unclosed"
+            "正则表达式无效：cannot compile re2: (unclosed, error: missing ): (unclosed"
         );
     }
 
@@ -282,11 +282,14 @@ mod tests {
         let raw = "Code: 307. DB::Exception: Limit for rows or bytes to read exceeded, max bytes: 20.00 GiB, current bytes: 20.15 GiB: While executing MergeTreeSelect(pool: ReadPool, algorithm: Thread). (TOO_MANY_BYTES) (version 26.9)";
         let e = Error::ClickHouse { code: ch_code::TOO_MANY_BYTES, message: raw.into() };
         assert_eq!(e.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(e.user_message(), "查询要读的数据太多，请缩小时间范围或加更多筛选条件");
+        assert_eq!(e.user_message(), "查询需读取的数据量过大，请缩小时间范围或添加更多筛选条件");
         for code in [ch_code::TOO_MANY_ROWS, ch_code::TOO_MANY_ROWS_OR_BYTES] {
             let e = Error::ClickHouse { code, message: String::new() };
             assert_eq!(e.status(), StatusCode::PAYLOAD_TOO_LARGE);
-            assert_eq!(e.user_message(), "查询要读的数据太多，请缩小时间范围或加更多筛选条件");
+            assert_eq!(
+                e.user_message(),
+                "查询需读取的数据量过大，请缩小时间范围或添加更多筛选条件"
+            );
         }
     }
 

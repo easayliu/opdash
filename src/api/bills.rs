@@ -640,7 +640,7 @@ async fn allocation(State(state): State<AppState>, p: Params) -> Result<Json<All
     }
     if window_days.is_some() && sources.iter().any(|(k, _)| !k.has_days()) {
         return Err(Error::bad_request(
-            "按最近几日统计需要日度账单：请为阿里云同步 granularity=daily，或去掉 days 参数改按账期统计",
+            "按最近几日统计需要日度账单：请为阿里云同步 granularity=daily，或移除 days 参数，改按账期统计",
         ));
     }
 

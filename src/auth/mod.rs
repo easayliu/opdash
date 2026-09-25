@@ -114,12 +114,12 @@ impl std::fmt::Display for IssueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IssueError::AuthDisabled => {
-                write!(f, "没有开启认证，访问不需要带任何凭证，也就不需要 API key")
+                write!(f, "未启用认证，访问无需任何凭证，因此无需 API 密钥")
             }
             IssueError::KeyCannotManage => {
-                write!(f, "API key 不能管理 API key，请用浏览器登录后操作")
+                write!(f, "不能使用 API 密钥管理 API 密钥，请通过浏览器登录后操作")
             }
-            IssueError::Store(e) => write!(f, "API key 文件读写失败: {e}"),
+            IssueError::Store(e) => write!(f, "API 密钥文件读写失败：{e}"),
         }
     }
 }

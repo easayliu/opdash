@@ -207,14 +207,14 @@ pub fn quote_ident(name: &str) -> Result<String> {
         || name.len() > 128
         || name.chars().any(|c| c == '`' || c == '\\' || c.is_control())
     {
-        return Err(Error::bad_request(format!("非法列名: {name:?}")));
+        return Err(Error::bad_request(format!("非法列名：{name:?}")));
     }
     Ok(format!("`{name}`"))
 }
 
 /// 解析 `--timezone` 这类 IANA 时区名。
 pub fn parse_tz(name: &str) -> Result<Tz> {
-    name.parse::<Tz>().map_err(|_| Error::bad_request(format!("不认识的时区: {name}")))
+    name.parse::<Tz>().map_err(|_| Error::bad_request(format!("不支持的时区：{name}")))
 }
 
 #[cfg(test)]

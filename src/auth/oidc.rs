@@ -136,7 +136,7 @@ impl Audience {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OidcError {
-    #[error("Keycloak 不可用: {0}")]
+    #[error("Keycloak 不可用：{0}")]
     Upstream(String),
     #[error("{0}")]
     Invalid(String),
@@ -187,10 +187,10 @@ impl Oidc {
         }
         let body = resp.text().await.map_err(|e| OidcError::Upstream(e.to_string()))?;
         let d: Discovery = serde_json::from_str(&body)
-            .map_err(|e| OidcError::Upstream(format!("解析 discovery: {e}")))?;
+            .map_err(|e| OidcError::Upstream(format!("解析 discovery 失败：{e}")))?;
         if d.issuer.trim_end_matches('/') != self.issuer {
             return Err(OidcError::Invalid(format!(
-                "discovery 里的 issuer 是 {:?}，和 --oidc-issuer {:?} 不一致",
+                "discovery 里的 issuer 是 {:?}，与 --oidc-issuer {:?} 不一致",
                 d.issuer, self.issuer
             )));
         }
@@ -262,7 +262,7 @@ impl Oidc {
             return Err(OidcError::Invalid(format!("token 端点返回 {status}: {detail}")));
         }
         let tokens: Tokens = serde_json::from_str(&body)
-            .map_err(|e| OidcError::Upstream(format!("解析 token 响应: {e}")))?;
+            .map_err(|e| OidcError::Upstream(format!("解析 token 响应失败：{e}")))?;
         let id = decode_claims(&tokens.id_token)?;
         if id.iss.as_deref().map(|s| s.trim_end_matches('/')) != Some(self.issuer.as_str()) {
             return Err(OidcError::Invalid(format!("id_token 的 iss 是 {:?}", id.iss)));
@@ -274,7 +274,7 @@ impl Oidc {
             return Err(OidcError::Invalid("id_token 已过期".into()));
         }
         if id.nonce.as_deref() != Some(ticket.nonce.as_str()) {
-            return Err(OidcError::Invalid("id_token 的 nonce 对不上".into()));
+            return Err(OidcError::Invalid("id_token 的 nonce 不匹配".into()));
         }
         let sub = id.sub.clone().ok_or_else(|| OidcError::Invalid("id_token 没有 sub".into()))?;
         // 账号名认人（key 归属、审计日志），显示名给人看，两者分开

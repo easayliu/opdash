@@ -256,7 +256,7 @@ async fn revoke_key(
         }
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "没有这把 key（或者它不是你的）", "kind": "not_found" })),
+            Json(serde_json::json!({ "error": "密钥不存在，或不属于你", "kind": "not_found" })),
         )
             .into_response(),
         Err(e) => issue_error(e),
@@ -316,7 +316,7 @@ async fn callback(
         let detail = q.error_description.unwrap_or_default();
         return error_page(
             &auth,
-            OidcError::Invalid(format!("Keycloak 拒绝了登录: {err} {detail}")),
+            OidcError::Invalid(format!("Keycloak 拒绝了登录：{err} {detail}")),
         );
     }
     let ticket: Option<LoginTicket> =
@@ -324,14 +324,16 @@ async fn callback(
     let Some(ticket) = ticket else {
         return error_page(
             &auth,
-            OidcError::Invalid("登录票不存在或已过期（10 分钟内没完成登录），请重新登录".into()),
+            OidcError::Invalid(
+                "登录凭据不存在或已过期（须在 10 分钟内完成登录），请重新登录".into(),
+            ),
         );
     };
     if q.state.as_deref() != Some(ticket.state.as_str()) {
-        return error_page(&auth, OidcError::Invalid("state 对不上，请重新登录".into()));
+        return error_page(&auth, OidcError::Invalid("state 校验失败，请重新登录".into()));
     }
     let Some(code) = q.code else {
-        return error_page(&auth, OidcError::Invalid("回调里没有 code".into()));
+        return error_page(&auth, OidcError::Invalid("回调中缺少 code".into()));
     };
     match oidc.finish(&ticket, &code).await {
         Ok(session) => {
@@ -376,7 +378,7 @@ fn error_page(auth: &Auth, err: OidcError) -> Response {
     let mut actions = String::from(r#"<a href="/api/auth/login">重新登录</a>"#);
     if matches!(err, OidcError::Forbidden { .. }) && auth.oidc().is_some() {
         // 换个账号登录：先把 Keycloak 那边的 SSO 会话也退掉
-        actions = r#"<a href="/api/auth/logout">换个账号登录</a>"#.to_owned();
+        actions = r#"<a href="/api/auth/logout">使用其他账号登录</a>"#.to_owned();
     }
     let html = format!(
         r#"<!doctype html><meta charset="utf-8"><title>{title} · opdash</title>

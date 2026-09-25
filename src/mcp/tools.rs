@@ -991,7 +991,7 @@ fn check_arg_names(def: &Value, arguments: &Map<String, Value>) -> R<()> {
     let known: Vec<&str> =
         props.as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
     Err(format!(
-        "不认识的参数: {}；{} 接受的参数是: {}",
+        "不支持的参数：{}；{} 接受的参数是：{}",
         unknown.join(", "),
         def["name"].as_str().unwrap_or("这个工具"),
         known.join(", "),
@@ -1050,7 +1050,9 @@ fn fit_budget(value: Value, budget: usize) -> Value {
     }
     let mut what: Vec<String> = kept
         .iter()
-        .map(|(k, keep)| format!("{k} 只留了 {keep} 项（共 {}）", original.get(k).unwrap_or(keep)))
+        .map(|(k, keep)| {
+            format!("{k} 仅保留了 {keep} 项（共 {}）", original.get(k).unwrap_or(keep))
+        })
         .collect();
     if shortened {
         what.push("长文本被截短".to_owned());
@@ -1908,7 +1910,7 @@ async fn get_trace(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
                 }
                 out.insert("logs".into(), Value::Array(rows));
             }
-            Err(e) => note(&mut out, format!("取日志失败: {e}")),
+            Err(e) => note(&mut out, format!("取日志失败：{e}")),
         }
     }
     Ok(Value::Object(out))
@@ -2001,7 +2003,7 @@ async fn search_logs(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
         note(
             &mut out,
             format!(
-                "这些词按整词匹配（走了索引），搜它们的一部分搜不到: {}",
+                "这些词按整词匹配（已使用索引），搜索其片段将无法命中：{}",
                 terms.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
             ),
         );
@@ -2210,7 +2212,7 @@ async fn list_metrics(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     if all.len() > limit {
         note(
             out.as_object_mut().expect("json 对象"),
-            format!("共 {} 个指标，只返回了 {limit} 个；用 match 缩小", all.len()),
+            format!("共 {} 个指标，仅返回了 {limit} 个；请用 match 缩小范围", all.len()),
         );
     }
     Ok(out)
@@ -2275,7 +2277,7 @@ async fn query_metric(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     if body["truncated"].as_bool() == Some(true) {
         note(
             out.as_object_mut().expect("json 对象"),
-            format!("时间线超过 {limit} 条，只返回了量最大的那些；加 limit 或加过滤"),
+            format!("时间线超过 {limit} 条，仅返回了量最大的部分；请调大 limit 或添加过滤条件"),
         );
     }
     if let Some(n) = body["note"].as_str() {
@@ -2888,15 +2890,15 @@ async fn cost_compare(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
     let days: Vec<&str> = arr(&pd["days"]).iter().filter_map(Value::as_str).collect();
     let offset = (today - end).num_days() as usize;
     let Some(i) = days.len().checked_sub(1 + offset) else {
-        return Err(format!("接口给回的日期不够（{} 天），比不到 {end}", days.len()));
+        return Err(format!("接口返回的日期不足（{} 天），无法对比至 {end}", days.len()));
     };
     let (width, back) = (width as usize, back as usize);
     let Some(cur_start) = (i + 1).checked_sub(width) else {
-        return Err(format!("接口给回的日期不够（{} 天），比不到 {end}", days.len()));
+        return Err(format!("接口返回的日期不足（{} 天），无法对比至 {end}", days.len()));
     };
     let cur = (cur_start, i);
     let Some(prev_start) = cur.0.checked_sub(back) else {
-        return Err(format!("接口给回的日期不够（{} 天），比不到 {end}", days.len()));
+        return Err(format!("接口返回的日期不足（{} 天），无法对比至 {end}", days.len()));
     };
     let prev = (prev_start, cur.1 - back);
 
@@ -2980,7 +2982,7 @@ async fn cost_compare(mcp: &Mcp, a: &Args<'_>) -> R<Value> {
         lasts.iter().filter(|(_, d)| **d < end).map(|(p, _)| p.as_str()).collect();
     if !pending.is_empty() {
         let detail: Vec<String> =
-            pending.iter().map(|p| format!("{p} 只出到 {}", lasts[*p])).collect();
+            pending.iter().map(|p| format!("{p} 的账单仅出具至 {}", lasts[*p])).collect();
         note(
             map,
             format!(
@@ -3202,7 +3204,7 @@ fn tables_to_objects(body: Value) -> Value {
         out.insert(k, Value::Array(rows));
     }
     if !truncated.is_empty() {
-        note(&mut out, format!("{}；调大 limit 或缩小范围再看", truncated.join("，")));
+        note(&mut out, format!("{}；请调大 limit 或缩小范围后重试", truncated.join("，")));
     }
     // API 里的单条说明并进 notes，模型只需要看一个地方
     if let Some(Value::String(n)) = out.remove("note") {

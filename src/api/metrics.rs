@@ -80,7 +80,7 @@ fn bucket(state: &AppState, range: &TimeRange, p: &Params) -> Result<Bucket> {
     let width_ms = step as i64 * 1000;
     if range.span_ms() / width_ms > MAX_MANUAL_BUCKETS {
         return Err(Error::bad_request(format!(
-            "步长 {step}s 在这个时间范围上要画 {} 个点，最多 {MAX_MANUAL_BUCKETS} 个：把步长调大或把范围缩小",
+            "步长 {step}s 在此时间范围内将产生 {} 个数据点，上限为 {MAX_MANUAL_BUCKETS} 个：请增大步长或缩小时间范围",
             range.span_ms() / width_ms
         )));
     }
@@ -299,23 +299,23 @@ fn combo_problem(kind: &MetricKind, agg: Agg, field: Field) -> Option<String> {
     if is_bucketed(ty) {
         if field == Field::Value && agg != Agg::Quantile {
             return Some(format!(
-                "{ty} 的 value 列是空的（五种指标类型共用一张表，用不上的列留默认值），                 按 value 聚合出来只会是一片 0。分位数用 agg=quantile（q=0.95），                 平均值用 agg=mean&field=sum，次数用 agg=rate&field=count"
+                "{ty} 的 value 列为空（五种指标类型共用一张表，用不到的列保留默认值），按 value 聚合只会得到全 0。分位数请用 agg=quantile（q=0.95），平均值用 agg=mean&field=sum，次数用 agg=rate&field=count"
             ));
         }
         if agg == Agg::Quantile && kind.has_bounds == 0 {
             return Some(format!(
-                "{ty} 没有 explicit_bounds（指数直方图的桶是 base^i 编码的，Summary 的分位数是                 采集端算好的），插不出分位数。用 agg=mean&field=sum 看平均、                 agg=rate&field=count 看次数、field=max 看最大值"
+                "{ty} 没有 explicit_bounds（指数直方图的桶按 base^i 编码，Summary 的分位数由采集端预先算好），无法插值计算分位数。平均值请用 agg=mean&field=sum，次数用 agg=rate&field=count，最大值用 field=max"
             ));
         }
     } else {
         if agg == Agg::Quantile {
             return Some(format!(
-                "{ty} 不是直方图，没有桶可以插值。gauge 用 avg / max / last，counter 用 rate / increase"
+                "{ty} 不是直方图，没有可供插值的桶。gauge 请用 avg / max / last，counter 用 rate / increase"
             ));
         }
         if field != Field::Value {
             return Some(format!(
-                "{ty} 只有 value 列，field={} 是直方图才有的列，查出来是 0",
+                "{ty} 只有 value 列；field={} 仅直方图才有，查询结果将全为 0",
                 field_name(field)
             ));
         }
@@ -494,7 +494,7 @@ async fn query(State(state): State<AppState>, p: Params) -> Result<Json<QueryRes
     };
     let note = match &kind {
         None => Some(format!(
-            "{} 在这段时间里一个数据点都没有：指标名写错了？换个时间范围、或者用 /api/metrics 看目录",
+            "{} 在此时段内没有任何数据点：请确认指标名是否正确或调整时间范围，也可通过 /api/metrics 查看指标目录",
             f.metric
         )),
         Some(_) => None,

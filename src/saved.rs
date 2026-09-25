@@ -69,8 +69,8 @@ impl std::fmt::Display for SaveError {
         match self {
             SaveError::Invalid(m) => f.write_str(m),
             SaveError::Duplicate(_) => write!(f, "这条查询已经收藏过了"),
-            SaveError::TooMany => write!(f, "最多收藏 {PER_USER_MAX} 条，先删几条再收藏"),
-            SaveError::Store(e) => write!(f, "收藏文件读写失败: {e}"),
+            SaveError::TooMany => write!(f, "收藏已达上限（{PER_USER_MAX} 条），请先删除部分收藏"),
+            SaveError::Store(e) => write!(f, "收藏文件读写失败：{e}"),
         }
     }
 }
@@ -106,7 +106,7 @@ impl SavedQueryStore {
         let path = path.into();
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir)
-                .map_err(|e| format!("建不出 {} 所在的目录: {e}", path.display()))?;
+                .map_err(|e| format!("无法创建 {} 所在的目录：{e}", path.display()))?;
         }
         let store = Self { path, state: Mutex::new(State { queries: Vec::new(), mtime: None }) };
         {
@@ -127,16 +127,16 @@ impl SavedQueryStore {
 
     fn load_into(&self, st: &mut State) -> Result<(), String> {
         let raw =
-            fs::read(&self.path).map_err(|e| format!("读不了 {}: {e}", self.path.display()))?;
+            fs::read(&self.path).map_err(|e| format!("无法读取 {}: {e}", self.path.display()))?;
         let file: FileFormat = if raw.iter().all(u8::is_ascii_whitespace) {
             FileFormat::default()
         } else {
             serde_json::from_slice(&raw)
-                .map_err(|e| format!("{} 不是 opdash 的收藏文件: {e}", self.path.display()))?
+                .map_err(|e| format!("{} 不是 opdash 的收藏文件：{e}", self.path.display()))?
         };
         if file.version > FILE_VERSION {
             return Err(format!(
-                "{} 是更新版本的 opdash 写的（version {}），这个版本只认到 {FILE_VERSION}",
+                "{} 由更新版本的 opdash 写入（version {}），当前版本最高只支持 {FILE_VERSION}",
                 self.path.display(),
                 file.version
             ));
@@ -162,9 +162,9 @@ impl SavedQueryStore {
         let file = FileFormat { version: FILE_VERSION, queries: st.queries.clone() };
         let json = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, &json).map_err(|e| format!("写不了 {}: {e}", tmp.display()))?;
+        fs::write(&tmp, &json).map_err(|e| format!("无法写入 {}: {e}", tmp.display()))?;
         fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("替换 {} 失败: {e}", self.path.display()))?;
+            .map_err(|e| format!("替换 {} 失败：{e}", self.path.display()))?;
         st.mtime = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
         Ok(())
     }
@@ -226,11 +226,13 @@ impl SavedQueryStore {
             (None, None) => None,
             (Some(p), Some(q)) => Some((clean_path(&p)?, clean_query(&q)?)),
             _ => {
-                return Err(SaveError::Invalid("path 和 query 要一起给".into()));
+                return Err(SaveError::Invalid("path 与 query 须同时提供".into()));
             }
         };
         if name.is_none() && addr.is_none() {
-            return Err(SaveError::Invalid("没有要改的字段：name，或 path + query".into()));
+            return Err(SaveError::Invalid(
+                "没有需要修改的字段：请提供 name，或同时提供 path 与 query".into(),
+            ));
         }
         let mut st = self.state.lock();
         self.reload_if_changed(&mut st);
@@ -301,7 +303,9 @@ fn clean_path(raw: &str) -> Result<String, SaveError> {
         return Err(SaveError::Invalid(format!("path 太长（最多 {PATH_MAX} 字节）")));
     }
     if s.chars().any(|c| c == '?' || c == '#' || c.is_whitespace() || c.is_control()) {
-        return Err(SaveError::Invalid("path 里不能有 ? # 空白或控制字符，查询串放 query".into()));
+        return Err(SaveError::Invalid(
+            "path 中不能包含 ?、#、空白或控制字符，查询串请放在 query 中".into(),
+        ));
     }
     Ok(s.to_owned())
 }
@@ -313,7 +317,7 @@ fn clean_query(raw: &str) -> Result<String, SaveError> {
         return Err(SaveError::Invalid(format!("query 太长（最多 {QUERY_MAX} 字节）")));
     }
     if s.chars().any(|c| c == '#' || c.is_control()) {
-        return Err(SaveError::Invalid("query 里不能有 # 或控制字符".into()));
+        return Err(SaveError::Invalid("query 中不能包含 # 或控制字符".into()));
     }
     Ok(s.to_owned())
 }
@@ -404,7 +408,9 @@ mod tests {
         );
         assert_eq!(
             store.update("alice", &a.id, Patch::default()),
-            Err(SaveError::Invalid("没有要改的字段：name，或 path + query".into()))
+            Err(SaveError::Invalid(
+                "没有需要修改的字段：请提供 name，或同时提供 path 与 query".into()
+            ))
         );
         assert!(matches!(
             store.update("alice", &a.id, Patch { path: Some("/x".into()), ..Patch::default() }),

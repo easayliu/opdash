@@ -296,7 +296,9 @@ impl Source {
     pub async fn describe(&self, target: &str, database: Option<&str>) -> Result<Value> {
         let target = target.trim();
         if target.is_empty() {
-            return Err(Error::bad_request("target 不能为空：写表名（可带库名）、索引名或键名"));
+            return Err(Error::bad_request(
+                "target 不能为空：请填写表名（可带库名）、索引名或键名",
+            ));
         }
         self.timed(async {
             match &self.backend {
@@ -424,13 +426,13 @@ impl Registry {
         if self.sources.is_empty() {
             return Err(Error::Source {
                 status: 404,
-                message: "这个 opdash 没有配置数据源（--datasources），无法直连业务库".to_owned(),
+                message: "当前 opdash 未配置数据源（--datasources），无法直连业务库".to_owned(),
             });
         }
         self.sources.iter().find(|s| s.name == name).cloned().ok_or_else(|| Error::Source {
             status: 404,
             message: format!(
-                "没有叫 {name:?} 的数据源；可用的数据源：{}",
+                "不存在名为 {name:?} 的数据源；可用的数据源：{}",
                 self.sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
             ),
         })
@@ -453,9 +455,9 @@ impl Registry {
     /// 少一个库静默不见，比起不来更难发现。
     pub fn load(path: &Path) -> std::result::Result<Self, String> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取数据源配置 {} 失败: {e}", path.display()))?;
+            .map_err(|e| format!("读取数据源配置 {} 失败：{e}", path.display()))?;
         Self::parse(&text, &|name| std::env::var(name).ok())
-            .map_err(|e| format!("数据源配置 {} 有误: {e}", path.display()))
+            .map_err(|e| format!("数据源配置 {} 有误：{e}", path.display()))
     }
 
     /// 解析配置文本。`env` 用来展开 `${NAME}`，测试里换成假的。
@@ -512,7 +514,7 @@ fn build_source(
     let api_key = expand("api_key", cfg.api_key)?.filter(|s| !s.is_empty());
     let timeout = match cfg.timeout.as_deref() {
         Some(raw) => humantime::parse_duration(raw)
-            .map_err(|e| format!("timeout {raw:?} 写法不对（例：15s / 1m）: {e}"))?,
+            .map_err(|e| format!("timeout {raw:?} 格式有误（例：15s / 1m）：{e}"))?,
         None => DEFAULT_TIMEOUT,
     };
     if timeout < Duration::from_secs(1) || timeout > MAX_TIMEOUT {
@@ -528,7 +530,7 @@ fn build_source(
     if cfg.cluster.is_some() && cfg.kind != Kind::Clickhouse {
         return Err("cluster 只用于 ClickHouse".to_owned());
     }
-    let parsed = url::Url::parse(&url).map_err(|e| format!("url 无法解析: {e}"))?;
+    let parsed = url::Url::parse(&url).map_err(|e| format!("url 无法解析：{e}"))?;
     let scheme_ok = match cfg.kind {
         Kind::Mysql => parsed.scheme() == "mysql",
         Kind::Redis => parsed.scheme() == "redis",
@@ -654,12 +656,12 @@ fn expand_env(
     while let Some(start) = rest.find("${") {
         out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
-        let end = after.find('}').ok_or_else(|| "${ 没有对应的 }".to_owned())?;
+        let end = after.find('}').ok_or_else(|| "${ 缺少对应的 }".to_owned())?;
         let name = &after[..end];
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(format!("环境变量名 {name:?} 不合法"));
         }
-        let value = env(name).ok_or_else(|| format!("环境变量 {name} 没有设置"))?;
+        let value = env(name).ok_or_else(|| format!("环境变量 {name} 未设置"))?;
         out.push_str(&value);
         rest = &after[end + 1..];
     }

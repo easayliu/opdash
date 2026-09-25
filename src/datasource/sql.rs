@@ -186,10 +186,10 @@ pub fn check_read_only(sql: &str, dialect: Dialect) -> Result<String, String> {
     }
     let tokens = &tokens[..end];
     if tokens.is_empty() {
-        return Err("SQL 是空的".to_owned());
+        return Err("SQL 为空".to_owned());
     }
     if tokens.contains(&Token::Punct(';')) {
-        return Err("一次只能执行一条语句，请去掉中间的分号分开查".to_owned());
+        return Err("一次只能执行一条语句，请移除中间的分号，分开查询".to_owned());
     }
     let first = tokens.iter().find_map(|t| match t {
         Token::Punct('(') => None,
@@ -208,7 +208,7 @@ pub fn check_read_only(sql: &str, dialect: Dialect) -> Result<String, String> {
                 "只允许只读查询（SELECT / WITH / SHOW / DESCRIBE / EXPLAIN），不接受 {w}"
             ));
         }
-        None => return Err("看不出这是什么语句；只允许 SELECT / SHOW / DESCRIBE / EXPLAIN".into()),
+        None => return Err("无法识别该语句类型；只允许 SELECT / SHOW / DESCRIBE / EXPLAIN".into()),
     }
     for (i, t) in tokens.iter().enumerate() {
         let Token::Word(w) = t else { continue };
@@ -227,7 +227,7 @@ pub fn check_read_only(sql: &str, dialect: Dialect) -> Result<String, String> {
             return Err(format!("不允许调用 {w}()：它会读取这个库以外的数据或占用锁"));
         }
         if dialect == Dialect::ClickHouse && upper == "FORMAT" && !call {
-            return Err("请去掉 FORMAT 子句，结果格式由 opdash 指定".to_owned());
+            return Err("请移除 FORMAT 子句，结果格式由 opdash 指定".to_owned());
         }
     }
     Ok(strip_trailing(sql))

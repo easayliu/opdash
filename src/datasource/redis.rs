@@ -96,7 +96,7 @@ impl Redis {
             .url
             .as_str()
             .into_connection_info()
-            .map_err(|e| format!("Redis 连接串无法解析: {e}"))?;
+            .map_err(|e| format!("Redis 连接串无法解析：{e}"))?;
         let mut settings = info.redis_settings().clone();
         if let Some(u) = &r.user {
             settings = settings.set_username(u);
@@ -111,7 +111,7 @@ impl Redis {
         }
         info = info.set_redis_settings(settings);
         let address = info.addr().to_string();
-        Client::open(info.clone()).map_err(|e| format!("Redis 连接串无效: {e}"))?;
+        Client::open(info.clone()).map_err(|e| format!("Redis 连接串无效：{e}"))?;
         Ok(Self { info, address })
     }
 
@@ -152,10 +152,10 @@ impl Redis {
         if e.is_io_error() || e.is_connection_refusal() {
             return Error::Source {
                 status: 502,
-                message: format!("Redis 数据源 {}（{}）不可用: {e}", src.name, self.address),
+                message: format!("Redis 数据源 {}（{}）不可用：{e}", src.name, self.address),
             };
         }
-        Error::Source { status: 400, message: format!("Redis 错误: {e}") }
+        Error::Source { status: 400, message: format!("Redis 错误：{e}") }
     }
 
     async fn run(
@@ -252,7 +252,7 @@ impl Redis {
         });
         if cursor != "0" && !truncated {
             out["note"] = json!(format!(
-                "SCAN 翻了 {rounds} 轮还没翻完整个库，只列出了已经扫到的键；换一个更具体的 match（如 order:123:*）"
+                "SCAN 执行 {rounds} 轮后仍未遍历整个库，仅列出了已扫描到的键；请改用更具体的 match（如 order:123:*）"
             ));
         }
         Ok(out)
@@ -380,7 +380,7 @@ impl Redis {
                 }
             }
             Ok(_) => {}
-            Err(e) => notes.push(format!("SLOWLOG 不可用: {e}")),
+            Err(e) => notes.push(format!("SLOWLOG 不可用：{e}")),
         }
         // 各命令的累计耗时：看得出是不是某一类命令（KEYS、大 HGETALL）整体在拖慢
         let mut stats = Table::new(&["command", "calls", "usec_per_call", "total_ms"]);
@@ -392,7 +392,7 @@ impl Redis {
                     stats.rows.push(vec![json!(cmd), json!(calls), json!(per), json!(total)]);
                 }
             }
-            Err(e) => notes.push(format!("INFO commandstats 不可用: {e}")),
+            Err(e) => notes.push(format!("INFO commandstats 不可用：{e}")),
         }
         notes.push("SLOWLOG 只保留最近若干条（slowlog-max-len），耗时不含网络往返；commandstats 是实例启动以来的累计值".to_owned());
         Ok(json!({ "slowlog": slowlog, "command_stats": stats, "notes": notes }))
@@ -429,7 +429,7 @@ async fn guard_size(
             _ => format!("{name} {key} 0 99"),
         };
         return Err(Error::bad_request(format!(
-            "{key} 有 {len} 个成员，{name} 一次最多取 {MAX_COLLECTION} 个；请改用 {hint} 分批看"
+            "{key} 有 {len} 个成员，{name} 一次最多取 {MAX_COLLECTION} 个；请改用 {hint} 分批查看"
         )));
     }
     Ok(())
@@ -492,7 +492,7 @@ pub fn split_command(line: &str) -> std::result::Result<Vec<String>, String> {
         args.push(cur);
     }
     if args.is_empty() {
-        return Err("命令是空的".to_owned());
+        return Err("命令为空".to_owned());
     }
     Ok(args)
 }
@@ -501,7 +501,7 @@ pub fn split_command(line: &str) -> std::result::Result<Vec<String>, String> {
 pub fn check_command(args: &[String]) -> std::result::Result<(), String> {
     let name = args[0].to_ascii_uppercase();
     if name == "KEYS" {
-        return Err("不支持 KEYS（大库上会阻塞 Redis）；列键请用 db_tables（按 SCAN 分批取）并给 match，如 order:*".to_owned());
+        return Err("不支持 KEYS（大库上会阻塞 Redis）；如需列出键，请使用 db_tables（按 SCAN 分批获取）并指定 match，如 order:*".to_owned());
     }
     let Some((_, subs)) = READ_COMMANDS.iter().find(|(n, _)| *n == name) else {
         return Err(format!(

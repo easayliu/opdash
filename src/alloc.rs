@@ -137,8 +137,8 @@ pub struct Alloc {
 impl Alloc {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取归属规则 {} 失败: {e}", path.display()))?;
-        Self::parse(&text).map_err(|e| format!("{} 有误: {e}", path.display()))
+            .map_err(|e| format!("读取归属规则 {} 失败：{e}", path.display()))?;
+        Self::parse(&text).map_err(|e| format!("{} 有误：{e}", path.display()))
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -204,14 +204,14 @@ struct ColumnEntry {
 impl File {
     fn into_alloc(self) -> Result<Alloc, String> {
         if self.lines.is_empty() {
-            return Err("lines 至少要有一条业务线".into());
+            return Err("lines 至少需要一条业务线".into());
         }
         for (i, line) in self.lines.iter().enumerate() {
             if line.trim().is_empty() {
-                return Err(format!("lines 第 {} 项是空的", i + 1));
+                return Err(format!("lines 第 {} 项为空", i + 1));
             }
             if self.lines[..i].contains(line) {
-                return Err(format!("业务线 {line:?} 重复了"));
+                return Err(format!("业务线 {line:?} 重复"));
             }
         }
         if self.rules.len() > MAX_RULES {
@@ -228,16 +228,16 @@ impl File {
             alloc.unmatched = Some(
                 alloc
                     .index_of(name)
-                    .ok_or_else(|| format!("unmatched = {name:?} 不在 lines 里"))?,
+                    .ok_or_else(|| format!("unmatched = {name:?} 不在 lines 中"))?,
             );
         }
         for (i, entry) in self.include.into_iter().enumerate() {
             let at = format!("include 第 {} 条", i + 1);
             if entry.to.is_some() || entry.split.is_some() {
-                return Err(format!("{at}只用于筛选账单行，不能带 to / split"));
+                return Err(format!("{at}仅用于筛选账单行，不能指定 to / split"));
             }
             if entry.lookback_months.is_some() {
-                return Err(format!("{at}不能带 lookback_months，它只用于 [prepaid]"));
+                return Err(format!("{at}不能指定 lookback_months，该项仅用于 [prepaid]"));
             }
             alloc.include.push(entry.matcher(&at)?);
         }
@@ -245,7 +245,7 @@ impl File {
             let at = "[prepaid]";
             if entry.to.is_some() || entry.split.is_some() {
                 return Err(format!(
-                    "{at}只说明哪些账单行算预付费，去向由 [[rules]] 决定，不能带 to / split"
+                    "{at}仅用于界定哪些账单行属于预付费，费用去向由 [[rules]] 决定，不能指定 to / split"
                 ));
             }
             let lookback_months = entry.lookback_months.unwrap_or(DEFAULT_LOOKBACK_MONTHS);
@@ -257,7 +257,7 @@ impl File {
             let matcher = entry.matcher(at)?;
             if matcher == Matcher::default() {
                 return Err(format!(
-                    "{at}没给任何条件，那样全部账单都会被当成预付费；通常写 subscription = [\"Subscription\", \"包年包月\"]"
+                    "{at}未给出任何条件，这会使全部账单都被视为预付费；通常应写为 subscription = [\"Subscription\", \"包年包月\"]"
                 ));
             }
             alloc.prepaid = Some(Prepaid { matcher, lookback_months });
@@ -265,7 +265,7 @@ impl File {
         for (i, entry) in self.rules.into_iter().enumerate() {
             if entry.lookback_months.is_some() {
                 return Err(format!(
-                    "规则第 {} 条不能带 lookback_months，它只用于 [prepaid]",
+                    "规则第 {} 条不能指定 lookback_months，该项仅用于 [prepaid]",
                     i + 1
                 ));
             }
@@ -325,11 +325,11 @@ impl Entry {
             ];
             let mut ops = ops.into_iter().flatten();
             let op = ops.next().ok_or_else(|| {
-                format!("{at}的 columns.{} 要给 any_of / like / not_like 之一", c.name)
+                format!("{at}的 columns.{} 须指定 any_of / like / not_like 之一", c.name)
             })?;
             if ops.next().is_some() {
                 return Err(format!(
-                    "{at}的 columns.{} 同时给了多种匹配方式，一列只能给一种",
+                    "{at}的 columns.{} 同时指定了多种匹配方式，每列只能指定一种",
                     c.name
                 ));
             }
@@ -339,7 +339,7 @@ impl Entry {
                 return Err(format!("{at}的 columns.{} any_of 是空列表", c.name));
             }
             if c.name.trim().is_empty() {
-                return Err(format!("{at}的 columns 少了列名"));
+                return Err(format!("{at}的 columns 缺少列名"));
             }
             columns.push(ColumnMatch { column: c.name.clone(), op });
         }
@@ -348,15 +348,15 @@ impl Entry {
 
     fn shares(&self, alloc: &Alloc, at: &str) -> Result<Vec<Share>, String> {
         let line = |name: &str| {
-            alloc.index_of(name).ok_or_else(|| format!("{at}归给了 {name:?}，它不在 lines 里"))
+            alloc.index_of(name).ok_or_else(|| format!("{at}归属的 {name:?} 不在 lines 中"))
         };
         match (&self.to, &self.split) {
-            (Some(_), Some(_)) => Err(format!("{at}同时给了 to 和 split，只能二选一")),
-            (None, None) => Err(format!("{at}没说这笔钱归谁，要给 to 或 split")),
+            (Some(_), Some(_)) => Err(format!("{at}同时指定了 to 和 split，只能二选一")),
+            (None, None) => Err(format!("{at}未指定费用归属，须给出 to 或 split")),
             (Some(to), None) => Ok(vec![Share { line: line(to)?, weight: 1.0 }]),
             (None, Some(split)) => {
                 if split.is_empty() {
-                    return Err(format!("{at}的 split 是空的"));
+                    return Err(format!("{at}的 split 为空"));
                 }
                 let mut shares = Vec::new();
                 for (name, weight) in split {
@@ -433,17 +433,17 @@ lookback_months = 24
     #[test]
     fn rejects_configuration_mistakes() {
         let cases = [
-            (r#"lines = []"#, "至少要有一条"),
+            (r#"lines = []"#, "至少需要一条"),
             (r#"lines = ["甲", "甲"]"#, "重复"),
-            ("lines = [\"甲\"]\nunmatched = \"乙\"", "不在 lines 里"),
-            ("lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nproduct = [\"ECS\"]", "没说这笔钱归谁"),
+            ("lines = [\"甲\"]\nunmatched = \"乙\"", "不在 lines 中"),
+            ("lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nproduct = [\"ECS\"]", "未指定费用归属"),
             (
                 "lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nto = \"甲\"\nsplit = { \"甲\" = 1 }",
                 "只能二选一",
             ),
             (
                 "lines = [\"甲\", \"乙\"]\n[[rules]]\nname = \"x\"\nsplit = { \"甲\" = 1, \"丙\" = 2 }",
-                "不在 lines 里",
+                "不在 lines 中",
             ),
             ("lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nsplit = { \"甲\" = 0 }", "应为正数"),
             (
@@ -452,23 +452,23 @@ lookback_months = 24
             ),
             (
                 "lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nto = \"甲\"\ncolumns = [{ name = \"ip\", like = \"a%\", not_like = \"b%\" }]",
-                "只能给一种",
+                "只能指定一种",
             ),
             // 键名拼错不能悄悄放过：products 不是 product
             (
                 "lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nto = \"甲\"\nproducts = [\"ECS\"]",
                 "unknown field",
             ),
-            ("lines = [\"甲\"]\n[[include]]\nto = \"甲\"", "不能带 to / split"),
+            ("lines = [\"甲\"]\n[[include]]\nto = \"甲\"", "不能指定 to / split"),
             (
                 "lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nto = \"甲\"\nprovider = \"aws\"",
                 "只能是 volcengine",
             ),
             // 预付费那一段不给条件，等于把全部账单都当成预付费
-            ("lines = [\"甲\"]\n[prepaid]\n", "没给任何条件"),
+            ("lines = [\"甲\"]\n[prepaid]\n", "未给出任何条件"),
             (
                 "lines = [\"甲\"]\n[prepaid]\nsubscription = [\"Subscription\"]\nto = \"甲\"",
-                "不能带 to / split",
+                "不能指定 to / split",
             ),
             (
                 "lines = [\"甲\"]\n[prepaid]\nsubscription = [\"Subscription\"]\nlookback_months = 0",
@@ -476,7 +476,7 @@ lookback_months = 24
             ),
             (
                 "lines = [\"甲\"]\n[[rules]]\nname = \"x\"\nto = \"甲\"\nlookback_months = 12",
-                "只用于 [prepaid]",
+                "仅用于 [prepaid]",
             ),
         ];
         for (text, needle) in cases {

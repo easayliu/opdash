@@ -68,7 +68,7 @@ impl Mcp {
         let req = Request::builder()
             .uri(&uri)
             .body(Body::empty())
-            .map_err(|e| format!("内部请求无效: {e}"))?;
+            .map_err(|e| format!("内部请求无效：{e}"))?;
         let resp = match self.api.clone().oneshot(req).await {
             Ok(r) => r,
             Err(never) => match never {},
@@ -76,9 +76,9 @@ impl Mcp {
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), MAX_API_BODY)
             .await
-            .map_err(|e| format!("读取内部响应失败: {e}"))?;
+            .map_err(|e| format!("读取内部响应失败：{e}"))?;
         let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("内部响应不是 JSON（HTTP {}）: {e}", status.as_u16()))?;
+            .map_err(|e| format!("内部响应不是 JSON（HTTP {}）：{e}", status.as_u16()))?;
         if status.is_success() {
             return Ok(value);
         }
@@ -93,7 +93,7 @@ impl Mcp {
                 )
             }
             Some("too_heavy") | Some("timeout") => {
-                format!("{msg}。建议：缩小时间范围（先看几分钟）或加上服务 / 级别等筛选条件再试")
+                format!("{msg}。建议：缩小时间范围（先查看几分钟）或添加服务、级别等筛选条件后重试")
             }
             _ => msg,
         })
@@ -300,7 +300,7 @@ async fn call(
                 Err(tools::ToolError::Unknown) => Err(RpcError::new(
                     INVALID_PARAMS,
                     format!(
-                        "没有叫 {name:?} 的工具；可用: {}",
+                        "不存在名为 {name:?} 的工具；可用：{}",
                         {
                             let (metrics, bills) = enabled_tables(mcp).await;
                             tools::list(metrics, bills, !mcp.state.datasources.is_empty())
@@ -315,7 +315,7 @@ async fn call(
             }
         }
         // 没声明 resources / prompts / logging 能力，客户端问了就按协议回「没有这个方法」
-        other => Err(RpcError::new(METHOD_NOT_FOUND, format!("不支持的方法: {other}"))),
+        other => Err(RpcError::new(METHOD_NOT_FOUND, format!("不支持的方法：{other}"))),
     }
 }
 

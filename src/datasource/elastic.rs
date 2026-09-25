@@ -26,7 +26,7 @@ impl Elastic {
             .timeout(r.timeout)
             .connect_timeout(super::CONNECT_TIMEOUT)
             .build()
-            .map_err(|e| format!("建 HTTP 客户端失败: {e}"))?;
+            .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
         let auth = match (&r.api_key, &r.user) {
             (Some(k), _) => Some(format!("ApiKey {k}")),
             (None, Some(u)) => {
@@ -67,7 +67,7 @@ impl Elastic {
                 Error::Source {
                     status: 502,
                     message: format!(
-                        "Elasticsearch 数据源 {}（{}）不可用: {e}",
+                        "Elasticsearch 数据源 {}（{}）不可用：{e}",
                         src.name, self.base
                     ),
                 }
@@ -76,7 +76,7 @@ impl Elastic {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| Error::Source {
             status: 502,
-            message: format!("读取 Elasticsearch 响应失败: {e}"),
+            message: format!("读取 Elasticsearch 响应失败：{e}"),
         })?;
         let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!(text));
         if status.is_success() {
@@ -100,7 +100,7 @@ impl Elastic {
                 _ => 400,
             },
             message: format!(
-                "Elasticsearch 错误 {}{}: {reason}",
+                "Elasticsearch 错误 {}{}：{reason}",
                 status.as_u16(),
                 if ty.is_empty() { String::new() } else { format!(" {ty}") }
             ),
@@ -311,7 +311,7 @@ impl Elastic {
             "indices": indices,
             "running": running,
             "notes": [
-                "indices 是节点启动以来的累计值，不受时间范围影响；query_avg_ms 高的索引优先看",
+                "indices 是节点启动以来的累计值，不受时间范围影响；应优先排查 query_avg_ms 较高的索引",
                 "Elasticsearch 的慢查询日志只写在节点日志文件里（index.search.slowlog）；若节点日志已采集进 opdash，可用 search_logs 搜 slowlog",
             ],
         }))

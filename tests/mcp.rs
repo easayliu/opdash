@@ -298,7 +298,7 @@ async fn bad_arguments_come_back_as_tool_errors_not_rpc_errors() {
         call_tool(&app, "search_logs", json!({ "filters": { "nope": "x" } })).await;
     assert!(is_error);
     let text = out.as_str().unwrap();
-    assert!(text.contains("不认识的筛选列"), "{text}");
+    assert!(text.contains("不支持的筛选列"), "{text}");
     assert!(text.contains("namespace"), "{text}");
 
     // 我们自己的参数校验
@@ -315,7 +315,7 @@ async fn bad_arguments_come_back_as_tool_errors_not_rpc_errors() {
         call_tool(&app, "service_operations", json!({ "service_name": "a" })).await;
     assert!(is_error);
     let text = out.as_str().unwrap();
-    assert!(text.contains("不认识的参数") && text.contains("service_name"), "{text}");
+    assert!(text.contains("不支持的参数") && text.contains("service_name"), "{text}");
     assert!(text.contains("compare"), "把认识的参数名列出来: {text}");
 
     // 没有这个工具才是 JSON-RPC 错误

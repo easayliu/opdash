@@ -43,7 +43,7 @@ const HEAVY_COLUMNS: &[&str] = &[
 /// 数据库调用的一个属性，新旧几版 OTel 语义约定都认：按顺序取第一个有值的
 /// （Java agent 1.x 写 `db.statement` / `db.name`，2.x 起写 `db.query.text` / `db.namespace`）。
 fn db_attr_any(keys: &[&str]) -> String {
-    let (last, rest) = keys.split_last().expect("至少一个属性名");
+    let (last, rest) = keys.split_last().expect("至少需要一个属性名");
     rest.iter().rev().fold(format!("toString(span_attributes.`{last}`)"), |fallback, k| {
         format!(
             "if(toString(span_attributes.`{k}`) != '', toString(span_attributes.`{k}`), {fallback})"

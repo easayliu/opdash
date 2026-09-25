@@ -159,7 +159,7 @@ async fn run() -> anyhow::Result<()> {
     let listener =
         tokio::net::TcpListener::bind(bind).await.with_context(|| format!("监听 {bind}"))?;
     tracing::info!(
-        "opdash v{} 已启动: http://{bind}{}",
+        "opdash v{} 已启动：http://{bind}{}",
         env!("CARGO_PKG_VERSION"),
         match auth.mode() {
             "oidc" if auth.basic().is_some() => "（OIDC 登录 + Basic 认证）",

@@ -119,7 +119,7 @@ async fn create(State(state): State<AppState>, Owner(user): Owner, body: Bytes) 
         Err(e) => return e.into_response(),
     };
     let Some(path) = req.path.as_deref() else {
-        return Error::bad_request("缺 path：要收藏的页面路径，如 /logs").into_response();
+        return Error::bad_request("缺少 path：待收藏的页面路径，如 /logs").into_response();
     };
     match state.saved.create(
         &user,
@@ -166,14 +166,14 @@ async fn delete(
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => not_found(),
-        Err(e) => Error::internal(format!("收藏文件读写失败: {e}")).into_response(),
+        Err(e) => Error::internal(format!("收藏文件读写失败：{e}")).into_response(),
     }
 }
 
 fn not_found() -> Response {
     (
         StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": "没有这条收藏（或者它不是你的）", "kind": "not_found" })),
+        Json(serde_json::json!({ "error": "收藏不存在，或不属于你", "kind": "not_found" })),
     )
         .into_response()
 }

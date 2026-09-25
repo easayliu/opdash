@@ -210,7 +210,7 @@ impl Goscan {
         }
         serde_json::from_str::<SyncStarted>(&body).map_err(|e| Error::Goscan {
             status: 0,
-            message: format!("无法解析 goscan 的响应（{e}）: {body}"),
+            message: format!("无法解析 goscan 的响应（{e}）：{body}"),
         })
     }
 
@@ -226,7 +226,7 @@ impl Goscan {
         }
         serde_json::from_str::<SyncStarted>(&body).map_err(|e| Error::Goscan {
             status: 0,
-            message: format!("无法解析 goscan 的响应（{e}）: {body}"),
+            message: format!("无法解析 goscan 的响应（{e}）：{body}"),
         })
     }
 
@@ -241,7 +241,7 @@ impl Goscan {
         }
         serde_json::from_str::<TaskList>(&body).map(|l| l.tasks).map_err(|e| Error::Goscan {
             status: 0,
-            message: format!("无法解析 goscan 返回的任务列表（{e}）: {body}"),
+            message: format!("无法解析 goscan 返回的任务列表（{e}）：{body}"),
         })
     }
 
@@ -277,14 +277,14 @@ impl Goscan {
         }
         serde_json::from_str::<TaskRow>(&body).map_err(|e| Error::Goscan {
             status: 0,
-            message: format!("无法解析 goscan 返回的任务（{e}）: {body}"),
+            message: format!("无法解析 goscan 返回的任务（{e}）：{body}"),
         })
     }
 
     /// 连不上 / 超时。
     fn down(&self, e: reqwest::Error) -> Error {
         Error::Goscan {
-            status: 0, message: format!("无法连接账单同步服务（{}）: {e}", self.base)
+            status: 0, message: format!("无法连接账单同步服务（{}）：{e}", self.base)
         }
     }
 

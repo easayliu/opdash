@@ -229,7 +229,7 @@ impl SchemaCache {
         if let Some((at, err)) = self.last_failure.lock().clone()
             && at.elapsed() < RETRY_AFTER
         {
-            return Err(Error::Unavailable(format!("表结构尚未读到（{err}）")));
+            return Err(Error::Unavailable(format!("尚未读取到表结构（{err}）")));
         }
         self.refresh().await
     }
@@ -301,7 +301,7 @@ impl SchemaCache {
         let table = |name: &str| -> Result<Table> {
             read(name).ok_or_else(|| {
                 Error::Internal(format!(
-                    "ClickHouse 里没有表 {}.{name}（或者没有读 system.columns 的权限）",
+                    "ClickHouse 里没有表 {}.{name}（或没有读取 system.columns 的权限）",
                     self.database
                 ))
             })
@@ -313,7 +313,7 @@ impl SchemaCache {
             None => (
                 None,
                 Some(format!(
-                    "{}.{} 不存在（没部署 metricpipe 的话本来就没有这张表）",
+                    "{}.{} 不存在（未部署 metricpipe 时不存在此表，属正常情况）",
                     self.database, self.metric_table
                 )),
             ),
@@ -326,7 +326,7 @@ impl SchemaCache {
         let missing_logs = logs.missing(LOG_FIXED_COLUMNS);
         if !missing_logs.is_empty() {
             return Err(Error::Internal(format!(
-                "日志表 {}.{} 缺列: {}（这些是 logpipe 固定会写的列）",
+                "日志表 {}.{} 缺列：{}（这些是 logpipe 固定会写的列）",
                 self.database,
                 self.log_table,
                 missing_logs.join(", ")
@@ -335,7 +335,7 @@ impl SchemaCache {
         let missing_traces = traces.missing(TRACE_FIXED_COLUMNS);
         if !missing_traces.is_empty() {
             return Err(Error::Internal(format!(
-                "span 表 {}.{} 缺列: {}（这些是 tracepipe 固定会写的列）",
+                "span 表 {}.{} 缺列：{}（这些是 tracepipe 固定会写的列）",
                 self.database,
                 self.trace_table,
                 missing_traces.join(", ")
@@ -413,7 +413,7 @@ impl SchemaCache {
                         found.push(Some(t));
                     } else {
                         notes.push(format!(
-                            "{label} {}.{} 缺列: {}",
+                            "{label} {}.{} 缺列：{}",
                             self.database,
                             t.name,
                             missing.join(", ")
@@ -426,7 +426,7 @@ impl SchemaCache {
         if found.iter().all(Option::is_none) {
             return (
                 None,
-                Some(format!("{}（未部署 goscan 时本就没有这几张表）", notes.join("；"))),
+                Some(format!("{}（未部署 goscan 时不存在这些表，属正常情况）", notes.join("；"))),
             );
         }
 
@@ -676,7 +676,7 @@ fn metric_table_problem(table: &Table, database: &str) -> Option<String> {
     let missing = table.missing(METRIC_FIXED_COLUMNS);
     if !missing.is_empty() {
         return Some(format!(
-            "{database}.{} 缺列: {}（这些是 metricpipe 固定会写的列），指标页已停用",
+            "{database}.{} 缺列：{}（这些是 metricpipe 固定会写的列），指标页已停用",
             table.name,
             missing.join(", ")
         ));

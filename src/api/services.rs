@@ -147,7 +147,7 @@ async fn overview(State(state): State<AppState>, p: Params) -> Result<Json<Overv
             continue;
         }
         if !dim_columns.contains(&key) {
-            return Err(Error::bad_request(format!("不认识的筛选列 {key:?}")));
+            return Err(Error::bad_request(format!("不支持的筛选列 {key:?}")));
         }
         dims.push((key.to_owned(), p.get_list(key)));
     }
@@ -463,10 +463,10 @@ async fn operations_many(
     let (kind, kinds) = parse_kinds(&p)?;
     let services = p.get_list("service");
     if services.is_empty() {
-        return Err(Error::bad_request("至少给一个 service"));
+        return Err(Error::bad_request("至少指定一个 service"));
     }
     if services.len() > MAX_SERVICES_PER_QUERY {
-        return Err(Error::bad_request(format!("一次最多问 {MAX_SERVICES_PER_QUERY} 个服务")));
+        return Err(Error::bad_request(format!("一次最多查询 {MAX_SERVICES_PER_QUERY} 个服务")));
     }
     let queries = TraceQueries { database: &state.config.database, table: &schema.traces };
     let names: Vec<&str> = services.iter().map(String::as_str).collect();

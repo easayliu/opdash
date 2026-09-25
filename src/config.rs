@@ -302,19 +302,19 @@ impl Config {
             return Err("--max-rows 不能为 0".into());
         }
         if self.max_message_chars < 256 {
-            return Err("--max-message-chars 至少 256，再小连一行堆栈都放不下".into());
+            return Err("--max-message-chars 不能小于 256，否则无法容纳一行完整的堆栈".into());
         }
         if self.query_timeout.as_secs() == 0 {
             return Err("--query-timeout 至少 1 秒".into());
         }
         if self.oidc_issuer.is_some() && self.oidc_client_id.is_none() {
-            return Err("配了 --oidc-issuer 就必须配 --oidc-client-id".into());
+            return Err("配置 --oidc-issuer 时必须同时配置 --oidc-client-id".into());
         }
         if self.tail_interval < Duration::from_millis(200) {
-            return Err("--tail-interval 至少 200ms，再快就是在刷库了".into());
+            return Err("--tail-interval 不能小于 200ms，否则会对数据库造成过大压力".into());
         }
         if self.tail_interval > Duration::from_secs(60) {
-            return Err("--tail-interval 最多 60s，再慢就不叫跟随了".into());
+            return Err("--tail-interval 不能大于 60s，否则将失去实时跟随的意义".into());
         }
         if self.max_tail_streams == 0 {
             return Err("--max-tail-streams 至少 1".into());
@@ -345,7 +345,7 @@ impl Config {
             ("--alicloud-daily-table", &self.alicloud_daily_table),
         ] {
             if !is_plain_identifier(name) {
-                return Err(format!("{flag} 只能包含字母、数字、下划线: {name:?}"));
+                return Err(format!("{flag} 只能包含字母、数字、下划线：{name:?}"));
             }
         }
         Ok(())

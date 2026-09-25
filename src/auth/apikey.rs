@@ -91,7 +91,7 @@ impl KeyStore {
         let path = path.into();
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir)
-                .map_err(|e| format!("建不出 {} 所在的目录: {e}", path.display()))?;
+                .map_err(|e| format!("无法创建 {} 所在的目录：{e}", path.display()))?;
         }
         let store =
             Self { path, state: Mutex::new(State { keys: Vec::new(), mtime: None, dirty: false }) };
@@ -112,16 +112,16 @@ impl KeyStore {
 
     fn load_into(&self, st: &mut State) -> Result<(), String> {
         let raw =
-            fs::read(&self.path).map_err(|e| format!("读不了 {}: {e}", self.path.display()))?;
+            fs::read(&self.path).map_err(|e| format!("无法读取 {}: {e}", self.path.display()))?;
         let file: FileFormat = if raw.iter().all(u8::is_ascii_whitespace) {
             FileFormat::default()
         } else {
             serde_json::from_slice(&raw)
-                .map_err(|e| format!("{} 不是 opdash 的 API key 文件: {e}", self.path.display()))?
+                .map_err(|e| format!("{} 不是 opdash 的 API 密钥文件：{e}", self.path.display()))?
         };
         if file.version > FILE_VERSION {
             return Err(format!(
-                "{} 是更新版本的 opdash 写的（version {}），这个版本只认到 {FILE_VERSION}",
+                "{} 由更新版本的 opdash 写入（version {}），当前版本最高只支持 {FILE_VERSION}",
                 self.path.display(),
                 file.version
             ));
@@ -156,9 +156,9 @@ impl KeyStore {
         let file = FileFormat { version: FILE_VERSION, keys: st.keys.clone() };
         let json = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, &json).map_err(|e| format!("写不了 {}: {e}", tmp.display()))?;
+        fs::write(&tmp, &json).map_err(|e| format!("无法写入 {}: {e}", tmp.display()))?;
         fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("替换 {} 失败: {e}", self.path.display()))?;
+            .map_err(|e| format!("替换 {} 失败：{e}", self.path.display()))?;
         st.mtime = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
         st.dirty = false;
         Ok(())

@@ -31,7 +31,7 @@ pub struct Mysql {
 
 impl Mysql {
     pub fn new(r: &Resolved) -> std::result::Result<Self, String> {
-        let opts = Opts::from_url(&r.url).map_err(|e| format!("MySQL 连接串无法解析: {e}"))?;
+        let opts = Opts::from_url(&r.url).map_err(|e| format!("MySQL 连接串无法解析：{e}"))?;
         let address = format!("{}:{}", opts.ip_or_hostname(), opts.tcp_port());
         let mut b = OptsBuilder::from_opts(opts)
             .pool_opts(
@@ -66,7 +66,7 @@ impl Mysql {
             .map_err(|_| Error::Source {
                 status: 502,
                 message: format!(
-                    "连不上 MySQL 数据源 {}（{}）：{} 秒内没有建立连接",
+                    "无法连接 MySQL 数据源 {}（{}）：{} 秒内未能建立连接",
                     src.name,
                     self.address,
                     super::CONNECT_TIMEOUT.as_secs()
@@ -124,20 +124,20 @@ impl Mysql {
                 };
                 let hint = match se.code {
                     3024 | 1969 => {
-                        "。建议：加上走索引的 WHERE 条件或 LIMIT，或先 EXPLAIN 看执行计划"
+                        "。建议：添加可命中索引的 WHERE 条件或 LIMIT，或先用 EXPLAIN 查看执行计划"
                     }
-                    1142 | 1044 | 1227 | 1045 => "。这个数据源的账号没有该权限",
+                    1142 | 1044 | 1227 | 1045 => "。该数据源的账号没有此权限",
                     1792 => "。数据源只允许只读查询",
                     _ => "",
                 };
                 Error::Source {
                     status,
-                    message: format!("MySQL 错误 {}: {}{hint}", se.code, se.message),
+                    message: format!("MySQL 错误 {}：{}{hint}", se.code, se.message),
                 }
             }
             other => Error::Source {
                 status: 502,
-                message: format!("MySQL 数据源 {}（{}）不可用: {other}", src.name, self.address),
+                message: format!("MySQL 数据源 {}（{}）不可用：{other}", src.name, self.address),
             },
         }
     }
@@ -168,7 +168,7 @@ impl Mysql {
                      WHERE SCHEMA_NAME NOT IN {SYSTEM} ORDER BY SCHEMA_NAME LIMIT {more}"
                 ),
                 Params::Empty,
-                "没有指定库，只列出了库名；给 database 列这个库的表，或给 match 跨库按表名搜",
+                "未指定库，仅列出了库名；指定 database 可列出该库的表，指定 match 可跨库按表名搜索",
             )
         } else if db.is_empty() {
             (
@@ -180,7 +180,7 @@ impl Mysql {
                      ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT {more}"
                 ),
                 Params::Positional(vec![like.into()]),
-                "跨库搜索不带行数和大小；给 database 看这个库的表的估算行数与大小",
+                "跨库搜索不含行数与大小；指定 database 可查看该库各表的估算行数与大小",
             )
         } else {
             (
@@ -384,16 +384,16 @@ impl Mysql {
                             ));
                             slow_log = Some(t);
                         }
-                        Err(e) => notes.push(format!("读取 mysql.slow_log 失败: {}", self.err(src, e))),
+                        Err(e) => notes.push(format!("读取 mysql.slow_log 失败：{}", self.err(src, e))),
                     }
                 }
             }
             if digests.is_none() && slow_log.is_none() {
                 notes.push(match digest_error {
                     Some(e) => format!(
-                        "读取 performance_schema 失败（需要 performance_schema 开启且账号有 SELECT 权限）: {e}"
+                        "读取 performance_schema 失败（需要 performance_schema 开启且账号有 SELECT 权限）：{e}"
                     ),
-                    None => "语句摘要为空：performance_schema 可能未开启（SHOW VARIABLES LIKE 'performance_schema'），或这段时间里没有达到 min_ms 的语句；慢查询日志也没有写在表里（log_output 不含 TABLE）".to_owned(),
+                    None => "语句摘要为空：performance_schema 可能未开启（SHOW VARIABLES LIKE 'performance_schema'），或此时段内没有达到 min_ms 的语句；慢查询日志也没有写在表里（log_output 不含 TABLE）".to_owned(),
                 });
             }
             let running = s
@@ -475,8 +475,8 @@ async fn explain_hint(s: &mut Session, stmt: &str) -> Option<String> {
     if full_scan {
         out.push_str(
             "\ntype=ALL / index 是整表扫描。常见原因：没有命中索引的条件；比较值与列类型不一致\
-             （字符串列拿数字比较，如 varchar 的 id 写成 IN (123) 而不是 IN ('123')）；对索引列套了函数。\
-             先 db_describe 看列类型",
+             （字符串列与数字比较，如 varchar 的 id 写成 IN (123) 而不是 IN ('123')）；对索引列套了函数。\
+             可先用 db_describe 查看列类型",
         );
     }
     Some(out)

@@ -156,7 +156,7 @@ async fn a_histogram_is_not_queried_like_a_gauge() {
     .await;
     assert_eq!(status, 400, "{body}");
     let err = body["error"].as_str().unwrap();
-    assert!(err.contains("jvm.gc.duration") && err.contains("value 列是空的"), "{err}");
+    assert!(err.contains("jvm.gc.duration") && err.contains("value 列为空"), "{err}");
     assert!(err.contains("agg=quantile") && err.contains("field=sum"), "怎么查得写清楚: {err}");
     assert_eq!(sql(&fake).len(), 1, "拒在主查询之前，别白查一趟");
 
@@ -190,7 +190,7 @@ async fn a_histogram_is_not_queried_like_a_gauge() {
         get_json(&app, &format!("/api/metrics/query?{}&metric=nope.gc", window())).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["metric_type"].is_null(), "{body}");
-    assert!(body["note"].as_str().unwrap().contains("一个数据点都没有"), "{body}");
+    assert!(body["note"].as_str().unwrap().contains("没有任何数据点"), "{body}");
 }
 
 /// 类型是问出来的，但一个服务面板十几块图，不能每块图都多打一趟。

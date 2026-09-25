@@ -103,7 +103,7 @@ fn check_key(key: &str) -> Result<String> {
         || key.len() > 256
         || key.chars().any(|c| c == '`' || c == '\\' || c.is_control())
     {
-        return Err(Error::bad_request(format!("属性名不合法: {key:?}")));
+        return Err(Error::bad_request(format!("属性名不合法：{key:?}")));
     }
     Ok(key.to_owned())
 }

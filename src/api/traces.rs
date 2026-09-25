@@ -76,7 +76,7 @@ fn dims(schema: &Schema, p: &Params) -> Result<Vec<(String, Vec<String>)>> {
         }
         if !dim_columns.contains(&key) {
             return Err(Error::bad_request(format!(
-                "不认识的筛选列 {key:?}；span 表可用的筛选列: {}",
+                "不支持的筛选列 {key:?}；span 表可用的筛选列：{}",
                 if dim_columns.is_empty() {
                     "（无）".to_owned()
                 } else {
@@ -765,7 +765,7 @@ async fn span_attrs(
             let (found, s) =
                 locate_one(&state, &queries, &trace_id, &span_id, p.get_i64("at")?, true).await?;
             stats = s;
-            found.ok_or_else(|| Error::bad_request(format!("这条 trace 里没有 span {span_id}")))?
+            found.ok_or_else(|| Error::bad_request(format!("此链路中没有 span {span_id}")))?
         }
     };
     let full = state.client.rows::<SpanRow>(queries.detail_span(&trace_id, &span)?).await?;
@@ -775,7 +775,7 @@ async fn span_attrs(
         .into_iter()
         .next()
         .map(Span::from)
-        .ok_or_else(|| Error::bad_request("span 已经不在库里了（可能刚过 TTL）"))?;
+        .ok_or_else(|| Error::bad_request("该 span 已不在库中（可能已超过 TTL）"))?;
     Ok(Json(SpanAttrsResponse {
         trace_id,
         span_id,

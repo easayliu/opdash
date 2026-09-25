@@ -112,7 +112,7 @@ impl Client {
             let row = serde_json::from_slice::<T>(line).map_err(|e| {
                 let preview = String::from_utf8_lossy(&line[..line.len().min(200)]);
                 Error::internal(format!(
-                    "解析 ClickHouse 第 {} 行结果失败: {e}; 内容: {preview}",
+                    "解析 ClickHouse 第 {} 行结果失败：{e}；内容：{preview}",
                     i + 1
                 ))
             })?;
@@ -134,7 +134,7 @@ impl Client {
         let body = resp.bytes().await?;
         let envelope: JsonEnvelope<T> = serde_json::from_slice(&body).map_err(|e| {
             let preview = String::from_utf8_lossy(&body[..body.len().min(200)]);
-            Error::internal(format!("解析 ClickHouse JSON 结果失败: {e}; 内容: {preview}"))
+            Error::internal(format!("解析 ClickHouse JSON 结果失败：{e}；内容：{preview}"))
         })?;
         Ok(RowsWithTotal { rows: envelope.data, total: envelope.rows_before_limit_at_least, stats })
     }
@@ -467,7 +467,7 @@ pub mod num {
         match raw {
             NumOrStr::Num(n) => Ok(n),
             NumOrStr::Str(s) => {
-                s.trim().parse::<T>().map_err(|e| D::Error::custom(format!("{s:?} 不是数字: {e}")))
+                s.trim().parse::<T>().map_err(|e| D::Error::custom(format!("{s:?} 不是数字：{e}")))
             }
         }
     }
