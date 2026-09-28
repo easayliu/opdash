@@ -26,7 +26,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::State,
+    extract::{Extension, State},
     http::{HeaderMap, Request, StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
@@ -36,6 +36,7 @@ use chrono_tz::Tz;
 use serde_json::{Value, json};
 
 use crate::api::AppState;
+use crate::auth::Identity;
 
 /// 我们这边实现的协议版本。客户端要的版本在 [`SUPPORTED_VERSIONS`] 里就照它的回，否则回这个。
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -52,12 +53,21 @@ const INTERNAL_ERROR: i64 = -32603;
 /// 正常远不到；这是防御性的。
 const MAX_API_BODY: usize = 64 << 20;
 
-/// MCP 处理器的状态：应用状态 + 一份进程内的 API 路由。
+/// MCP 处理器的状态：应用状态 + 一份进程内的 API 路由 + 这次请求是谁发的。
+#[derive(Clone)]
 pub struct Mcp {
     pub state: AppState,
     /// 工具通过它「请求自己」。Router 是 `Clone` 的，每次调用 clone 一份走 `oneshot`。
     api: Router,
+    /// 发起这次 MCP 请求的人（认证中间件认出来的），没开认证就是 `None`。每个请求
+    /// 在 [`handle`] 里填一次，进程内请求照样带上，API 那边的审计日志才知道是谁
+    who: Option<Identity>,
 }
+
+/// 进程内请求的标记：API 那边据此在审计日志里记 `via=mcp`。只能在进程里插进 extensions，
+/// 外面的请求伪造不了。
+#[derive(Clone, Copy)]
+pub struct InProcess;
 
 impl Mcp {
     /// 进程内 GET `/api/...`。非 2xx 时把 API 的 `error` 文本原样交回去——那句话本来就是写给人看的
@@ -65,10 +75,14 @@ impl Mcp {
     pub async fn get(&self, path: &str, query: &str) -> Result<Value, String> {
         use tower::ServiceExt;
         let uri = if query.is_empty() { path.to_owned() } else { format!("{path}?{query}") };
-        let req = Request::builder()
+        let mut req = Request::builder()
             .uri(&uri)
             .body(Body::empty())
             .map_err(|e| format!("内部请求无效：{e}"))?;
+        req.extensions_mut().insert(InProcess);
+        if let Some(who) = &self.who {
+            req.extensions_mut().insert(who.clone());
+        }
         let resp = match self.api.clone().oneshot(req).await {
             Ok(r) => r,
             Err(never) => match never {},
@@ -106,7 +120,7 @@ impl Mcp {
 
 /// `/mcp` 路由。挂进受认证保护的那一半，见 [`crate::api::app`]。
 pub fn router(state: AppState) -> Router {
-    let mcp = Arc::new(Mcp { api: crate::api::api_router(state.clone()), state });
+    let mcp = Arc::new(Mcp { api: crate::api::api_router(state.clone()), state, who: None });
     Router::new().route("/mcp", post(handle).get(no_stream).delete(no_stream)).with_state(mcp)
 }
 
@@ -121,10 +135,16 @@ async fn no_stream() -> Response {
         .into_response()
 }
 
-async fn handle(State(mcp): State<Arc<Mcp>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle(
+    State(mcp): State<Arc<Mcp>>,
+    who: Option<Extension<Identity>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Err(resp) = check_origin(&headers) {
         return resp;
     }
+    let mcp = Mcp { who: who.map(|Extension(w)| w), ..Mcp::clone(&mcp) };
     let host = request_host(&headers);
     let host = host.as_deref();
     let parsed: Value = match serde_json::from_slice(&body) {
@@ -286,7 +306,8 @@ async fn call(
             };
             let started = std::time::Instant::now();
             let out = tools::call(mcp, name, arguments).await;
-            log_tool_call(name, arguments, &out, started.elapsed().as_millis());
+            let user = mcp.who.as_ref().map(Identity::user);
+            log_tool_call(user, name, arguments, &out, started.elapsed().as_millis());
             match out {
                 Ok(tools::ToolOutput { text, .. }) => Ok(json!({
                     "content": [{ "type": "text", "text": text }],
@@ -323,6 +344,7 @@ async fn call(
 /// ——看不出调了哪个工具、传了什么、回来是不是空的，「模型是不是老走错工具」这种问题就只能
 /// 靠感觉。这条是拿来数的：tool + 参数 + 空不空 + 耗时。
 fn log_tool_call(
+    user: Option<&str>,
     name: &str,
     arguments: &serde_json::Map<String, Value>,
     out: &Result<tools::ToolOutput, tools::ToolError>,
@@ -332,6 +354,7 @@ fn log_tool_call(
     let args = truncate_for_log(&Value::Object(arguments.clone()).to_string());
     match out {
         Ok(o) => tracing::info!(
+            user,
             tool = name,
             %args,
             elapsed_ms,
@@ -340,13 +363,13 @@ fn log_tool_call(
             "MCP 工具调用"
         ),
         Err(tools::ToolError::Failed(msg)) => {
-            tracing::info!(tool = name, %args, elapsed_ms, error = %truncate_for_log(msg), "MCP 工具失败")
+            tracing::info!(user, tool = name, %args, elapsed_ms, error = %truncate_for_log(msg), "MCP 工具失败")
         }
         Err(tools::ToolError::Unknown) => {
-            tracing::info!(tool = name, %args, elapsed_ms, error = "没有这个工具", "MCP 工具失败")
+            tracing::info!(user, tool = name, %args, elapsed_ms, error = "没有这个工具", "MCP 工具失败")
         }
         Err(tools::ToolError::Internal(msg)) => {
-            tracing::warn!(tool = name, %args, elapsed_ms, error = %msg, "MCP 工具内部错误")
+            tracing::warn!(user, tool = name, %args, elapsed_ms, error = %msg, "MCP 工具内部错误")
         }
     }
 }

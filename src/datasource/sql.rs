@@ -14,6 +14,8 @@
 //! * 不能调用会越出这个库的函数（ClickHouse 的 `url()` / `file()` / `remote()`，MySQL 的
 //!   `LOAD_FILE()`）或拿锁的函数（`GET_LOCK()`）；
 //! * 不能有 MySQL 的可执行注释 `/*! … */`——那里面的内容 MySQL 会照样执行；
+//! * `--` 后面必须紧跟空白才算注释，`--x` 这种直接拒绝——MySQL 把它当两个减号，ClickHouse
+//!   当注释，两边看到的语句不一样；
 //! * ClickHouse 的语句里不能带 `SETTINGS` 子句——它能把 opdash 附在请求上的 `max_result_rows`、
 //!   `max_result_bytes`、`max_execution_time` 改掉（`readonly=2` 允许改设置）。
 
@@ -90,6 +92,17 @@ pub fn tokenize(sql: &str) -> Result<Vec<Token>, String> {
         match c {
             c if c.is_whitespace() => i += 1,
             '-' if next == Some('-') => {
+                // MySQL 只在 `--` 后面紧跟 ASCII 空白或控制字符（含语句结尾）时才当注释，否则是
+                // 两个减号：`1 --1` 是 `1 - (-1)`，后面的内容照样执行。ClickHouse 则一律当注释。
+                // 两边认法相反，按哪边切都有一边会执行这里没看到的内容，所以干脆不收。
+                // mysql_async 握手时总是打开多语句，这里要是漏了，`;` 后面的第二条就没人拦了
+                if let Some(&c) = chars.get(i + 2)
+                    && !(c.is_ascii_whitespace() || c.is_ascii_control())
+                {
+                    return Err(
+                        "`--` 后面要紧跟空格才是注释；要写两个减号请隔开，如 `a - -1`".to_owned()
+                    );
+                }
                 while i < chars.len() && chars[i] != '\n' {
                     i += 1;
                 }
@@ -443,6 +456,24 @@ mod tests {
         rejected("");
         rejected(" ; ");
         rejected("CALL p()");
+    }
+
+    #[test]
+    fn double_dash_counts_as_comment_only_before_whitespace() {
+        // MySQL 把这些当减号，注释之后的内容会执行
+        for q in ["SELECT 1 --1; DELETE FROM t", "SELECT 1 --x\n", "SELECT 1 ---\n", "SELECT a--b"]
+        {
+            assert!(rejected(q).contains("--"), "{q}");
+            assert!(check_read_only(q, Dialect::ClickHouse).is_err(), "{q}");
+        }
+        // 全角空格不是 MySQL 认的空白
+        rejected("SELECT 1 --\u{3000}1; DELETE FROM t");
+        ok("SELECT 1 -- 注释");
+        ok("SELECT 1 --\tx\n");
+        ok("SELECT 1 --\n");
+        ok("SELECT 1 --");
+        ok("SELECT a - -1 FROM t");
+        ok("SELECT '--x' FROM t");
     }
 
     #[test]

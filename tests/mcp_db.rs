@@ -449,3 +449,77 @@ async fn elasticsearch_source_caps_size_and_only_hits_read_endpoints() {
     assert_eq!(out["rows"], json!([[7]]));
     assert!(es.last_request().target.starts_with("/_sql"), "{}", es.last_request().target);
 }
+
+/// 抓 tracing 输出的缓冲区。`#[tokio::test]` 是单线程运行时，`set_default` 覆盖得到整个请求。
+#[derive(Clone, Default)]
+struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuf {
+    fn audit_lines(&self) -> Vec<String> {
+        let text = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+        text.lines().filter(|l| l.contains("数据源操作")).map(str::to_owned).collect()
+    }
+}
+
+#[tokio::test]
+async fn datasource_operations_are_audited_with_the_caller() {
+    let logs = LogBuf::default();
+    let sink = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || sink.clone())
+        .with_ansi(false)
+        .with_env_filter("warn,opdash::audit=info")
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let fake = FakeClickhouse::start().await;
+    let file = datasource_file(&sources("http://127.0.0.1:1", "http://127.0.0.1:1"));
+    let app = app_with_schema(&fake, &["--datasources", &file, "--basic-auth", "ops:pw"]).await;
+    // ops:pw
+    let basic = [("authorization", "Basic b3BzOnB3")];
+
+    // 经 MCP：进程内请求要带着发起人的身份。写语句在校验那一步就被拒，不用真的连库
+    let body = rpc_with(
+        &app,
+        request(
+            7,
+            "tools/call",
+            json!({ "name": "db_query", "arguments": { "source": "order-db", "query": "DELETE FROM\n  t_order" } }),
+        ),
+        &basic,
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    // 直接调 API
+    let (status, _) =
+        get_json_with(&app, "/api/db/order-db/query?q=DROP%20TABLE%20t", &basic).await;
+    assert_eq!(status, 400);
+
+    let lines = logs.audit_lines();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for (line, via, detail) in
+        [(&lines[0], "mcp", "DELETE FROM t_order"), (&lines[1], "http", "DROP TABLE t")]
+    {
+        for want in [
+            "user=\"ops\"".to_owned(),
+            "auth=\"basic\"".to_owned(),
+            format!("via=\"{via}\""),
+            "source=\"order-db\"".to_owned(),
+            "action=\"query\"".to_owned(),
+            format!("detail=\"{detail}\""),
+            "ok=false".to_owned(),
+        ] {
+            assert!(line.contains(&want), "缺 {want}: {line}");
+        }
+    }
+}
