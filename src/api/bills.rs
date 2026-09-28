@@ -1602,7 +1602,7 @@ async fn facets(State(state): State<AppState>, p: Params) -> Result<Json<FacetsR
     Ok(Json(FacetsResponse { facets, stats: rows.stats }))
 }
 
-/// 导出明细 CSV / JSONL：ClickHouse 直接出格式化文本，这里只转发字节流。
+/// 导出明细 CSV / JSONL：ClickHouse 直接出格式化文本，这里只转发字节流（CSV 顺带防公式注入）。
 async fn export(State(state): State<AppState>, p: Params) -> Result<Response> {
     let schema = bills(&state).await?;
     let tables = schema.bills.as_ref().expect("bills checked");
@@ -1627,7 +1627,12 @@ async fn export(State(state): State<AppState>, p: Params) -> Result<Response> {
         filter.range.from,
         filter.range.to
     );
-    let body = Body::from_stream(resp.bytes_stream());
+    // CSV 里以 = + - @ 开头的单元格会被表格软件当成公式，见 super::csv
+    let body = if ext == "csv" {
+        Body::from_stream(super::csv::guard(resp.bytes_stream()))
+    } else {
+        Body::from_stream(resp.bytes_stream())
+    };
     let mut response = Response::new(body);
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));

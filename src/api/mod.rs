@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod bills;
+pub mod csv;
 pub mod datasources;
 pub mod logs;
 pub mod meta;

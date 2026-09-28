@@ -158,3 +158,35 @@ async fn deeply_nested_keywords_are_rejected_before_any_query() {
     assert!(body.to_string().contains("嵌套"), "{body}");
     assert!(log_sql(&fake).is_empty(), "拒绝了就不该再查库");
 }
+
+/// 导出 CSV 时，以 `=` / `+` / `-` / `@` 开头的字符串单元格前补 `'`，表格软件不会当公式执行；
+/// 不带引号的数字（负数）不动，JSONL 原样转发。
+#[tokio::test]
+async fn csv_export_defuses_formula_cells() {
+    let fake = FakeClickhouse::start().await;
+    let app = app_with_schema(&fake, &[]).await;
+    let csv = concat!(
+        "\"ts\",\"message\",\"n\"\n",
+        "\"2026-01-01 00:00:00\",\"=HYPERLINK(\"\"http://evil/\"\")\",-1\n",
+        "\"2026-01-01 00:00:01\",\"ok\",2\n",
+    );
+    fake.respond(csv);
+    let range = format!("from={MIDNIGHT_MS}&to={}", MIDNIGHT_MS + HOUR_MS);
+    let (status, body) = get_raw(&app, &format!("/api/logs/export?{range}&format=csv"), &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        String::from_utf8(body).unwrap(),
+        concat!(
+            "\"ts\",\"message\",\"n\"\n",
+            "\"2026-01-01 00:00:00\",\"'=HYPERLINK(\"\"http://evil/\"\")\",-1\n",
+            "\"2026-01-01 00:00:01\",\"ok\",2\n",
+        )
+    );
+
+    let jsonl = "{\"message\":\"=1\"}\n";
+    fake.respond(jsonl);
+    let (status, body) =
+        get_raw(&app, &format!("/api/logs/export?{range}&format=jsonl"), &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(String::from_utf8(body).unwrap(), jsonl);
+}

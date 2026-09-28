@@ -353,7 +353,7 @@ async fn context(State(state): State<AppState>, p: Params) -> Result<Json<Contex
     }))
 }
 
-/// 导出 CSV / JSONL：ClickHouse 直接出格式化文本，这里只是转发字节流。
+/// 导出 CSV / JSONL：ClickHouse 直接出格式化文本，这里只是转发字节流（CSV 顺带防公式注入）。
 async fn export(State(state): State<AppState>, p: Params) -> Result<Response> {
     let schema = state.schema.get().await?;
     let filter = build_filter(&state, &schema, &p)?;
@@ -379,7 +379,12 @@ async fn export(State(state): State<AppState>, p: Params) -> Result<Response> {
             filter.trace_id.as_deref().or(filter.span_id.as_deref()).unwrap_or("export")
         ),
     };
-    let body = Body::from_stream(resp.bytes_stream());
+    // CSV 里以 = + - @ 开头的单元格会被表格软件当成公式，见 super::csv
+    let body = if ext == "csv" {
+        Body::from_stream(super::csv::guard(resp.bytes_stream()))
+    } else {
+        Body::from_stream(resp.bytes_stream())
+    };
     let mut response = Response::new(body);
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
