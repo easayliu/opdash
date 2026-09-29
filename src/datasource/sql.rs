@@ -12,7 +12,13 @@
 //! * 第一个词必须是 `SELECT` / `WITH` / `SHOW` / `DESC` / `DESCRIBE` / `EXPLAIN`；
 //! * 任何位置都不能出现写入类关键字（`WITH … DELETE`、`EXPLAIN ANALYZE UPDATE` 这类靠它拦）；
 //! * 不能调用会越出这个库的函数（ClickHouse 的 `url()` / `file()` / `remote()`，MySQL 的
-//!   `LOAD_FILE()`）或拿锁的函数（`GET_LOCK()`）；
+//!   `LOAD_FILE()`）或拿锁的函数（`GET_LOCK()`）；函数名带引号（`` `url`(…) ``、`"url"(…)`）
+//!   照样是调用，库照样认，所以引号标识符后面紧跟 `(` 的，去掉引号后同样查一遍；
+//! * ClickHouse 的语句里不能有裸的 `$`：`$tag$ … $tag$` 是 ClickHouse 的 heredoc 字符串，这里的
+//!   切词不认它，一旦对「哪里是字符串」的判断和库不一致，后面的检查看到的就不是库执行的东西。
+//!   ClickHouse 的裸标识符其实可以含 `$`，但没有正常查询会这么写，反引号里的 `$` 不受影响；
+//! * 引号和注释之外不能有控制字符——库怎么对待它们（当空白、当分隔符、报错）版本各异，
+//!   而「名字后面紧跟 `(` 才算调用」这条靠的是中间没有别的东西；
 //! * 不能有 MySQL 的可执行注释 `/*! … */`——那里面的内容 MySQL 会照样执行；
 //! * `--` 后面必须紧跟空白才算注释，`--x` 这种直接拒绝——MySQL 把它当两个减号，ClickHouse
 //!   当注释，两边看到的语句不一样；
@@ -31,6 +37,10 @@ const WRITE_WORDS: &[&str] = &[
 
 /// 以函数形式出现（后面紧跟 `(`）就拒绝的名字，不分大小写。前一半是 ClickHouse 的表函数，
 /// 会让库去读别处的数据（`url()` 还能当跳板打内网）；后一半是 MySQL 的读文件与拿锁函数。
+///
+/// `cluster()` / `clusterAllReplicas()` 和 `remote()` 是一回事：集群没配 inter-server secret 时，
+/// 分片上的查询以 `remote_servers` 里配置的用户跑，权限不一定和数据源账号一样。
+/// `db_slow_queries` 自己拼的 `clusterAllReplicas` 不经过这里，不受影响。
 const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "url",
     "urlcluster",
@@ -45,6 +55,8 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "azureblobstoragecluster",
     "remote",
     "remotesecure",
+    "cluster",
+    "clusterallreplicas",
     "mysql",
     "postgresql",
     "sqlite",
@@ -184,6 +196,9 @@ pub fn tokenize(sql: &str) -> Result<Vec<Token>, String> {
                 }
                 out.push(Token::Word(chars[start..i].iter().collect()));
             }
+            c if c.is_control() => {
+                return Err(format!("SQL 里有控制字符（U+{:04X}），请去掉", c as u32));
+            }
             c => {
                 out.push(Token::Punct(c));
                 i += 1;
@@ -191,6 +206,20 @@ pub fn tokenize(sql: &str) -> Result<Vec<Token>, String> {
         }
     }
     Ok(out)
+}
+
+/// 引号标识符里的名字：`` `url` `` → `url`。含转义（双写引号、反斜杠）的返回 `None`——
+/// 两种库对转义的认法不一样，还原出来的名字未必是库看到的，不如不接受。
+fn unquote_ident(q: &str) -> Option<&str> {
+    let inner = q.get(1..q.len() - 1)?;
+    (!inner.contains(['\\', '`', '"', '\''])).then_some(inner)
+}
+
+/// 名字（不分大小写）是不是不许调用的函数。
+fn forbidden_call(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    FORBIDDEN_FUNCTIONS.contains(&lower.as_str())
+        || FORBIDDEN_FUNCTION_PREFIXES.iter().any(|p| lower.starts_with(p))
 }
 
 /// 两种方言在校验上只差一处：ClickHouse 的结果格式由 opdash 指定，语句里不能再写 `FORMAT`。
@@ -221,38 +250,53 @@ pub fn check_read_only(sql: &str, dialect: Dialect) -> Result<String, String> {
         _ => Some(None),
     });
     let first = first.flatten();
-    match &first {
-        // SHOW / DESCRIBE 本身写不了东西，`SHOW CREATE TABLE` 里的 CREATE 也不是建表
-        Some(w) if matches!(w.as_str(), "SHOW" | "DESC" | "DESCRIBE") => {
-            return Ok(strip_trailing(sql));
-        }
-        Some(w) if LEADING.contains(&w.as_str()) => {}
+    // SHOW / DESCRIBE 本身写不了东西，`SHOW CREATE TABLE` 里的 CREATE 也不是建表，写入类关键字
+    // 不用查；但表函数还是要查——ClickHouse 的 `DESCRIBE url('http://…')` 会真的去请求那个地址推断列
+    let show = match &first {
+        Some(w) if matches!(w.as_str(), "SHOW" | "DESC" | "DESCRIBE") => true,
+        Some(w) if LEADING.contains(&w.as_str()) => false,
         Some(w) => {
             return Err(format!(
                 "只允许只读查询（SELECT / WITH / SHOW / DESCRIBE / EXPLAIN），不接受 {w}"
             ));
         }
         None => return Err("无法识别该语句类型；只允许 SELECT / SHOW / DESCRIBE / EXPLAIN".into()),
-    }
+    };
     for (i, t) in tokens.iter().enumerate() {
-        let Token::Word(w) = t else { continue };
+        let call = matches!(tokens.get(i + 1), Some(Token::Punct('(')));
+        let w = match t {
+            Token::Word(w) => w,
+            // `` `url`('http://…') `` 和 `url(…)` 是同一个调用，只是名字加了引号。引号后面跟 `(`
+            // 也可能不是调用（MySQL 8 的 `` WITH `cte` (a) AS (…) ``、`` AS `dt` (a, b) ``），
+            // 所以不能一概拒绝，去掉引号按函数名查一遍
+            Token::Quoted(q) if call => {
+                let Some(name) = unquote_ident(q) else {
+                    return Err(format!("{q}(…)：引号里带转义的名字不接受，请写成不带引号的形式"));
+                };
+                if forbidden_call(name) {
+                    return Err(format!("不允许调用 {name}()：它会读取这个库以外的数据或占用锁"));
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        if dialect == Dialect::ClickHouse && w.contains('$') {
+            return Err(format!("ClickHouse 查询里不能出现 `$`（{w}）：请用普通的单引号字符串"));
+        }
         let upper = w.to_ascii_uppercase();
+        // 表函数不管有没有 `库.` 前缀都拒绝：ClickHouse 的函数名不能带前缀，MySQL 的 `db.url()`
+        // 是存储函数，用不着从这里调
+        if call && forbidden_call(w) {
+            return Err(format!("不允许调用 {w}()：它会读取这个库以外的数据或占用锁"));
+        }
         let before_dot = matches!(tokens.get(i + 1), Some(Token::Punct('.')));
         let after_dot = i > 0 && matches!(tokens.get(i - 1), Some(Token::Punct('.')));
-        let call = matches!(tokens.get(i + 1), Some(Token::Punct('(')));
         // `system.query_log`、`t.update` 里的词是库名 / 列名，不是关键字
         if before_dot || after_dot {
             continue;
         }
-        if WRITE_WORDS.contains(&upper.as_str()) && !(upper == "REPLACE" && call) {
+        if !show && WRITE_WORDS.contains(&upper.as_str()) && !(upper == "REPLACE" && call) {
             return Err(format!("只读查询里不能出现 {upper}"));
-        }
-        let lower = w.to_ascii_lowercase();
-        if call
-            && (FORBIDDEN_FUNCTIONS.contains(&lower.as_str())
-                || FORBIDDEN_FUNCTION_PREFIXES.iter().any(|p| lower.starts_with(p)))
-        {
-            return Err(format!("不允许调用 {w}()：它会读取这个库以外的数据或占用锁"));
         }
         if dialect == Dialect::ClickHouse && upper == "FORMAT" && !call {
             return Err("请移除 FORMAT 子句，结果格式由 opdash 指定".to_owned());
@@ -480,11 +524,12 @@ mod tests {
     fn clickhouse_specifics() {
         let ch = |s: &str| check_read_only(s, Dialect::ClickHouse);
         ch("SELECT * FROM system.query_log LIMIT 1").unwrap();
-        ch("SELECT * FROM clusterAllReplicas('log', system.query_log)").unwrap();
         ch("SELECT formatReadableSize(1)").unwrap();
         assert!(ch("SELECT * FROM url('http://10.0.0.1/', CSV)").is_err());
         assert!(ch("SELECT * FROM s3('x')").is_err());
         assert!(ch("SELECT * FROM remote('h', db.t)").is_err());
+        assert!(ch("SELECT * FROM cluster('log', system.query_log)").is_err());
+        assert!(ch("SELECT * FROM clusterAllReplicas('log', system.query_log)").is_err());
         assert!(ch("SELECT 1 FORMAT CSV").unwrap_err().contains("FORMAT"));
         for q in [
             "SELECT * FROM numbers(10) SETTINGS max_result_bytes = 0",
@@ -507,6 +552,89 @@ mod tests {
         assert!(ch("ALTER TABLE t DELETE WHERE 1").is_err());
         assert!(ch("SYSTEM STOP MERGES").is_err());
         assert!(ch("OPTIMIZE TABLE t FINAL").is_err());
+    }
+
+    #[test]
+    fn quoted_function_names_are_checked() {
+        // 库把 `url`(…) 当成调用 url()，切词却把它当成一个标识符
+        for q in [
+            "SELECT * FROM `url`('http://10.0.0.1/', CSV)",
+            "SELECT * FROM \"url\"('http://10.0.0.1/', CSV)",
+            "SELECT * FROM `REMOTE`('h', db.t)",
+            "SELECT * FROM `icebergS3`('http://10.0.0.1/t')",
+            "SELECT * FROM `url` ('http://10.0.0.1/', CSV)",
+            "SELECT * FROM `url`/* */('http://10.0.0.1/', CSV)",
+            "SELECT `load_file`('/etc/passwd')",
+        ] {
+            assert!(
+                check_read_only(q, Dialect::ClickHouse).unwrap_err().contains("不允许调用"),
+                "{q}"
+            );
+            assert!(check_read_only(q, Dialect::Mysql).is_err(), "{q}");
+        }
+        // 引号里带转义的名字还原不出来，不接受
+        for q in ["SELECT * FROM `ur``l`('x')", "SELECT * FROM \"ur\\\"l\"('x')"] {
+            assert!(check_read_only(q, Dialect::ClickHouse).unwrap_err().contains("转义"), "{q}");
+        }
+        // 不在禁用表里的引号名照常放行：存储函数、CTE 与派生表的列名清单
+        check_read_only("SELECT `formatReadableSize`(1)", Dialect::ClickHouse).unwrap();
+        ok("SELECT `count`(*) FROM t");
+        ok("SELECT `my_func`(1), `mydb`.`my_func`(1) FROM t");
+        ok("WITH `cte` (a) AS (SELECT 1) SELECT * FROM `cte`");
+        ok("SELECT * FROM (SELECT 1, 2) AS `dt` (a, b)");
+        // DESCRIBE / SHOW 也会碰表函数：ClickHouse 的 DESCRIBE url(…) 会去请求那个地址推断列
+        for q in [
+            "DESCRIBE url('http://10.0.0.1/', CSV)",
+            "DESC TABLE `url`('http://10.0.0.1/')",
+            "DESCRIBE remote('h', db.t)",
+            "SHOW CREATE TABLE $h$'$h$ -- '",
+        ] {
+            assert!(check_read_only(q, Dialect::ClickHouse).is_err(), "{q}");
+        }
+        check_read_only("DESCRIBE TABLE system.query_log", Dialect::ClickHouse).unwrap();
+        check_read_only("SHOW CREATE TABLE t", Dialect::ClickHouse).unwrap();
+        // 带 `库.` 前缀也是调用
+        assert!(
+            check_read_only("SELECT * FROM x.url('http://10.0.0.1/')", Dialect::ClickHouse)
+                .is_err()
+        );
+        rejected("SELECT x.load_file('/etc/passwd')");
+        // 引号后面不是 `(` 的照常放行
+        ok("SELECT `url`, \"file\" FROM t WHERE `remote` = 'url('");
+        check_read_only("SELECT `url` FROM t", Dialect::ClickHouse).unwrap();
+    }
+
+    #[test]
+    fn clickhouse_heredoc_and_dollar_are_rejected() {
+        let ch = |s: &str| check_read_only(s, Dialect::ClickHouse);
+        // $h$'$h$ 在库里是一个字符串，切词却当成 `$h$` 加一个从 ' 开始的字符串，此后引号内外颠倒
+        for q in [
+            "SELECT $h$'$h$ AS a, * FROM url('http://10.0.0.1/', CSV) -- '",
+            "SELECT $$'$$ AS a, * FROM remote('h', db.t) -- '",
+            "SELECT $h$'$h$, 1 SETTINGS max_result_bytes = 0 -- '",
+            "SELECT $heredoc$plain$heredoc$",
+            "SELECT $",
+            "SELECT a$b FROM t",
+        ] {
+            assert!(ch(q).unwrap_err().contains('$'), "{q}");
+        }
+        // 引号和注释里的 `$` 不是 heredoc
+        ch("SELECT '$h$', `a$b` FROM t /* $ */ -- $x$").unwrap();
+        // MySQL 的标识符可以含 `$`
+        ok("SELECT a$b FROM t");
+    }
+
+    #[test]
+    fn control_characters_are_rejected() {
+        // 名字和 `(` 之间夹个库可能忽略的字符，「紧跟」的判断就落空了
+        for q in ["SELECT * FROM url\u{0}('http://10.0.0.1/')", "SELECT 1\u{1f}", "SELECT\u{7f} 1"]
+        {
+            assert!(rejected(q).contains("控制字符"), "{q:?}");
+            assert!(check_read_only(q, Dialect::ClickHouse).is_err(), "{q:?}");
+        }
+        // 换行、制表符是空白；引号和注释里的控制字符随它去
+        ok("SELECT\t1\r\nFROM t");
+        ok("SELECT '\u{0}' FROM t /* \u{1} */ -- \u{7f}");
     }
 
     #[test]
