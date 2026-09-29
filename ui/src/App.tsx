@@ -218,9 +218,7 @@ export default function App() {
       <header className="z-20 shrink-0 border-b border-border bg-card">
         <div className="flex flex-wrap items-stretch gap-x-4 px-3 md:h-14 md:flex-nowrap md:px-4">
           <NavLink to="/services" className="flex h-12 items-center gap-2 pr-2 md:h-auto md:pr-4">
-            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-white">
-              <ActivityIcon className="size-4" />
-            </span>
+            <img src="/favicon.svg" alt="" className="size-7" />
             {/* 极窄屏（< 360px）只留图标，右边那组按钮才不会被挤到第二行 */}
             <span className="text-base font-semibold tracking-tight max-[359px]:sr-only">opdash</span>
           </NavLink>
