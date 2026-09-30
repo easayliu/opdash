@@ -43,15 +43,38 @@
 
 ### 关键字匹配
 
-关键字语法见 [README](../README.md#日志检索的关键字语法)。每个词翻译为 `positionCaseInsensitiveUTF8(message, ...)`；全部由词组成的 OR 合并为一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])`，一次扫描完成。`message` 本身没有索引，扫描的是时间范围内的全部行，只有下面「token 索引」一节所述的情形例外。
+关键字语法见 [README](../README.md#日志检索的关键字语法)。**没按服务筛时**，4 个字符以上的纯 ASCII 词翻译为 `lower(message) LIKE '%词%'`（小写、`%` / `_` / `\` 转义），走下面「text 索引」一节的倒排索引；按服务筛了、中文、3 个字符以下的词翻译为 `positionCaseInsensitiveUTF8(message, ...)`，扫描时间范围内这个服务的全部行。全部由词组成的 OR 合并为一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])`，一次扫描完成，不走索引。
 
 检索 SQL 带 `prefer_column_name_to_alias = 1`：SELECT 里截断后的别名也叫 `message`，不加这个设置时 WHERE 里的 `message` 会解析成截断后的文本，索引表达式对不上、一个都用不上，长日志的后半截也搜不到（2026-09-30 线上实测一条按 19 位 id 搜 81 分钟的查询 1305 万行 / 19.6 GiB → 14 万行 / 1.6 GiB）。
 
 关键字语法由递归下降解析，每层括号或 `NOT` 占用一层调用栈。解析不设深度上限时，约 5000 个 `(` 就会压满 tokio worker 线程 2 MiB 的栈；Rust 的栈溢出会让整个进程 abort，而不只是这一个请求失败。因此嵌套上限定为 32 层（手写查询用不到这么深），超出的部分在解析时直接跳过，`LogFilter::validate` 同时返回 400；关键字另限 4096 字节，以控制拼出的 SQL 长度。
 
+### text 索引
+
+2026-09-30 起 `app_log_local` 上有 `INDEX idx_message_text lower(message) TYPE text(tokenizer = 'splitByNonAlpha') GRANULARITY 100000000`（每个 part 一份倒排表）。它和 bloom filter 不是一回事：查询时直接读倒排表拿到**行号**（`query_plan_direct_read_from_text_index`），不是按 granule 判断「可能有」，所以常见词也能省下读量。`lower(message) LIKE '%词%'` 用词典扫描（`use_text_index_like_evaluation_by_dictionary_scan`）找出包含该子串的 token 再取行，`hasToken` 直接查词典。
+
+**只在没按服务筛时用它做子串搜索**（`LogFilter::substring_via_text_index`）。2026-09-30 同一天、每种写法各跑两次取热缓存，结果条数一致：
+
+| 场景 | position | LIKE 走索引 |
+|---|---|---|
+| dyopen，常见词 `msgid` | 8.3 GiB / 0.81 s | 0.1 GiB / 9.23 s |
+| dyopen，稀有词 `WX_RECOGNIZE_SHADOW` | 8.3 GiB / 0.70 s | 8.3 GiB / 0.68 s |
+| ai-crm，稀有词 `hit_area` | 10.6 GiB / 0.89 s | 10.6 GiB / 1.21 s |
+| 不带服务，11 位手机号 | 266 GiB / 36 s | 0 GiB / 5.5 s |
+| 不带服务，`timeout` | 266 GiB / 33 s | 0.36 GiB / 4.9 s |
+
+按服务筛时排序键已经把读量压到这个服务那一段，LIKE 的词典扫描要过一遍整个 part 的词典，常见词还要物化大片行号，所以没有收益甚至更慢；不带服务时 position 一天就要读 266 GiB，100 GiB 的读量护栏下根本跑不完。（早先一组「带服务 LIKE 快 4 倍」的数字是 position 先跑吃了冷缓存，不作数。）近 7 天 ASCII 关键字检索 11887 次里 11861 次带服务，所以受益的主要是不带服务的那一小部分。
+
+`hasToken`（下面「token 索引」一节）不受服务筛选影响，一律走这个索引：7 天不带服务按 19 位 id 搜，原来的 `tokenbf_v1` 236 GiB / 286 s → 0 GiB / 2.7 s。
+
+* **中文用不上**：不是分词的问题（`splitByNonAlpha` 下 `检查主播对话`、`EP推送` 都是词典里完整的 token），而是 LIKE 的词典扫描只取模式里的字母数字部分（`text_index_like_min_pattern_length` 的说明：「Minimum length of the alphanumeric needle in a LIKE/ILIKE pattern」），中文不算。`EXPLAIN` 实测中文短语和 `EP推送-` 一个 granule 都剪不掉。所以只有纯 ASCII 的词才写 LIKE，见 `uses_text_index`。
+* **3 个字符以下不写 LIKE**：ClickHouse 的 `text_index_like_min_pattern_length` 默认 4，更短的模式不查索引，LIKE 只会比 `position` 多算一遍 `lower`。
+* **代价**：索引约为 `message` 列压缩后大小的 62%（一天一个分片 6.95 GiB 对 11.2 GiB）；物化一天的分区 7900 万行约 6.5 分钟、峰值 1.3 GiB；加索引后写入侧的合并耗时和 CPU 几乎不变（138 → 140 ms / 次）。
+* **大小写**：`lower` 只折 ASCII，和只对 ASCII 词写 LIKE 对得上；原来 `positionCaseInsensitiveUTF8` 的 Unicode 大小写折叠对 ASCII 词没有区别。
+
 ### token 索引
 
-`app_log_local` 上有 `INDEX idx_message_tokens lower(message) TYPE tokenbf_v1(131072, 3, 0) GRANULARITY 1`。关键字按与 tokenizer 相同的规则切分（非字母数字的 ASCII 字符均为分隔符，下划线也算），**足够长（≥ 16 位）的 token** 才作为 needle 使用：
+2026-09-30 起 `hasToken` 走上文的 `idx_message_text`，原来的 `INDEX idx_message_tokens lower(message) TYPE tokenbf_v1(131072, 3, 0) GRANULARITY 1` 已删（官方已不推荐 `tokenbf_v1` / `ngrambf_v1` 用于全文检索）。下面这套挑 needle 的规则没变，数字是 tokenbf 时代测的。关键字按与 tokenizer 相同的规则切分（非字母数字的 ASCII 字符均为分隔符，下划线也算），**足够长（≥ 16 位）的 token** 才作为 needle 使用：
 
 * **纯 id**（span id 16 位，trace id、msgId 32 位）：发 `hasToken(lower(message), 小写词)`，单独即可表达完整语义。线上实测一小时窗口查询一个 msgId：**7.83 GB / 1063 ms → 0.030 GB / 140 ms，命中数一致**。
 * **键加 id**（`msgId:AC10…`、`traceId=…`）：id 这个 token 用 `hasToken` 跳过 granule，再以 AND 连接原有的子串条件，保证键也匹配。2026-09-18 实测一小时窗口查询 `msgId":"AC10…`（键加 32 位 id）：**10.24 GB / 1.2 s → 0.02 GB / 0.2 s**（读取 630 万行 → 4661 行，剩余的是 bloom filter 的误判）。
@@ -67,7 +90,7 @@
 
 ### 跳数索引的上限
 
-**ClickHouse 26.2 GA 的文本索引（`TYPE text`）对常见关键字同样无效**，这是 2026-09-10 实测后得出的结论。
+下面是 **bloom filter 这类按 granule 跳过的索引**的上限。2026-09-10 曾据此认为 `TYPE text` 对常见关键字同样无效，这条结论**已被 2026-09-30 的实测推翻**：text 索引直接按行号读，不受 granule 粒度限制，见上文「text 索引」。
 
 判断一个跳数索引的**上限**无须真正建立索引，只需统计「至少命中一次的 granule 有多少个」（`uniqExactIf((_part, intDiv(_part_offset, 8192)), 条件)`）。一小时窗口共 740 个 granule：
 
@@ -80,7 +103,7 @@
 | `sendWebHooksMsgId` | 740 / 740 | 0 |
 | `timeout` / `msgId` | ~740 / 740 | 0 |
 
-一个 granule 是 8192 行，约为 5 秒的全量日志（每秒 1600 行，所有服务混在一起）。只要一个词平均每几秒出现一次，它就存在于每个 granule 中，**任何**跳数索引都无法跳过。真正稀疏的是 32 位 id 一类，而这已经由 `idx_message_tokens` 覆盖。（表中的关键字取自 `system.query_log` 中近 7 天用户实际搜索过的词。）
+一个 granule 是 8192 行，约为 5 秒的全量日志（每秒 1600 行，所有服务混在一起）。只要一个词平均每几秒出现一次，它就存在于每个 granule 中，按 granule 判断的跳数索引都无法跳过。真正稀疏的是 32 位 id 一类，而这已经由 `idx_message_tokens` 覆盖。（表中的关键字取自 `system.query_log` 中近 7 天用户实际搜索过的词。）
 
 **`ngrambf_v1` 也试过，无效，不必再尝试**：8192 行日志中就有 13 万个不同的 trigram，几乎覆盖了现实中的全部 trigram 空间。取 20 个 granule、6 个真实关键字（含 32 位十六进制 msgId）验证，一个都跳不掉。token 不同，它的取值空间无限大，一个 msgId 只落在真正包含它的一两个 granule 上。
 

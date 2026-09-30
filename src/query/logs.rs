@@ -5,13 +5,13 @@
 //! 那一段；不锁服务时要把范围内各服务的排序列读出来排一遍，排序列很窄，实测墙钟没变差。
 //! 排序键以外的列参与排序会退化，见 [`order_by`]。
 //!
-//! **换键这件事线上还没做**：2026-09-21 查 `system.tables`，三个分片的 `app_log_local` 仍然是
-//! `(timestamp, level, trace_id)`。两种键下这些 SQL 都对，只是服务筛选省不下读量。
+//! 线上 2026-09-30 换成了这个键（此前是 `(timestamp, level, trace_id)`）。
 //!
-//! 索引只有三个，覆盖不到的列一律是扫：`trace_id` 有 `idx_trace_id` bloom filter，但默认误判率
-//! 2.5%，摊到 30 天的分区上只剪掉九成七（实测仍要 10.4 亿行 / 5.4 GB / 14 s）；**`span_id` 上没有
-//! 任何索引**；`message` 上只有 token 索引（够长的标识符才用得上，见 [`token_needles`]），一般
-//! 关键字是逐行扫时间范围内的数据。所以时间范围是所有查询的第一道闸，**按 id 查也不例外**。
+//! 索引（2026-09-30 起，都是 text 倒排索引）：`trace_id` 上 `idx_trace_id_text`（`array` 分词器，
+//! 全表不带时间范围按 trace_id 查只读几千行）；`message` 上 `idx_message_text`（建在
+//! `lower(message)` 上，`hasToken` 和不带服务时的 ASCII 子串 LIKE 用得上，见 [`token_needles`]、
+//! [`LogFilter::substring_via_text_index`]）。**`span_id` 上没有任何索引**；带服务的关键字检索、
+//! 中文关键字仍是逐行扫时间范围内这个服务的数据。所以时间范围仍是第一道闸，按 span_id 查尤其如此。
 
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +36,8 @@ pub enum Expr {
     Or(Vec<Expr>),
 }
 
-/// 切到整词模式的最短词长。`app_log_local` 上有 `idx_message_tokens tokenbf_v1 ON lower(message)`，
-/// 只有整词能命中；短词按子串搜更符合直觉（搜 `health` 要能匹配 `healthcheck`），所以只有够长的
+/// 切到整词模式的最短词长。`hasToken` 走 `idx_message_text`（text 倒排索引，建在 `lower(message)` 上；
+/// 2026-09-30 之前是 `tokenbf_v1`），只有整词能命中；短词按子串搜更符合直觉（搜 `health` 要能匹配 `healthcheck`），所以只有够长的
 /// 标识符才切过去——span id 16 位、trace id / msgId 32 位都覆盖得到。
 const TOKEN_MIN_LEN: usize = 16;
 
@@ -77,6 +77,47 @@ fn token_needles(term: &str) -> Option<Vec<String>> {
 /// 单个纯字母数字的词（没有分隔符）：`hasToken` 自己就是完整语义，不用再 AND 子串条件。
 fn is_single_token(term: &str) -> bool {
     !term.is_empty() && term.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// 子串搜索改走 text 索引的最短词长，和 ClickHouse 的 `text_index_like_min_pattern_length`
+/// 默认值一致：更短的模式它自己也不查索引，写成 LIKE 只会比 `position` 多算一遍 `lower`。
+const LIKE_MIN_LEN: usize = 4;
+
+/// 这个词的子串搜索能不能交给 `idx_message_text`（`text(tokenizer = 'splitByNonAlpha')`，建在
+/// `lower(message)` 上）。索引只认 `lower(message) LIKE '%…%'`，`positionCaseInsensitiveUTF8`
+/// 用不上它。只认纯 ASCII：LIKE 的词典扫描只取模式里的**字母数字**部分（见 ClickHouse 设置
+/// `text_index_like_min_pattern_length` 的说明），中文不算，`EXPLAIN` 实测中文短语、`EP推送-`
+/// 一个 granule 都剪不掉，LIKE 反而比 position 慢一点（一天一个分片 17 s → 20 s）。中文在
+/// `splitByNonAlpha` 下并没有被当成分隔符，`检查主播对话` 是词典里的一个 token，只是这条路用不上。
+///
+/// 只在没按服务筛时用，见 [`LogFilter::substring_via_text_index`]。
+fn uses_text_index(term: &str) -> bool {
+    term.is_ascii() && term.len() >= LIKE_MIN_LEN
+}
+
+/// `lower(message) LIKE` 的模式：小写（`lower` 只折 ASCII，和 [`uses_text_index`] 只收 ASCII
+/// 对得上），`\` / `%` / `_` 转义成字面量，两头加 `%`。
+fn like_pattern(term: &str) -> String {
+    let mut out = String::with_capacity(term.len() + 4);
+    out.push('%');
+    for c in term.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out.push('%');
+    out
+}
+
+/// 大小写不敏感的子串条件：`text_index` 为真且这个词能走 text 索引就写 LIKE，否则
+/// `positionCaseInsensitiveUTF8`。什么时候该开见 [`LogFilter::substring_via_text_index`]。
+fn substring_sql(term: &str, text_index: bool, b: &mut Bindings) -> String {
+    if text_index && uses_text_index(term) {
+        format!("lower(message) LIKE {}", b.bind("String", like_pattern(term)))
+    } else {
+        format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", term))
+    }
 }
 
 impl Expr {
@@ -131,10 +172,10 @@ impl Expr {
     }
 
     /// 在 `message` 上的谓词。返回的 SQL 可以直接 AND 到别的条件上（OR 一定带括号）。
-    fn message_sql(&self, b: &mut Bindings) -> String {
+    fn message_sql(&self, text_index: bool, b: &mut Bindings) -> String {
         match self {
-            // 够长的整词走 tokenbf_v1，能整块跳过不含它的 granule（线上实测同一个 msgId
-            // 读取量 0.73 GB → 0.08 GB）；其余仍是子串匹配。见 [`token_needles`]
+            // 够长的整词走 text 索引直接按行号取（线上 7 天不带服务按 19 位 id 搜 236 GiB / 286 s
+            // → 0 GiB / 2.7 s）；其余是子串匹配。见 [`token_needles`]
             Expr::Term(t) => {
                 match token_needles(t) {
                     Some(toks) if is_single_token(t) => {
@@ -143,18 +184,13 @@ impl Expr {
                     Some(toks) => {
                         // 子串条件写在前面：`and` 是短路求值，索引跳不掉的 granule 里先算它，
                         // 稀有词基本不会走到后面的 hasToken；索引分析看的是整个 WHERE，顺序无关
-                        let mut parts = vec![format!(
-                            "positionCaseInsensitiveUTF8(message, {}) > 0",
-                            b.bind("String", t)
-                        )];
+                        let mut parts = vec![substring_sql(t, text_index, b)];
                         parts.extend(toks.iter().map(|tok| {
                             format!("hasToken(lower(message), {})", b.bind("String", tok))
                         }));
                         parts.join(" AND ")
                     }
-                    None => {
-                        format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", t))
-                    }
+                    None => substring_sql(t, text_index, b),
                 }
             }
             // 排除词一律保持子串语义：整词比子串窄，取反之后就变宽了，会漏掉本该排除的行；
@@ -163,11 +199,11 @@ impl Expr {
                 Expr::Term(t) => {
                     format!("positionCaseInsensitiveUTF8(message, {}) = 0", b.bind("String", t))
                 }
-                Expr::And(_) => format!("NOT ({})", inner.message_sql(b)),
-                other => format!("NOT {}", other.message_sql(b)),
+                Expr::And(_) => format!("NOT ({})", inner.message_sql(text_index, b)),
+                other => format!("NOT {}", other.message_sql(text_index, b)),
             },
             Expr::And(parts) => {
-                parts.iter().map(|p| p.message_sql(b)).collect::<Vec<_>>().join(" AND ")
+                parts.iter().map(|p| p.message_sql(text_index, b)).collect::<Vec<_>>().join(" AND ")
             }
             Expr::Or(parts) => {
                 // 全是普通词的 OR 用 multiSearchAny 一趟扫完，比 N 个 position 快；
@@ -188,8 +224,8 @@ impl Expr {
                         let inner = parts
                             .iter()
                             .map(|p| match p {
-                                Expr::And(_) => format!("({})", p.message_sql(b)),
-                                _ => p.message_sql(b),
+                                Expr::And(_) => format!("({})", p.message_sql(text_index, b)),
+                                _ => p.message_sql(text_index, b),
                             })
                             .collect::<Vec<_>>()
                             .join(" OR ");
@@ -447,7 +483,7 @@ impl Order {
 #[derive(Debug, Default, Clone)]
 pub struct LogFilter {
     /// 没有时间范围只允许在给了 trace_id / span_id 时，而且**这条路很贵**：`span_id` 上没有
-    /// 任何索引，`trace_id` 的 bloom filter 也只剪掉九成七。2026-09-21 线上实测（关掉 query
+    /// 任何索引（`trace_id` 2026-09-30 起有 text 索引，不带时间范围也只读几千行）。2026-09-21 线上实测（关掉 query
     /// condition cache）span 点查扫 31.3 G 行 / 37.9 GiB / 8.8 s、trace 点查 1.03 G 行 /
     /// 5.4 GB / 14 s，而同一个 span 加上一小时窗口只要 8.3 M 行 / 158 MB / 0.18 s。
     /// 调用方手上只要有个大概时刻就该带上范围，不带是「实在不知道它是什么时候的」的兜底。
@@ -468,6 +504,26 @@ pub struct LogFilter {
 }
 
 impl LogFilter {
+    /// 子串搜索要不要交给 text 索引（`lower(message) LIKE`）：**只在没按服务筛的时候**。
+    ///
+    /// 排序键服务打头，按服务筛本身就把读量压到这个服务的那一段；这时再走 text 索引，LIKE 的
+    /// 词典扫描要把整个 part 的词典过一遍，常见词还要把大片行号物化出来，反而更慢。线上
+    /// 2026-09-30 同一天、各跑两次取热缓存：
+    ///
+    /// | 场景 | position | LIKE 走索引 |
+    /// |---|---|---|
+    /// | dyopen，常见词 `msgid` | 0.81 s | 9.23 s |
+    /// | dyopen，稀有词 `WX_RECOGNIZE_SHADOW` | 0.70 s | 0.68 s |
+    /// | ai-crm，稀有词 `hit_area` | 0.89 s | 1.21 s |
+    /// | 不带服务，11 位手机号 | 266 GiB / 36 s | 0 GiB / 5.5 s |
+    /// | 不带服务，`timeout` | 266 GiB / 33 s | 0.36 GiB / 4.9 s |
+    ///
+    /// 不带服务时 position 一天就要读 266 GiB，在 100 GiB 的读量护栏下根本跑不完。
+    /// pod / container 这类筛选不在排序键里、省不下读量，照「没按服务筛」算。
+    fn substring_via_text_index(&self) -> bool {
+        !self.dims.iter().any(|(column, values)| column == "service_name" && !values.is_empty())
+    }
+
     /// 有没有按消息内容筛（关键字 / 正则）。这种查询没有索引可用，必须扫完整个时间范围。
     pub fn has_message_predicate(&self) -> bool {
         if self.regex { !self.q.trim().is_empty() } else { parse_query(&self.q).is_some() }
@@ -558,12 +614,13 @@ impl LogFilter {
             if self.regex {
                 clauses.push(format!("match(message, {})", b.bind("String", self.q.trim())));
             } else {
+                let text_index = self.substring_via_text_index();
                 match parse_query(&self.q) {
                     // 顶层 AND 拆成多个子句，和别的条件一起平铺，SQL 好读
                     Some(Expr::And(parts)) => {
-                        clauses.extend(parts.iter().map(|p| p.message_sql(b)));
+                        clauses.extend(parts.iter().map(|p| p.message_sql(text_index, b)));
                     }
-                    Some(expr) => clauses.push(expr.message_sql(b)),
+                    Some(expr) => clauses.push(expr.message_sql(text_index, b)),
                     None => {}
                 }
             }
@@ -1083,6 +1140,61 @@ mod tests {
         assert!(!export.contains("message_len"), "{export}");
     }
 
+    /// ASCII 子串走 text 索引：LIKE 模式小写、转义通配符；短词和中文保持 position。
+    #[test]
+    fn ascii_substrings_use_the_text_index() {
+        let table = table();
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
+        let query_of = |s: &str| {
+            let filter = LogFilter { range: Some(range()), q: s.into(), ..Default::default() };
+            q.search(&filter, Order::Desc, 10, 0).unwrap()
+        };
+
+        let query = query_of("WX_RECOGNIZE_SHADOW");
+        assert!(query.sql().contains("AND lower(message) LIKE {p2:String}"), "{}", query.sql());
+        // 参数按 TSV escaped 格式上 HTTP（`tsv_escape`），LIKE 里的一个 `\` 在这里是两个
+        assert_eq!(query.params()[2].1, r"%wx\\_recognize\\_shadow%");
+
+        // 通配符和反斜杠都当字面量
+        assert_eq!(like_pattern(r"50%_a\b"), r"%50\%\_a\\b%");
+
+        // 3 个字符以下、中文：ClickHouse 不查索引 / 分词进不去，保持 position
+        for s in ["abc", "超时了"] {
+            let sql = query_of(s).sql().to_owned();
+            assert!(!sql.contains("LIKE"), "{s}: {sql}");
+            assert!(
+                sql.contains("positionCaseInsensitiveUTF8(message, {p2:String}) > 0"),
+                "{s}: {sql}"
+            );
+        }
+
+        // 按服务筛时不走 text 索引：服务那一段本来就小，LIKE 的词典扫描反而更慢
+        let filter = LogFilter {
+            range: Some(range()),
+            q: "WX_RECOGNIZE_SHADOW".into(),
+            dims: vec![("service_name".into(), vec!["dyopen".into()])],
+            ..Default::default()
+        };
+        let sql = q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned();
+        assert!(!sql.contains("LIKE"), "{sql}");
+        assert!(sql.contains("positionCaseInsensitiveUTF8(message"), "{sql}");
+        // 按 pod 筛省不下读量，照样走索引
+        let filter = LogFilter {
+            range: Some(range()),
+            q: "WX_RECOGNIZE_SHADOW".into(),
+            dims: vec![("pod".into(), vec!["a".into()])],
+            ..Default::default()
+        };
+        let sql = q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned();
+        assert!(sql.contains("lower(message) LIKE"), "{sql}");
+
+        // 排除词、OR 的写法不变
+        let sql = query_of("-timeout").sql().to_owned();
+        assert!(sql.contains("positionCaseInsensitiveUTF8(message, {p2:String}) = 0"), "{sql}");
+        let sql = query_of("timeout OR refused").sql().to_owned();
+        assert!(sql.contains("multiSearchAnyCaseInsensitiveUTF8(message"), "{sql}");
+    }
+
     #[test]
     fn long_alphanumeric_terms_use_the_token_index() {
         let table = table();
@@ -1118,7 +1230,12 @@ mod tests {
         ] {
             let sql = sql_of(q_str);
             assert!(!sql.contains("hasToken"), "{q_str} 不该走索引: {sql}");
-            assert!(sql.contains("positionCaseInsensitiveUTF8"), "{q_str}: {sql}");
+            // 纯 ASCII 的子串交给 text 索引（lower(message) LIKE），中文仍是 position
+            if q_str.is_ascii() {
+                assert!(sql.contains("lower(message) LIKE {p2:String}"), "{q_str}: {sql}");
+            } else {
+                assert!(sql.contains("positionCaseInsensitiveUTF8(message"), "{q_str}: {sql}");
+            }
         }
 
         // 键加 id：id 那个 token 进索引跳 granule，子串条件保留在最前面保证键也对得上
@@ -1131,11 +1248,11 @@ mod tests {
         let sql = query.sql();
         assert!(
             sql.contains(
-                "AND positionCaseInsensitiveUTF8(message, {p2:String}) > 0 AND hasToken(lower(message), {p3:String})"
+                "AND lower(message) LIKE {p2:String} AND hasToken(lower(message), {p3:String})"
             ),
             "{sql}"
         );
-        assert_eq!(query.params()[2].1, "msgId:AC1062C800014A070CF02CD72B78E8ED");
+        assert_eq!(query.params()[2].1, "%msgid:ac1062c800014a070cf02cd72b78e8ed%");
         assert_eq!(query.params()[3].1, "ac1062c800014a070cf02cd72b78e8ed");
         assert_eq!(filter.token_terms(), vec!["msgId:AC1062C800014A070CF02CD72B78E8ED"]);
         // 两个 id 各一个 hasToken；复合词的排除仍是子串
