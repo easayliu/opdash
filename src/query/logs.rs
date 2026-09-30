@@ -729,7 +729,16 @@ impl LogQueries<'_> {
             from = self.table_ref(),
             order_by = order_by(order),
         );
-        Ok(b.into_query(sql))
+        // SELECT 里的截断别名叫 `message`，和列同名。ClickHouse 默认让 WHERE 里的 `message`
+        // 也指向这个别名，于是关键字条件全变成对截断后文本求值：
+        //
+        // * `hasToken(lower(message), …)` 变成 `lower(substringUTF8(message, 1, n))`，和
+        //   `idx_message_tokens` 的表达式 `lower(message)` 对不上，**索引一个 granule 都不剪**。
+        //   线上一条按 19 位 id 搜 81 分钟的查询 1305 万行 / 19.6 GiB → 14 万行 / 1.6 GiB，结果不变；
+        // * 子串搜索只在每条日志的前 n 个字符里找，长日志后半截搜不到。
+        //
+        // 这个设置让 WHERE / ORDER BY 里的名字优先解析成列。`message_len` 那里写表名前缀是同一个坑。
+        Ok(b.into_query(sql).setting("prefer_column_name_to_alias", 1))
     }
 
     pub fn count(&self, filter: &LogFilter) -> Result<Query> {
@@ -1052,7 +1061,15 @@ mod tests {
         let q = LogQueries { database: "logs", table: &table, max_message_chars: 4096 };
         let filter = LogFilter { range: Some(range()), ..Default::default() };
 
-        let search = q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned();
+        let query = q.search(&filter, Order::Desc, 10, 0).unwrap();
+        // WHERE 里的 message 必须解析成列，不能是截断后的别名，否则 token 索引失效、
+        // 长日志的后半截搜不到（2026-09-30 线上踩过）
+        assert!(
+            query.settings().contains(&("prefer_column_name_to_alias", "1".to_owned())),
+            "{:?}",
+            query.settings()
+        );
+        let search = query.sql().to_owned();
         assert!(search.contains("substringUTF8(message, 1, 4096) AS message"), "{search}");
         assert!(search.contains("lengthUTF8(`app_log`.message) AS message_len"), "{search}");
 
