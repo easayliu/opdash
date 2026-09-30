@@ -43,7 +43,14 @@
 
 ### 关键字匹配
 
-关键字语法见 [README](../README.md#日志检索的关键字语法)。**没按服务筛时**，4 个字符以上的纯 ASCII 词翻译为 `lower(message) LIKE '%词%'`（小写、`%` / `_` / `\` 转义），走下面「text 索引」一节的倒排索引；按服务筛了、中文、3 个字符以下的词翻译为 `positionCaseInsensitiveUTF8(message, ...)`，扫描时间范围内这个服务的全部行。全部由词组成的 OR 合并为一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])`，一次扫描完成，不走索引。
+关键字语法见 [README](../README.md#日志检索的关键字语法)。子串条件的写法按这次检索筛了什么来定（`LogFilter::substring_mode`）：
+
+* **没按服务、也没按 trace_id 筛**：4 个字符以上的纯 ASCII 词翻译为 `lower(message) LIKE '%词%'`（小写、`%` / `_` / `\` 转义），走下面「text 索引」一节的倒排索引；8 位以上的纯数字按整词 `hasToken` 查。
+* **按服务筛**：`positionCaseInsensitiveUTF8(message, ...)`，扫描时间范围内这个服务的全部行；词里有两侧都被分隔符切开的中间 token 时，再 AND 一个 `hasAllTokens(lower(message), [中间 token])` 让索引先剪行，结果不变。
+* **按 trace_id 筛**：只写 `positionCaseInsensitiveUTF8`，trace_id 索引已经把范围压到几万行。
+* 中文、3 个字符以下的词一律 `positionCaseInsensitiveUTF8`。
+
+全部由词组成的 OR 合并为一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])`，一次扫描完成，不走索引；例外是没按服务筛、每个词都能走索引时，拆成 `LIKE … OR LIKE …` 的链。
 
 检索 SQL 带 `prefer_column_name_to_alias = 1`：SELECT 里截断后的别名也叫 `message`，不加这个设置时 WHERE 里的 `message` 会解析成截断后的文本，索引表达式对不上、一个都用不上，长日志的后半截也搜不到（2026-09-30 线上实测一条按 19 位 id 搜 81 分钟的查询 1305 万行 / 19.6 GiB → 14 万行 / 1.6 GiB）。
 
@@ -53,7 +60,7 @@
 
 2026-09-30 起 `app_log_local` 上有 `INDEX idx_message_text lower(message) TYPE text(tokenizer = 'splitByNonAlpha') GRANULARITY 100000000`（每个 part 一份倒排表）。它和 bloom filter 不是一回事：查询时直接读倒排表拿到**行号**（`query_plan_direct_read_from_text_index`），不是按 granule 判断「可能有」，所以常见词也能省下读量。`lower(message) LIKE '%词%'` 用词典扫描（`use_text_index_like_evaluation_by_dictionary_scan`）找出包含该子串的 token 再取行，`hasToken` 直接查词典。
 
-**只在没按服务筛时用它做子串搜索**（`LogFilter::substring_via_text_index`）。2026-09-30 同一天、每种写法各跑两次取热缓存，结果条数一致：
+**只在没按服务、也没按 trace_id 筛时用它做子串搜索**（`LogFilter::substring_mode`）。2026-09-30 同一天、每种写法各跑两次取热缓存，结果条数一致：
 
 | 场景 | position | LIKE 走索引 |
 |---|---|---|
@@ -66,6 +73,13 @@
 按服务筛时排序键已经把读量压到这个服务那一段，LIKE 的词典扫描要过一遍整个 part 的词典，常见词还要物化大片行号，所以没有收益甚至更慢；不带服务时 position 一天就要读 266 GiB，100 GiB 的读量护栏下根本跑不完。（早先一组「带服务 LIKE 快 4 倍」的数字是 position 先跑吃了冷缓存，不作数。）近 7 天 ASCII 关键字检索 11887 次里 11861 次带服务，所以受益的主要是不带服务的那一小部分。
 
 `hasToken`（下面「token 索引」一节）不受服务筛选影响，一律走这个索引：7 天不带服务按 19 位 id 搜，原来的 `tokenbf_v1` 236 GiB / 286 s → 0 GiB / 2.7 s。
+
+2026-09-30 晚间补充的几条（线上一个分片、各跑两次取热缓存，结果条数一致）：
+
+* **带 trace_id 不写 LIKE**：trace_id 索引已经把范围压到这条链路的几万行，LIKE 的词典扫描和行数无关、照样要过一遍。5 分钟窗口 `trace_id` + `replaceKeyWords`：position 5.5 万行 / 1.9 s，LIKE 1.4 万行 / 13.6 s。
+* **不带服务的 8 位以上纯数字按整词查**：LIKE 的词典扫描耗时随天数线性增长（一天 3.5~9 s，7 天 120 s 超时），`hasToken` 7 天 0.19 s。代价是嵌在更长 token 里的会漏：抽样 8 个真实数字 6 个命中数一致，秒级时间戳 `1790645335` 嵌在毫秒时间戳里，LIKE 225 条、`hasToken` 60 条。阈值见 `DIGITS_TOKEN_MIN_LEN`；这些词会出现在响应的 `token_terms` 里。
+* **按服务筛时加中间 token 的 `hasAllTokens`**：它按词直接查，不扫词典，常见词也不会变慢。只取两侧都被分隔符切开的 token（`JDC_MAIN_RETRY_CHECK` 取 `main`、`retry`，不取可能是更长 token 一截的 `jdc` / `check`），所以和 position 严格等价。afanti-crawler-cmd-worker 14 小时 `JDC_MAIN_RETRY_CHECK`：29.6 GiB / 6.1 s → 7.3 GiB / 1.8 s（把两头的 `jdc` / `check` 也算上能到 0 行 / 0.12 s，但那样会漏行，不取）；中间 token 很常见时持平（dyopen `WX_RECOGNIZE_SHADOW` 0.60 → 0.52 s）。不带服务时不加：LIKE 自己就用了中间 token，读的行数一样。
+* **OR 拆成 LIKE 链**：`multiSearchAny` 用不上 `lower(message)` 上的索引（改写成 `multiSearchAny(lower(message), …)` 也剪不掉）。一天不带服务 `listEbpAccount OR ebp/advertiser/list`：multiSearchAny 88.8 GiB / 92 s，LIKE OR LIKE 3.0 GiB / 3.7 s。
 
 * **中文用不上**：不是分词的问题（`splitByNonAlpha` 下 `检查主播对话`、`EP推送` 都是词典里完整的 token），而是 LIKE 的词典扫描只取模式里的字母数字部分（`text_index_like_min_pattern_length` 的说明：「Minimum length of the alphanumeric needle in a LIKE/ILIKE pattern」），中文不算。`EXPLAIN` 实测中文短语和 `EP推送-` 一个 granule 都剪不掉。所以只有纯 ASCII 的词才写 LIKE，见 `uses_text_index`。
 * **3 个字符以下不写 LIKE**：ClickHouse 的 `text_index_like_min_pattern_length` 默认 4，更短的模式不查索引，LIKE 只会比 `position` 多算一遍 `lower`。
@@ -84,7 +98,7 @@
 
 * needle 必须是切分好的纯字母数字 token：`hasToken` 遇到带分隔符的 needle 会**抛出异常**，而不是返回空。
 * 排除词（`-词` / `NOT 词`）一律保持子串语义：整词匹配比子串匹配窄，取反之后反而变宽，会漏掉本应排除的行；否定条件本来也用不上 bloom filter。
-* OR 组仍走 `multiSearchAnyCaseInsensitiveUTF8`，不使用索引。
+* OR 组默认走 `multiSearchAnyCaseInsensitiveUTF8`，不使用索引；没按服务筛、每个词都能走索引时拆成 OR 链，链里的整词照常发 `hasToken`、也照常进 `token_terms`（`or_as_multi_search`）。
 * 语义确实收紧了：搜索 id 的前半段将不再命中。响应中的 `token_terms` 列出了按整词匹配的词，页面标注为「按整词匹配 · 已走索引」；需要搜索片段时请使用正则模式。
 * 短词有意不走索引，搜索 `health` 必须能匹配 `healthcheck`。阈值见 `TOKEN_MIN_LEN`。
 

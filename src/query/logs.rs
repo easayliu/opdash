@@ -9,9 +9,9 @@
 //!
 //! 索引（2026-09-30 起，都是 text 倒排索引）：`trace_id` 上 `idx_trace_id_text`（`array` 分词器，
 //! 全表不带时间范围按 trace_id 查只读几千行）；`message` 上 `idx_message_text`（建在
-//! `lower(message)` 上，`hasToken` 和不带服务时的 ASCII 子串 LIKE 用得上，见 [`token_needles`]、
-//! [`LogFilter::substring_via_text_index`]）。**`span_id` 上没有任何索引**；带服务的关键字检索、
-//! 中文关键字仍是逐行扫时间范围内这个服务的数据。所以时间范围仍是第一道闸，按 span_id 查尤其如此。
+//! `lower(message)` 上，`hasToken` / `hasAllTokens` 和不带服务、不带 trace_id 时的 ASCII 子串 LIKE
+//! 用得上，见 [`token_needles`]、[`LogFilter::substring_mode`]）。**`span_id` 上没有任何索引**；
+//! 中文关键字仍是逐行扫时间范围内（这个服务）的数据。所以时间范围仍是第一道闸，按 span_id 查尤其如此。
 
 use serde::{Deserialize, Serialize};
 
@@ -90,9 +90,60 @@ const LIKE_MIN_LEN: usize = 4;
 /// 一个 granule 都剪不掉，LIKE 反而比 position 慢一点（一天一个分片 17 s → 20 s）。中文在
 /// `splitByNonAlpha` 下并没有被当成分隔符，`检查主播对话` 是词典里的一个 token，只是这条路用不上。
 ///
-/// 只在没按服务筛时用，见 [`LogFilter::substring_via_text_index`]。
+/// 只在 [`SubstringMode::Like`] 下用。
 fn uses_text_index(term: &str) -> bool {
     term.is_ascii() && term.len() >= LIKE_MIN_LEN
+}
+
+/// 不带服务时按整词（`hasToken`）查的纯数字最短位数：手机号 11 位、订单号 / 时间戳 10 位以上都覆盖。
+///
+/// 这种词写 LIKE 只能把词典整个扫一遍，耗时跟着天数涨：线上 2026-09-30 一个分片，一天 3.5~9 s，
+/// 7 天 120 s 超时；`hasToken` 按词直接查，7 天 0.19 s。代价是只命中完整的 token，嵌在更长 token
+/// 里的会漏：抽样 8 个真实数字 6 个命中数一致，秒级时间戳 `1790645335` 嵌在毫秒时间戳里，
+/// LIKE 225 条、`hasToken` 60 条。
+const DIGITS_TOKEN_MIN_LEN: usize = 8;
+
+fn is_digits_token(term: &str) -> bool {
+    term.len() >= DIGITS_TOKEN_MIN_LEN && term.bytes().all(|c| c.is_ascii_digit())
+}
+
+/// 中间 token 最短几个字符：`to` / `id` 这种太常见，倒排表太长，拿来当前置条件不划算。
+const INNER_TOKEN_MIN_LEN: usize = 3;
+
+/// 词里**两侧都被分隔符切开**的 token（小写），给按服务筛的检索当 `hasAllTokens` 前置条件。
+///
+/// 只有中间的 token 在日志里一定是完整的 token：`JDC_MAIN_RETRY_CHECK` 两头的 `jdc` / `check`
+/// 可能是 `xjdc` / `checks` 的一截，拿它们去 `hasAllTokens` 会漏行；`main` / `retry` 两边都是 `_`，
+/// 不会。所以加上这个条件结果和 `position` 严格一致（线上 6 组对照计数全部相同）。分隔符按
+/// `splitByNonAlpha` 的规则取 ASCII 非字母数字；中文不是分隔符，带中文的 token 不收。
+/// 已经够长、会单独发 `hasToken` 的（≥ [`TOKEN_MIN_LEN`]，见 [`token_needles`]）也不收。
+fn inner_tokens(term: &str) -> Vec<String> {
+    let parts: Vec<&str> =
+        term.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric()).collect();
+    if parts.len() < 3 {
+        return Vec::new();
+    }
+    let mut toks: Vec<String> = parts[1..parts.len() - 1]
+        .iter()
+        .filter(|t| (INNER_TOKEN_MIN_LEN..TOKEN_MIN_LEN).contains(&t.len()))
+        .filter(|t| t.bytes().all(|c| c.is_ascii_alphanumeric()))
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    toks.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    toks.dedup();
+    toks.truncate(MAX_TOKENS_PER_TERM);
+    toks
+}
+
+/// 关键字的子串条件怎么写，按这次检索筛了什么来定，见 [`LogFilter::substring_mode`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubstringMode {
+    /// 没按服务、也没按 trace_id 筛：ASCII 词写 `lower(message) LIKE`，长数字写 `hasToken`
+    Like,
+    /// 按服务筛：`position`，词里有中间 token 时再 AND 一个 `hasAllTokens`
+    PositionWithTokens,
+    /// 按 trace_id 筛：只写 `position`
+    Position,
 }
 
 /// `lower(message) LIKE` 的模式：小写（`lower` 只折 ASCII，和 [`uses_text_index`] 只收 ASCII
@@ -110,14 +161,46 @@ fn like_pattern(term: &str) -> String {
     out
 }
 
-/// 大小写不敏感的子串条件：`text_index` 为真且这个词能走 text 索引就写 LIKE，否则
-/// `positionCaseInsensitiveUTF8`。什么时候该开见 [`LogFilter::substring_via_text_index`]。
-fn substring_sql(term: &str, text_index: bool, b: &mut Bindings) -> String {
-    if text_index && uses_text_index(term) {
-        format!("lower(message) LIKE {}", b.bind("String", like_pattern(term)))
-    } else {
-        format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", term))
+/// 大小写不敏感的子串条件，写法见 [`SubstringMode`]。
+fn substring_sql(term: &str, mode: SubstringMode, b: &mut Bindings) -> String {
+    if mode == SubstringMode::Like && uses_text_index(term) {
+        return format!("lower(message) LIKE {}", b.bind("String", like_pattern(term)));
     }
+    let position = format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", term));
+    let toks = if mode == SubstringMode::PositionWithTokens { inner_tokens(term) } else { vec![] };
+    if toks.is_empty() {
+        return position;
+    }
+    // position 写在前面，理由同 [`Expr::message_sql`] 里的 hasToken
+    format!("{position} AND hasAllTokens(lower(message), {})", b.bind("Array(String)", toks))
+}
+
+/// 这个正向词是不是按整词（`hasToken`）匹配，和 [`Expr::message_sql`] 的 Term 分支对得上。
+fn matched_as_token(term: &str, mode: SubstringMode) -> bool {
+    (mode == SubstringMode::Like && is_digits_token(term)) || token_needles(term).is_some()
+}
+
+/// OR 组合成一个 `multiSearchAny` 时给出它的词；`None` 表示拆成 OR 链，每一项各走各的
+/// [`Expr::message_sql`]。
+///
+/// 全是普通词的 OR 用 multiSearchAny 一趟扫完，比 N 个 position 快；ClickHouse 限制一次最多
+/// 256 个 needle，超了退回 OR 链。
+///
+/// 例外：不带服务、每个词都能走 text 索引时拆成 OR 链，每个词各写各的 LIKE / hasToken。
+/// multiSearchAny 用不上索引（建在 `lower(message)` 上的索引认不出 CaseInsensitive 版本，改成
+/// `multiSearchAny(lower(message), …)` 实测也剪不掉）：线上 2026-09-30 一个分片一天，
+/// `listEbpAccount OR ebp/advertiser/list` multiSearchAny 88.8 GiB / 92 s，LIKE OR LIKE
+/// 3.0 GiB / 3.7 s。有一个词走不了索引，整个 OR 都得逐行扫，那还是 multiSearchAny 扫得快。
+fn or_as_multi_search(parts: &[Expr], mode: SubstringMode) -> Option<Vec<String>> {
+    let terms: Vec<String> = parts
+        .iter()
+        .map(|p| match p {
+            Expr::Term(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let indexed = mode == SubstringMode::Like && terms.iter().all(|t| uses_text_index(t));
+    (terms.len() <= 256 && !indexed).then_some(terms)
 }
 
 impl Expr {
@@ -172,8 +255,12 @@ impl Expr {
     }
 
     /// 在 `message` 上的谓词。返回的 SQL 可以直接 AND 到别的条件上（OR 一定带括号）。
-    fn message_sql(&self, text_index: bool, b: &mut Bindings) -> String {
+    fn message_sql(&self, mode: SubstringMode, b: &mut Bindings) -> String {
         match self {
+            // 不带服务时长数字按整词查，见 [`DIGITS_TOKEN_MIN_LEN`]
+            Expr::Term(t) if mode == SubstringMode::Like && is_digits_token(t) => {
+                format!("hasToken(lower(message), {})", b.bind("String", t))
+            }
             // 够长的整词走 text 索引直接按行号取（线上 7 天不带服务按 19 位 id 搜 236 GiB / 286 s
             // → 0 GiB / 2.7 s）；其余是子串匹配。见 [`token_needles`]
             Expr::Term(t) => {
@@ -184,55 +271,44 @@ impl Expr {
                     Some(toks) => {
                         // 子串条件写在前面：`and` 是短路求值，索引跳不掉的 granule 里先算它，
                         // 稀有词基本不会走到后面的 hasToken；索引分析看的是整个 WHERE，顺序无关
-                        let mut parts = vec![substring_sql(t, text_index, b)];
+                        let mut parts = vec![substring_sql(t, mode, b)];
                         parts.extend(toks.iter().map(|tok| {
                             format!("hasToken(lower(message), {})", b.bind("String", tok))
                         }));
                         parts.join(" AND ")
                     }
-                    None => substring_sql(t, text_index, b),
+                    None => substring_sql(t, mode, b),
                 }
             }
             // 排除词一律保持子串语义：整词比子串窄，取反之后就变宽了，会漏掉本该排除的行；
-            // 而且否定条件本来就用不上 bloom filter（它只能证明「可能有」）
+            // 而且否定条件本来就用不上索引（它只能证明「可能有」）
             Expr::Not(inner) => match &**inner {
                 Expr::Term(t) => {
                     format!("positionCaseInsensitiveUTF8(message, {}) = 0", b.bind("String", t))
                 }
-                Expr::And(_) => format!("NOT ({})", inner.message_sql(text_index, b)),
-                other => format!("NOT {}", other.message_sql(text_index, b)),
+                Expr::And(_) => format!("NOT ({})", inner.message_sql(mode, b)),
+                other => format!("NOT {}", other.message_sql(mode, b)),
             },
             Expr::And(parts) => {
-                parts.iter().map(|p| p.message_sql(text_index, b)).collect::<Vec<_>>().join(" AND ")
+                parts.iter().map(|p| p.message_sql(mode, b)).collect::<Vec<_>>().join(" AND ")
             }
-            Expr::Or(parts) => {
-                // 全是普通词的 OR 用 multiSearchAny 一趟扫完，比 N 个 position 快；
-                // ClickHouse 限制一次最多 256 个 needle，超了退回 OR 链。
-                let plain: Option<Vec<String>> = parts
-                    .iter()
-                    .map(|p| match p {
-                        Expr::Term(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                match plain {
-                    Some(terms) if terms.len() <= 256 => format!(
-                        "multiSearchAnyCaseInsensitiveUTF8(message, {})",
-                        b.bind("Array(String)", terms)
-                    ),
-                    _ => {
-                        let inner = parts
-                            .iter()
-                            .map(|p| match p {
-                                Expr::And(_) => format!("({})", p.message_sql(text_index, b)),
-                                _ => p.message_sql(text_index, b),
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" OR ");
-                        format!("({inner})")
-                    }
+            Expr::Or(parts) => match or_as_multi_search(parts, mode) {
+                Some(terms) => format!(
+                    "multiSearchAnyCaseInsensitiveUTF8(message, {})",
+                    b.bind("Array(String)", terms)
+                ),
+                None => {
+                    let inner = parts
+                        .iter()
+                        .map(|p| match p {
+                            Expr::And(_) => format!("({})", p.message_sql(mode, b)),
+                            _ => p.message_sql(mode, b),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                    format!("({inner})")
                 }
-            }
+            },
         }
     }
 }
@@ -504,7 +580,8 @@ pub struct LogFilter {
 }
 
 impl LogFilter {
-    /// 子串搜索要不要交给 text 索引（`lower(message) LIKE`）：**只在没按服务筛的时候**。
+    /// 关键字的子串条件怎么写（[`SubstringMode`]）：LIKE 走 text 索引**只在既没按服务、也没按
+    /// trace_id 筛的时候**；按服务筛时写 position，再用中间 token 的 `hasAllTokens` 让索引先剪行。
     ///
     /// 排序键服务打头，按服务筛本身就把读量压到这个服务的那一段；这时再走 text 索引，LIKE 的
     /// 词典扫描要把整个 part 的词典过一遍，常见词还要把大片行号物化出来，反而更慢。线上
@@ -520,8 +597,30 @@ impl LogFilter {
     ///
     /// 不带服务时 position 一天就要读 266 GiB，在 100 GiB 的读量护栏下根本跑不完。
     /// pod / container 这类筛选不在排序键里、省不下读量，照「没按服务筛」算。
-    fn substring_via_text_index(&self) -> bool {
-        !self.dims.iter().any(|(column, values)| column == "service_name" && !values.is_empty())
+    ///
+    /// 带 trace_id 时 `idx_trace_id_text` 已经把范围压到这条链路的几万行，position 逐行扫这点
+    /// 数据很快；再走 LIKE，词典扫描的开销和行数无关，照样要过一遍。线上 2026-09-30 一条
+    /// 5 分钟窗口的 `trace_id` + `replaceKeyWords`，热缓存 position 5.5 万行 / 1.9 s，
+    /// LIKE 1.4 万行 / 13.6 s。
+    ///
+    /// 按服务筛时的 `hasAllTokens` 是按词直接查，不扫词典，常见词也不会变慢（见 [`inner_tokens`]）。
+    /// 线上 2026-09-30 一个分片热缓存：afanti-crawler-cmd-worker 14 小时 `JDC_MAIN_RETRY_CHECK`，
+    /// position 29.6 GiB / 6.1 s → 7.3 GiB / 1.8 s（中间 token 只有 `main` / `retry`）；dyopen 一天
+    /// `WX_RECOGNIZE_SHADOW`（`recognize`
+    /// 很常见）0.60 s → 0.52 s，hjk 一天 `job/account/detail` 0.23 s → 0.21 s。不带服务时不加：
+    /// LIKE 自己就用了中间 token，读的行数和加了一样。
+    fn substring_mode(&self) -> SubstringMode {
+        if self.trace_id.is_some() {
+            SubstringMode::Position
+        } else if self
+            .dims
+            .iter()
+            .any(|(column, values)| column == "service_name" && !values.is_empty())
+        {
+            SubstringMode::PositionWithTokens
+        } else {
+            SubstringMode::Like
+        }
     }
 
     /// 有没有按消息内容筛（关键字 / 正则）。这种查询没有索引可用，必须扫完整个时间范围。
@@ -550,16 +649,20 @@ impl LogFilter {
     }
 
     /// 哪些词被当成整词（而不是子串）匹配了——走了 token 索引的那些。语义比子串窄，页面要提示。
-    /// 分支必须和 [`Expr::message_sql`] 一致：只有正向的单词进索引，NOT 和 OR 组都不进。
+    /// 分支必须和 [`Expr::message_sql`] 一致：NOT 下面的不进索引，合成 multiSearchAny 的 OR 组也不进；
+    /// 拆成 OR 链的组里每一项照常判断。
     pub fn token_terms(&self) -> Vec<String> {
-        fn walk(e: &Expr, out: &mut Vec<String>) {
+        fn walk(e: &Expr, mode: SubstringMode, out: &mut Vec<String>) {
             match e {
                 Expr::Term(t) => {
-                    if token_needles(t).is_some() {
+                    if matched_as_token(t, mode) && !out.contains(t) {
                         out.push(t.clone());
                     }
                 }
-                Expr::And(parts) => parts.iter().for_each(|p| walk(p, out)),
+                Expr::And(parts) => parts.iter().for_each(|p| walk(p, mode, out)),
+                Expr::Or(parts) if or_as_multi_search(parts, mode).is_none() => {
+                    parts.iter().for_each(|p| walk(p, mode, out))
+                }
                 Expr::Not(_) | Expr::Or(_) => {}
             }
         }
@@ -568,7 +671,7 @@ impl LogFilter {
         }
         let mut out = Vec::new();
         if let Some(expr) = parse_query(&self.q) {
-            walk(&expr, &mut out);
+            walk(&expr, self.substring_mode(), &mut out);
         }
         out
     }
@@ -614,13 +717,13 @@ impl LogFilter {
             if self.regex {
                 clauses.push(format!("match(message, {})", b.bind("String", self.q.trim())));
             } else {
-                let text_index = self.substring_via_text_index();
+                let mode = self.substring_mode();
                 match parse_query(&self.q) {
                     // 顶层 AND 拆成多个子句，和别的条件一起平铺，SQL 好读
                     Some(Expr::And(parts)) => {
-                        clauses.extend(parts.iter().map(|p| p.message_sql(text_index, b)));
+                        clauses.extend(parts.iter().map(|p| p.message_sql(mode, b)));
                     }
-                    Some(expr) => clauses.push(expr.message_sql(text_index, b)),
+                    Some(expr) => clauses.push(expr.message_sql(mode, b)),
                     None => {}
                 }
             }
@@ -1187,12 +1290,116 @@ mod tests {
         };
         let sql = q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned();
         assert!(sql.contains("lower(message) LIKE"), "{sql}");
+        // 按 trace_id 筛时也不走：trace_id 索引已经把范围压得很小
+        let filter = LogFilter {
+            range: Some(range()),
+            q: "WX_RECOGNIZE_SHADOW".into(),
+            trace_id: Some("62ef683b4721e46391a6eeffc9cef3c9".into()),
+            ..Default::default()
+        };
+        let sql = q.search(&filter, Order::Desc, 10, 0).unwrap().sql().to_owned();
+        assert!(!sql.contains("LIKE"), "{sql}");
+        assert!(sql.contains("positionCaseInsensitiveUTF8(message"), "{sql}");
 
-        // 排除词、OR 的写法不变
+        // 排除词的写法不变；都能走索引的 OR 拆成 LIKE 链（见 substring_sql_follows_the_filter）
         let sql = query_of("-timeout").sql().to_owned();
         assert!(sql.contains("positionCaseInsensitiveUTF8(message, {p2:String}) = 0"), "{sql}");
         let sql = query_of("timeout OR refused").sql().to_owned();
-        assert!(sql.contains("multiSearchAnyCaseInsensitiveUTF8(message"), "{sql}");
+        assert!(
+            sql.contains(
+                "AND (lower(message) LIKE {p2:String} OR lower(message) LIKE {p3:String})"
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn inner_tokens_skip_the_edges() {
+        assert_eq!(inner_tokens("JDC_MAIN_RETRY_CHECK"), ["retry", "main"]);
+        assert_eq!(inner_tokens("job/account/detail"), ["account"]);
+        // 两头是分隔符时，挨着它的 token 也是完整的
+        assert_eq!(inner_tokens("/api/v1/user/"), ["user", "api"]);
+        // 没有中间 token、太短、带中文、够长走 hasToken 的都不收
+        for s in ["hit_area", "WX", "a_to_b", "解析_内容_x", "x_ac1062c800014a070cf02cd72b78e8ed_y"]
+        {
+            assert!(inner_tokens(s).is_empty(), "{s}");
+        }
+        // 中文不是分隔符：`推送x` 是一个 token，两边的 `_` 照样切
+        assert_eq!(inner_tokens("a_推送x_abc_b"), ["abc"]);
+    }
+
+    #[test]
+    fn substring_sql_follows_the_filter() {
+        let table = table();
+        let q = LogQueries { database: "logs", table: &table, max_message_chars: 16_384 };
+        let service = || vec![("service_name".to_owned(), vec!["dyopen".to_owned()])];
+        let sql_of = |text: &str, dims: Vec<(String, Vec<String>)>, trace_id: Option<&str>| {
+            let filter = LogFilter {
+                range: Some(range()),
+                q: text.into(),
+                dims,
+                trace_id: trace_id.map(Into::into),
+                ..Default::default()
+            };
+            q.search(&filter, Order::Desc, 10, 0).unwrap()
+        };
+
+        // 按服务筛：position 在前，中间 token 的 hasAllTokens 在后
+        let query = sql_of("JDC_MAIN_RETRY_CHECK", service(), None);
+        assert!(
+            query.sql().contains(
+                "positionCaseInsensitiveUTF8(message, {p3:String}) > 0 AND hasAllTokens(lower(message), {p4:Array(String)})"
+            ),
+            "{}",
+            query.sql()
+        );
+        assert!(query.params()[4].1.contains("retry"), "{:?}", query.params());
+        // 没有中间 token 就只有 position
+        let sql = sql_of("hit_area", service(), None).sql().to_owned();
+        assert!(!sql.contains("hasAllTokens"), "{sql}");
+        // 按 trace_id 筛：只有 position
+        let sql = sql_of("JDC_MAIN_RETRY_CHECK", vec![], Some("ab")).sql().to_owned();
+        assert!(!sql.contains("hasAllTokens") && !sql.contains("LIKE"), "{sql}");
+
+        // 不带服务：长数字按整词查，短数字、按服务筛时仍是子串
+        let query = sql_of("13625825825", vec![], None);
+        assert!(
+            query.sql().contains("AND hasToken(lower(message), {p2:String})"),
+            "{}",
+            query.sql()
+        );
+        assert_eq!(query.params()[2].1, "13625825825");
+        let sql = sql_of("1362582", vec![], None).sql().to_owned();
+        assert!(sql.contains("lower(message) LIKE"), "{sql}");
+        let sql = sql_of("13625825825", service(), None).sql().to_owned();
+        assert!(sql.contains("positionCaseInsensitiveUTF8(message"), "{sql}");
+        // 整词匹配要报给页面，按服务筛时不报
+        let filter = |text: &str, dims| LogFilter { q: text.into(), dims, ..Default::default() };
+        assert_eq!(filter("13625825825 超时", vec![]).token_terms(), ["13625825825"]);
+        assert!(filter("13625825825", service()).token_terms().is_empty());
+        assert_eq!(filter("timeout OR 13625825825", vec![]).token_terms(), ["13625825825"]);
+        assert!(filter("超时 OR 13625825825", vec![]).token_terms().is_empty());
+        // 排除词不受影响
+        let sql = sql_of("-13625825825", vec![], None).sql().to_owned();
+        assert!(sql.contains("positionCaseInsensitiveUTF8(message, {p2:String}) = 0"), "{sql}");
+
+        // 不带服务、每个词都能走索引的 OR 拆成 LIKE / hasToken 链
+        let sql = sql_of("listEbpAccount OR ebp/advertiser/list OR 13625825825", vec![], None)
+            .sql()
+            .to_owned();
+        assert!(
+            sql.contains(
+                "AND (lower(message) LIKE {p2:String} OR lower(message) LIKE {p3:String} OR hasToken(lower(message), {p4:String}))"
+            ),
+            "{sql}"
+        );
+        // 有一个词走不了索引，或者按服务筛，还是 multiSearchAny
+        for (text, dims) in
+            [("listEbpAccount OR 超时", vec![]), ("listEbpAccount OR timeout", service())]
+        {
+            let sql = sql_of(text, dims, None).sql().to_owned();
+            assert!(sql.contains("multiSearchAnyCaseInsensitiveUTF8(message"), "{text}: {sql}");
+        }
     }
 
     #[test]

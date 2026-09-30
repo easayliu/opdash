@@ -253,7 +253,7 @@ export function LogsPage() {
         {(search.isFetching || (follow && tail.status !== 'live')) && <Spinner className="size-4" />}
         {/* 整词模式是后端按词长自动切的，不提示的话「搜 id 的前半截搜不到」会很费解 */}
         {!stale && !!search.data?.token_terms?.length && (
-          <Hint text={`${search.data.token_terms.join('、')}：足够长的标识符按整词匹配，可利用 message 的 token 索引，查询明显更快。如需匹配片段，请使用正则模式（.*）。`}>
+          <Hint text={`${search.data.token_terms.join('、')}：足够长的标识符、不带服务时 8 位以上的数字按整词匹配，可利用 message 的 token 索引，查询明显更快。如需匹配片段，请使用正则模式（.*）。`}>
             <span
               className="text-2xs text-muted-fg"
             >
