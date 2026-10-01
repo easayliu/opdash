@@ -48,7 +48,8 @@
 * **没按服务、也没按 trace_id 筛**：4 个字符以上的纯 ASCII 词翻译为 `lower(message) LIKE '%词%'`（小写、`%` / `_` / `\` 转义），走下面「text 索引」一节的倒排索引；8 位以上的纯数字按整词 `hasToken` 查。
 * **按服务筛**：`positionCaseInsensitiveUTF8(message, ...)`，扫描时间范围内这个服务的全部行；词里有两侧都被分隔符切开的中间 token 时，再 AND 一个 `hasAllTokens(lower(message), [中间 token])` 让索引先剪行，结果不变。
 * **按 trace_id 筛**：只写 `positionCaseInsensitiveUTF8`，trace_id 索引已经把范围压到几万行。
-* 中文、3 个字符以下的词一律 `positionCaseInsensitiveUTF8`。
+* **4 个汉字以上的词**（带 trace_id 时除外）：不管按不按服务筛，都写 `lowerUTF8(message) LIKE '%词%'`，走下面「中文索引」一节的 `idx_message_cjk`。
+* 更短的中文、3 个字符以下的 ASCII 词一律 `positionCaseInsensitiveUTF8`。
 
 全部由词组成的 OR 合并为一个 `multiSearchAnyCaseInsensitiveUTF8(message, [...])`，一次扫描完成，不走索引；例外是没按服务筛、每个词都能走索引时，拆成 `LIKE … OR LIKE …` 的链。
 
@@ -81,10 +82,21 @@
 * **按服务筛时加中间 token 的 `hasAllTokens`**：它按词直接查，不扫词典，常见词也不会变慢。只取两侧都被分隔符切开的 token（`JDC_MAIN_RETRY_CHECK` 取 `main`、`retry`，不取可能是更长 token 一截的 `jdc` / `check`），所以和 position 严格等价。afanti-crawler-cmd-worker 14 小时 `JDC_MAIN_RETRY_CHECK`：29.6 GiB / 6.1 s → 7.3 GiB / 1.8 s（把两头的 `jdc` / `check` 也算上能到 0 行 / 0.12 s，但那样会漏行，不取）；中间 token 很常见时持平（dyopen `WX_RECOGNIZE_SHADOW` 0.60 → 0.52 s）。不带服务时不加：LIKE 自己就用了中间 token，读的行数一样。
 * **OR 拆成 LIKE 链**：`multiSearchAny` 用不上 `lower(message)` 上的索引（改写成 `multiSearchAny(lower(message), …)` 也剪不掉）。一天不带服务 `listEbpAccount OR ebp/advertiser/list`：multiSearchAny 88.8 GiB / 92 s，LIKE OR LIKE 3.0 GiB / 3.7 s。
 
-* **中文用不上**：不是分词的问题（`splitByNonAlpha` 下 `检查主播对话`、`EP推送` 都是词典里完整的 token），而是 LIKE 的词典扫描只取模式里的字母数字部分（`text_index_like_min_pattern_length` 的说明：「Minimum length of the alphanumeric needle in a LIKE/ILIKE pattern」），中文不算。`EXPLAIN` 实测中文短语和 `EP推送-` 一个 granule 都剪不掉。所以只有纯 ASCII 的词才写 LIKE，见 `uses_text_index`。
+* **中文用不上**：不是分词的问题（`splitByNonAlpha` 下 `检查主播对话`、`EP推送` 都是词典里完整的 token），而是 LIKE 的词典扫描只取模式里的字母数字部分（`text_index_like_min_pattern_length` 的说明：「Minimum length of the alphanumeric needle in a LIKE/ILIKE pattern」），中文不算。`EXPLAIN` 实测中文短语和 `EP推送-` 一个 granule 都剪不掉。所以只有纯 ASCII 的词才写 `lower(message) LIKE`，见 `uses_text_index`；中文另有一个索引，见下一节。
 * **3 个字符以下不写 LIKE**：ClickHouse 的 `text_index_like_min_pattern_length` 默认 4，更短的模式不查索引，LIKE 只会比 `position` 多算一遍 `lower`。
 * **代价**：索引约为 `message` 列压缩后大小的 62%（一天一个分片 6.95 GiB 对 11.2 GiB）；物化一天的分区 7900 万行约 6.5 分钟、峰值 1.3 GiB；加索引后写入侧的合并耗时和 CPU 几乎不变（138 → 140 ms / 次）。
 * **大小写**：`lower` 只折 ASCII，和只对 ASCII 词写 LIKE 对得上；原来 `positionCaseInsensitiveUTF8` 的 Unicode 大小写折叠对 ASCII 词没有区别。
+
+### 中文索引
+
+`splitByNonAlpha` 只按 ASCII 非字母数字切词，汉字和全角标点都算 token 字符（`抖音云直播客流数据回调，roomid` 是一个 token），中文检索用不上 `idx_message_text`。2026-09-30 起另建 `INDEX idx_message_cjk lowerUTF8(message) TYPE text(tokenizer = 'asciiCJK') GRANULARITY 100000000`，4 个汉字以上的词写 `lowerUTF8(message) LIKE '%词%'`（`CJK_LIKE_MIN_CHARS`）。选型依据（分片 0 的测试表，结果条数都和 position 对照）：
+
+* **分词器**：`asciiCJK` 一个汉字一个 token，按字查倒排表后逐行核对，27 组计数全部和 position 一致。官方对中文推荐的 `chinese`（jieba）和 `icu('zh')` 剪得更多，但**会漏行**（`老板` 少 454 条、`超时` 少 2 条）：它们按上下文切词，同一个词在日志里可能被切成别的样子。
+* **为什么是 `lowerUTF8` 不是 `lower`**：同一个表达式只能有一个 text 索引（`Column lower(message) must not have more than one text index`）；换个表达式两个索引互不干扰，ASCII 的 `hasToken` / LIKE / `hasAllTokens` 在双索引表上计数和读行数与单索引表一致。也不能用 `asciiCJK` 替换 `splitByNonAlpha`：它按 Unicode 词边界切 ASCII，`jdc_main_retry_check`、`msgid:ac1062c8`、`user.name` 各是一个 token，上面整词和中间 token 的规则全会错。
+* **效果**（一整天 7900 万行、不带服务，position 固定 88 GiB / 14~17 s）：`线索推送-判定留痕落库失败` 0.2 GiB / 0.45 s，`请求失败` 5.7 GiB / 1.6 s，`抖音云直播客流数据回调` 18.6 GiB / 4.7 s，`底价单已发送` 40.8 GiB / 9.5 s。按服务筛时 7 组从没变慢（持平到快 6 倍）：汉字按字精确查，不像 ASCII 那样扫整个词典。
+* **4 个字的门槛**：短词的字太常见，剪不掉多少行，LIKE 反而更慢——`老板` 23 s、`超时` 33 s、`不存在` 26 s、`已发送` 17 s；3 个字有快有慢；4 个字以上没有一组变慢（最差 `发送成功` 16.4 → 14.9 s）。
+* **代价**：索引一天 6.9 GiB / 分片（约为 message 压缩后的 61%，和 `idx_message_text` 相当），31 天约 +215 GiB / 分片。
+* **上线顺序**：必须先在三台加索引、按分区物化完，再发这一版 opdash。没有索引时 `lowerUTF8(message) LIKE` 照样全扫，还多算一遍 `lowerUTF8`。
 
 ### token 索引
 

@@ -11,7 +11,9 @@
 //! 全表不带时间范围按 trace_id 查只读几千行）；`message` 上 `idx_message_text`（建在
 //! `lower(message)` 上，`hasToken` / `hasAllTokens` 和不带服务、不带 trace_id 时的 ASCII 子串 LIKE
 //! 用得上，见 [`token_needles`]、[`LogFilter::substring_mode`]）。**`span_id` 上没有任何索引**；
-//! 中文关键字仍是逐行扫时间范围内（这个服务）的数据。所以时间范围仍是第一道闸，按 span_id 查尤其如此。
+//! `lowerUTF8(message)` 上还有 `idx_message_cjk`（`asciiCJK` 分词器，一个汉字一个 token），4 个汉字以上的
+//! 中文关键字用它（[`CJK_LIKE_MIN_CHARS`]）；更短的中文仍是逐行扫时间范围内（这个服务）的数据。
+//! 所以时间范围仍是第一道闸，按 span_id 查尤其如此。
 
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +109,27 @@ fn is_digits_token(term: &str) -> bool {
     term.len() >= DIGITS_TOKEN_MIN_LEN && term.bytes().all(|c| c.is_ascii_digit())
 }
 
+/// 中文子串走 `idx_message_cjk` 的最少汉字数。
+///
+/// `idx_message_cjk` 是 `lowerUTF8(message)` 上的 `text(tokenizer = 'asciiCJK')`：每个汉字单独成
+/// token，`lowerUTF8(message) LIKE '%…%'` 按字查倒排表再逐行核对，结果和 position 严格一致（线上
+/// 2026-09-30 一个分片一整天 27 组对照计数全部相同）。汉字按字精确查，不像 ASCII 那样扫整个词典，
+/// 所以按服务筛时也不会变慢（7 组持平到快 6 倍）。
+///
+/// 短词的字太常见，剪不掉多少行，LIKE 反而比 position 慢：一天不带服务，position 固定 88 GiB /
+/// 15 s，`老板` 23 s、`超时` 33 s、`不存在` 26 s；4 个字以上没有一组变慢（最差 `发送成功` 16.4 →
+/// 14.9 s，`请求失败` 16.1 → 1.6 s，`线索推送-判定留痕落库失败` 13.7 → 0.45 s）。
+const CJK_LIKE_MIN_CHARS: usize = 4;
+
+fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+}
+
+/// 这个词的子串搜索能不能交给 `idx_message_cjk`，见 [`CJK_LIKE_MIN_CHARS`]。
+fn uses_cjk_index(term: &str) -> bool {
+    term.chars().filter(|&c| is_cjk(c)).count() >= CJK_LIKE_MIN_CHARS
+}
+
 /// 中间 token 最短几个字符：`to` / `id` 这种太常见，倒排表太长，拿来当前置条件不划算。
 const INNER_TOKEN_MIN_LEN: usize = 3;
 
@@ -136,6 +159,7 @@ fn inner_tokens(term: &str) -> Vec<String> {
 }
 
 /// 关键字的子串条件怎么写，按这次检索筛了什么来定，见 [`LogFilter::substring_mode`]。
+/// 4 个汉字以上的词在前两种模式下都写 `lowerUTF8(message) LIKE`，见 [`CJK_LIKE_MIN_CHARS`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubstringMode {
     /// 没按服务、也没按 trace_id 筛：ASCII 词写 `lower(message) LIKE`，长数字写 `hasToken`
@@ -147,15 +171,19 @@ enum SubstringMode {
 }
 
 /// `lower(message) LIKE` 的模式：小写（`lower` 只折 ASCII，和 [`uses_text_index`] 只收 ASCII
-/// 对得上），`\` / `%` / `_` 转义成字面量，两头加 `%`。
-fn like_pattern(term: &str) -> String {
+/// 对得上；`utf8` 为真时按 Unicode 折，对应 `lowerUTF8`），`\` / `%` / `_` 转义成字面量，两头加 `%`。
+fn like_pattern(term: &str, utf8: bool) -> String {
     let mut out = String::with_capacity(term.len() + 4);
     out.push('%');
     for c in term.chars() {
         if matches!(c, '\\' | '%' | '_') {
             out.push('\\');
         }
-        out.push(c.to_ascii_lowercase());
+        if utf8 {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c.to_ascii_lowercase());
+        }
     }
     out.push('%');
     out
@@ -164,7 +192,10 @@ fn like_pattern(term: &str) -> String {
 /// 大小写不敏感的子串条件，写法见 [`SubstringMode`]。
 fn substring_sql(term: &str, mode: SubstringMode, b: &mut Bindings) -> String {
     if mode == SubstringMode::Like && uses_text_index(term) {
-        return format!("lower(message) LIKE {}", b.bind("String", like_pattern(term)));
+        return format!("lower(message) LIKE {}", b.bind("String", like_pattern(term, false)));
+    }
+    if mode != SubstringMode::Position && uses_cjk_index(term) {
+        return format!("lowerUTF8(message) LIKE {}", b.bind("String", like_pattern(term, true)));
     }
     let position = format!("positionCaseInsensitiveUTF8(message, {}) > 0", b.bind("String", term));
     let toks = if mode == SubstringMode::PositionWithTokens { inner_tokens(term) } else { vec![] };
@@ -186,7 +217,8 @@ fn matched_as_token(term: &str, mode: SubstringMode) -> bool {
 /// 全是普通词的 OR 用 multiSearchAny 一趟扫完，比 N 个 position 快；ClickHouse 限制一次最多
 /// 256 个 needle，超了退回 OR 链。
 ///
-/// 例外：不带服务、每个词都能走 text 索引时拆成 OR 链，每个词各写各的 LIKE / hasToken。
+/// 例外：不带服务、每个词都能走 text 索引（ASCII 或 4 个汉字以上）时拆成 OR 链，每个词各写各的
+/// LIKE / hasToken。
 /// multiSearchAny 用不上索引（建在 `lower(message)` 上的索引认不出 CaseInsensitive 版本，改成
 /// `multiSearchAny(lower(message), …)` 实测也剪不掉）：线上 2026-09-30 一个分片一天，
 /// `listEbpAccount OR ebp/advertiser/list` multiSearchAny 88.8 GiB / 92 s，LIKE OR LIKE
@@ -199,7 +231,8 @@ fn or_as_multi_search(parts: &[Expr], mode: SubstringMode) -> Option<Vec<String>
             _ => None,
         })
         .collect::<Option<_>>()?;
-    let indexed = mode == SubstringMode::Like && terms.iter().all(|t| uses_text_index(t));
+    let indexed = mode == SubstringMode::Like
+        && terms.iter().all(|t| uses_text_index(t) || uses_cjk_index(t));
     (terms.len() <= 256 && !indexed).then_some(terms)
 }
 
@@ -1259,7 +1292,7 @@ mod tests {
         assert_eq!(query.params()[2].1, r"%wx\\_recognize\\_shadow%");
 
         // 通配符和反斜杠都当字面量
-        assert_eq!(like_pattern(r"50%_a\b"), r"%50\%\_a\\b%");
+        assert_eq!(like_pattern(r"50%_a\b", false), r"%50\%\_a\\b%");
 
         // 3 个字符以下、中文：ClickHouse 不查索引 / 分词进不去，保持 position
         for s in ["abc", "超时了"] {
@@ -1393,6 +1426,27 @@ mod tests {
             ),
             "{sql}"
         );
+        // 4 个汉字以上走 idx_message_cjk：不带服务、按服务筛都写 lowerUTF8 LIKE，按 trace_id 筛不写
+        let query = sql_of("LLM候选复核", vec![], None);
+        assert!(query.sql().contains("AND lowerUTF8(message) LIKE {p2:String}"), "{}", query.sql());
+        assert_eq!(query.params()[2].1, "%llm候选复核%");
+        let sql = sql_of("抖音云直播_回调", service(), None).sql().to_owned();
+        assert!(sql.contains("AND lowerUTF8(message) LIKE {p3:String}"), "{sql}");
+        let sql = sql_of("抖音云直播客流", vec![], Some("ab")).sql().to_owned();
+        assert!(!sql.contains("LIKE"), "{sql}");
+        // 3 个汉字以下常见字太多，保持 position
+        for text in ["不存在", "llm候选"] {
+            let sql = sql_of(text, vec![], None).sql().to_owned();
+            assert!(!sql.contains("LIKE"), "{text}: {sql}");
+        }
+        let sql = sql_of("listEbpAccount OR 请求失败", vec![], None).sql().to_owned();
+        assert!(
+            sql.contains(
+                "AND (lower(message) LIKE {p2:String} OR lowerUTF8(message) LIKE {p3:String})"
+            ),
+            "{sql}"
+        );
+
         // 有一个词走不了索引，或者按服务筛，还是 multiSearchAny
         for (text, dims) in
             [("listEbpAccount OR 超时", vec![]), ("listEbpAccount OR timeout", service())]
@@ -1437,9 +1491,12 @@ mod tests {
         ] {
             let sql = sql_of(q_str);
             assert!(!sql.contains("hasToken"), "{q_str} 不该走索引: {sql}");
-            // 纯 ASCII 的子串交给 text 索引（lower(message) LIKE），中文仍是 position
+            // 纯 ASCII 的子串交给 text 索引（lower(message) LIKE），4 个汉字以上交给
+            // idx_message_cjk（lowerUTF8(message) LIKE），其余是 position
             if q_str.is_ascii() {
                 assert!(sql.contains("lower(message) LIKE {p2:String}"), "{q_str}: {sql}");
+            } else if uses_cjk_index(q_str) {
+                assert!(sql.contains("lowerUTF8(message) LIKE {p2:String}"), "{q_str}: {sql}");
             } else {
                 assert!(sql.contains("positionCaseInsensitiveUTF8(message"), "{q_str}: {sql}");
             }
